@@ -1,0 +1,40 @@
+#!/bin/sh
+# wg-split-disable — emergency suspend.
+#
+# Removes the wg ip rule + flushes route table 200 -> all LAN traffic flows via
+# WAN. Does NOT remove nft chains/sets, the service, or scripts. The failover
+# service re-enables policy on its next tick unless you stop it first:
+#   /etc/init.d/wg-split stop
+#
+# Self-contained defaults so it works even if UCI is broken.
+set -u
+
+LOG_TAG="wg-split"
+log() { logger -t "$LOG_TAG" "$*"; }
+
+WG_TABLE="200"
+WG_RULE_PRIO="999"
+DOH_IPS="8.8.8.8 8.8.4.4 1.1.1.1 1.0.0.1 9.9.9.9 149.112.112.112"
+STATE_FILE="/var/run/wg-split-state"
+
+log "DISABLE: tearing down split routing"
+
+while ip -4 rule del priority "$WG_RULE_PRIO" >/dev/null 2>&1; do :; done
+ip -4 route flush table "$WG_TABLE" >/dev/null 2>&1 || true
+
+# drop DoH pins from every wg-split endpoint iface (best effort)
+for _if in $(uci -q get wg-split.@endpoint[*].iface 2>/dev/null; \
+             uci show wg-split 2>/dev/null | sed -n "s/.*\.iface='\([^']*\)'/\1/p"); do
+    for _ip in $DOH_IPS; do ip -4 route del "$_ip" dev "$_if" >/dev/null 2>&1 || true; done
+done
+
+printf 'wan\n' > "$STATE_FILE"
+
+cat <<EOF
+Split routing disabled. Current rules:
+$(ip -4 rule show | sed 's/^/  /')
+
+The wg-split service will re-enable as long as a tunnel is healthy.
+To stop it: /etc/init.d/wg-split stop
+To fully uninstall: wg-split-uninstall  (or: apk del wg-split)
+EOF

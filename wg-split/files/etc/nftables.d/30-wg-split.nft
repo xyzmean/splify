@@ -1,0 +1,15 @@
+# wg-split canonical ruleset. Installed at /etc/nftables.d/30-wg-split.nft.
+# fw4 inline-includes this INSIDE `table inet fw4 { ... }` — DO NOT wrap.
+#
+# This is only the install-time SEED (ipsum set, no chains = all-WAN, safe).
+# wg-split-apply REGENERATES this same file from UCI (/etc/config/wg-split),
+# adding the chains (wg_split_endpoint_mark_prerouting @ mangle,
+# wg_split_ipsum_mark_prerouting @ mangle+1). The ipsum set is populated live by
+# wg-split-update-ipsum / wg-split-failover (daily refresh).
+
+set wg_split_ipsum_v4 {
+    type ipv4_addr
+    flags interval
+    auto-merge
+    size 65536
+}

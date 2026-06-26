@@ -1,0 +1,63 @@
+name: Release
+
+# Manual release. Actions tab -> "Release" -> Run workflow, enter a version like
+# 1.4.0. Builds the .apk packages via Dockerfile-apk (buildx layer cache keeps it
+# to a few minutes) and publishes a tagged GitHub release with them attached.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Версия релиза (например 1.4.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build packages in OpenWrt SDK
+        uses: docker/build-push-action@v6
+        with:
+          file: ./Dockerfile-apk
+          context: .
+          load: true
+          tags: wg-split:rel
+          build-args: |
+            VERSION=${{ inputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract built packages
+        run: |
+          mkdir -p release
+          id=$(docker create wg-split:rel)
+          docker cp "$id:/builder/bin/packages/." ./out/
+          docker rm "$id"
+          find ./out \( -name 'wg-split*.apk' -o -name 'luci-app-wg-split*.apk' \
+                        -o -name 'luci-i18n-wg-split-*.apk' \) \
+               -exec cp -v {} release/ \;
+          echo "--- shipped ---"; ls -l release
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: wg-split v${{ inputs.version }}
+          prerelease: false
+          make_latest: true
+          files: release/*.apk
+          body: |
+            Релиз wg-split v${{ inputs.version }}.
+
+            Установка на роутер (OpenWrt 25.12+ / apk):
+            ```
+            apk add ./wg-split-*.apk ./luci-app-wg-split-*.apk ./luci-i18n-wg-split-*.apk
+            ```

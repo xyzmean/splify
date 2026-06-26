@@ -1,0 +1,59 @@
+#!/bin/sh
+# wg-split-status — print runtime snapshot for debugging.
+
+# No `set -u`: OpenWrt's config_* helpers (sourced below) aren't nounset-safe.
+. /usr/local/lib/wg-split/common.sh
+
+echo "=== wg-split status ==="
+echo "MODE          : $MODE"
+echo "LAN           : $LAN_IFACE -> ${LAN_CIDR:-(none detected)}"
+echo "STATE         : $(read_state)"
+echo "ACTIVE_IFACE  : $(active_iface)"
+echo "ENDPOINTS     : $(endpoints_by_priority)"
+echo "FAIL_COUNTER  : $(fail_get)"
+echo
+
+echo "=== ip rules ==="
+ip -4 rule show | grep -E "($WG_RULE_PRIO|$ANTI_LOOP_PRIO):" || echo "(no wg-split rules)"
+echo
+
+echo "=== route table $WG_TABLE ==="
+ip -4 route show table "$WG_TABLE" 2>/dev/null || echo "(table empty)"
+echo
+
+echo "=== nft sets ==="
+printf 'ipsum (%s %s): %s entries\n' "$IPSUM_TABLE" "$IPSUM_SET" \
+    "$(set_count "$IPSUM_TABLE" "$IPSUM_SET")"
+printf 'ru    (%s %s): %s entries\n' "$RU_TABLE" "$RU_SET" \
+    "$(set_count "$RU_TABLE" "$RU_SET")"
+printf 'noz   (%s %s): %s entries\n' "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET" \
+    "$(set_count "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET")"
+echo
+
+echo "=== nft mangle chains ==="
+nft list chain inet fw4 wg_split_endpoint_mark_prerouting 2>/dev/null \
+    | sed 's/^/  /' || echo "(endpoint chain missing)"
+nft list chain inet fw4 wg_split_ipsum_mark_prerouting 2>/dev/null \
+    | sed 's/^/  /' || echo "(ipsum chain missing)"
+echo
+
+echo "=== endpoint firewall zones ==="
+for _if in $(endpoints_by_priority); do
+    if _z="$(fw_zone_of_net "$_if")"; then
+        printf '  %-8s zone=%-8s masq=%s\n' "$_if" "$_z" \
+            "$(fw_zone_has_masq "$_z" && echo yes || echo NO)"
+    else
+        printf '  %-8s zone=NONE  (fw4 will REJECT LAN->tunnel forwarding)\n' "$_if"
+    fi
+done
+echo
+
+echo "=== per-iface health (ping -I via targets: $HEALTH_TARGETS) ==="
+for _if in $(endpoints_by_priority); do
+    _hs="$(wg_handshake_age "$_if")"
+    _ok=FAIL
+    for _t in $HEALTH_TARGETS; do
+        ping -c 1 -W "$HEALTH_PING_TIMEOUT" -I "$_if" -q "$_t" >/dev/null 2>&1 && { _ok=OK; break; }
+    done
+    printf '  %-8s handshake=%ss ping=%s\n' "$_if" "$_hs" "$_ok"
+done

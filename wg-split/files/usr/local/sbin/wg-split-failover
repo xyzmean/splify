@@ -1,0 +1,241 @@
+#!/bin/sh
+# wg-split-failover — multi-interface priority failover + health/route manager.
+#
+# Replaces the old single-tunnel watchdog. Endpoints are existing awg/wg
+# interfaces listed in UCI (`config endpoint`, lowest priority number wins).
+#
+# Each tick walks the endpoints best-first and picks the first HEALTHY one,
+# probing candidates NON-disruptively (`ifup` a parallel iface, then
+# `ping -I <iface>` through it — the live path is never torn down to test others):
+#   1. current iface healthy            -> keep it
+#   2. current iface stuck              -> RESTART it first (ifdown/ifup), recheck
+#   3. a higher-priority iface healthy  -> switch up to it (recover toward #1)
+#   4. some lower-priority iface healthy -> fail over down to it
+#   5. no tunnel healthy + zapret avail -> WAN fallback, pull VPN IPs OUT of
+#      nozapret so zapret DPI-bypasses them on WAN (state "zapret")
+#   6. no tunnel + no/failing zapret     -> plain WAN fallback (state "wan")
+#      (killswitch=1 instead blackholes table 200 so policy traffic never leaks)
+#
+#   wg-split-failover            one pass (also called by wg-split-apply)
+#   wg-split-failover --daemon   apply once, then loop every UCI `interval`
+# No `set -u`: OpenWrt's config_* helpers (sourced below) aren't nounset-safe.
+. /usr/local/lib/wg-split/common.sh
+
+# ---- health probing --------------------------------------------------------
+# iface_present / zapret_running / zapret_available / health_ping live in common.sh.
+
+# WAN reachability (default route / no iface bind) — for zapret vs wan rung.
+wan_healthy() {
+    curl --max-time "$HEALTH_CURL_TIMEOUT" -fsS -o /dev/null "$HEALTH_CURL_URL" >/dev/null 2>&1
+}
+
+# wait for an endpoint to report liveness (wg = handshake age via ep_liveness).
+wait_handshake() {
+    _i=0
+    while [ "$_i" -lt "$HS_WAIT" ]; do
+        [ "$(ep_liveness "$1")" -lt 150 ] 2>/dev/null && return 0
+        sleep 1; _i=$((_i + 1))
+    done
+    return 1
+}
+
+iface_healthy() {
+    ep_present "$1" || return 1
+    # health_ping is authoritative AND wakes an idle tunnel (its first packet
+    # triggers a handshake), so don't pre-reject on a stale handshake age — a
+    # keepalive-less idle peer would otherwise look dead though it still works.
+    health_ping "$1"
+}
+
+restart_iface() {   # WG often unsticks on a plain restart — do this FIRST
+    log "restarting stuck iface $1"
+    journal restart "$1" "$1" "stuck endpoint restarted"
+    ep_restart "$1"
+    wait_handshake "$1"
+}
+
+bring_up() {        # bring a candidate up in parallel (no list/route changes yet)
+    ep_bringup "$1"
+    wait_handshake "$1"
+}
+
+# ---- zapret -----------------------------------------------------------------
+ensure_zapret_running() {
+    [ "$ZAPRET_ENABLED" = "1" ] || return 0
+    [ -x "$ZAPRET_INIT" ] || return 0
+    "$ZAPRET_INIT" enabled >/dev/null 2>&1 || "$ZAPRET_INIT" enable >/dev/null 2>&1 || true
+    zapret_running || "$ZAPRET_INIT" start >/dev/null 2>&1 || true
+}
+# include_vpn=1: VPN IPs stay IN nozapret (tunneled -> zapret leaves them alone)
+# include_vpn=0: VPN IPs leave nozapret -> zapret DPI-bypasses them on WAN
+rebuild_nozapret() {
+    [ "$ZAPRET_ENABLED" = "1" ] || return 0
+    zapret_available || return 0
+    [ -x /usr/local/sbin/wg-split-sync-nozapret ] || return 1
+    NOZAPRET_INCLUDE_VPN="$1" /usr/local/sbin/wg-split-sync-nozapret >/dev/null 2>&1
+}
+
+# ---- ipsum set self-heal (live set drained by a fw4 reload) -----------------
+ensure_ipsum() {
+    [ "$IPSUM_ENABLED" = "1" ] || return 0
+    [ -s "$IPSUM_NFT_FILE" ] || { warn "ipsum nft file missing: $IPSUM_NFT_FILE"; return 1; }
+    _cnt=$(set_count "$IPSUM_TABLE" "$IPSUM_SET")
+    [ "${_cnt:-0}" -ge "$IPSUM_MIN_COUNT" ] && return 0
+    log "ipsum set has $_cnt (<$IPSUM_MIN_COUNT), reloading"
+    nft -f "$IPSUM_NFT_FILE" 2>/dev/null && return 0
+    warn "ipsum reload failed"; return 1
+}
+
+# ru set self-heal — only relevant in full mode, where RU_SET is defined and
+# carries the direct exception; replay it if a fw4 reload drained the live set.
+ensure_ru() {
+    [ "$MODE" = "full" ] && [ "$RU_ENABLED" = "1" ] || return 0
+    [ -s "$RU_NFT_FILE" ] || return 0
+    nft list set "$RU_TABLE" "$RU_SET" >/dev/null 2>&1 || return 0
+    _cnt=$(set_count "$RU_TABLE" "$RU_SET")
+    [ "${_cnt:-0}" -ge "$RU_MIN_COUNT" ] && return 0
+    nft -f "$RU_NFT_FILE" 2>/dev/null || true
+}
+
+# ---- routing ----------------------------------------------------------------
+common_rules() {
+    ensure_rule "$ANTI_LOOP_PRIO" "fwmark $ANTI_LOOP_MARK/$ANTI_LOOP_MASK lookup main" \
+        ip -4 rule add fwmark "$ANTI_LOOP_MARK/$ANTI_LOOP_MASK" table main priority "$ANTI_LOOP_PRIO"
+    ensure_rule "$WG_RULE_PRIO" "fwmark $WG_MARK/$WG_MARK_MASK lookup $WG_TABLE" \
+        ip -4 rule add fwmark "$WG_MARK/$WG_MARK_MASK" table "$WG_TABLE" priority "$WG_RULE_PRIO"
+}
+
+clear_doh() {
+    for _if in $(endpoints_by_priority); do
+        for _ip in $DOH_IPS; do ip -4 route del "$_ip" dev "$_if" >/dev/null 2>&1 || true; done
+    done
+}
+
+set_vpn() {   # $1 = healthy iface to carry policy-VPN traffic
+    _if="$1"; _src="$(iface_src_ip "$_if")"
+    common_rules
+    ip -4 route replace default dev "$_if" table "$WG_TABLE"
+    for _ip in $DOH_IPS; do pin_route "$_ip" "$_if" "$_src"; done
+    ensure_ipsum
+    ensure_ru
+    # start zapret FIRST so the inet zapret/nozapret set exists before we sync it
+    # (a sync against a not-yet-created set fails silently and leaves a stale set)
+    ensure_zapret_running
+    rebuild_nozapret 1
+    write_state "vpn:$_if"; fail_reset
+}
+
+# Fail CLOSED: blackhole table 200 so marked policy traffic is dropped (not
+# leaked to WAN) during the ifdown/handshake window of a restart/probe. Only used
+# under killswitch; set_vpn lifts it by replacing the default route on recovery.
+fail_closed() {
+    common_rules
+    ip -4 route replace blackhole default table "$WG_TABLE"
+}
+
+degrade() {   # no tunnel healthy
+    if [ "$KILLSWITCH" = "1" ]; then
+        common_rules
+        ip -4 route replace blackhole default table "$WG_TABLE"
+        clear_doh
+        ensure_zapret_running
+        write_state "killswitch"
+        return
+    fi
+    ensure_rule "$ANTI_LOOP_PRIO" "fwmark $ANTI_LOOP_MARK/$ANTI_LOOP_MASK lookup main" \
+        ip -4 rule add fwmark "$ANTI_LOOP_MARK/$ANTI_LOOP_MASK" table main priority "$ANTI_LOOP_PRIO"
+    delete_rule_prio "$WG_RULE_PRIO"
+    ip -4 route flush table "$WG_TABLE" >/dev/null 2>&1 || true
+    clear_doh
+    if [ "$ZAPRET_ENABLED" = "1" ] && zapret_available; then
+        ensure_zapret_running
+        # Only claim the zapret rung if the nozapret sync SUCCEEDED (else the VPN
+        # prefixes stay exempt from bypass) AND nfqws is actually running — mere
+        # availability (init/binary present) doesn't mean it came up.
+        if rebuild_nozapret 0 && zapret_running && wan_healthy; then
+            write_state "zapret"
+        else
+            write_state "wan"
+        fi
+    else
+        write_state "wan"
+    fi
+}
+
+# ---- one failover pass ------------------------------------------------------
+tick() {
+    _ordered="$(endpoints_by_priority)"
+    [ -n "$_ordered" ] || { warn "no endpoints configured"; degrade; return; }
+
+    _cur=""; case "$(read_state)" in vpn:*) _cur="$(active_iface)" ;; esac
+
+    # killswitch: blackhole table 200 BEFORE any disruptive ifdown/probe whenever
+    # we don't already have a healthy active tunnel — covers a stuck current iface
+    # AND a cold start / previously-down state (_cur empty), so nothing leaks to
+    # WAN during the probe window. set_vpn lifts it on recovery.
+    if [ "$KILLSWITCH" = "1" ]; then
+        if [ -z "$_cur" ] || ! iface_healthy "$_cur"; then fail_closed; fi
+    fi
+
+    _best=""
+    for _if in $_ordered; do
+        if [ "$_if" = "$_cur" ]; then
+            iface_healthy "$_if" && { _best="$_if"; break; }
+            restart_iface "$_if"                       # stuck -> restart FIRST
+            iface_healthy "$_if" && { _best="$_if"; break; }
+        else
+            bring_up "$_if"                            # parallel probe
+            iface_healthy "$_if" && { _best="$_if"; break; }
+        fi
+    done
+
+    _prev="$(read_state)"
+    if [ -n "$_best" ]; then
+        set_vpn "$_best"
+        if [ "$_prev" != "vpn:$_best" ]; then
+            log "active tunnel -> $_best (mode $MODE)"
+            # journal the transition (backs the LuCI timeline). Coming from another
+            # tunnel is a `switch`; coming from a degraded path (wan/zapret/kill/cold)
+            # is a `recover`.
+            case "$_prev" in
+                vpn:*) journal switch  "${_prev#vpn:}" "$_best" "failover" ;;
+                *)     journal recover "${_prev:-none}" "$_best" "tunnel back up" ;;
+            esac
+        fi
+    else
+        _n=$(fail_inc)
+        degrade
+        _now="$(read_state)"
+        if [ "$_prev" != "$_now" ]; then
+            log "all tunnels down (fail #$_n) -> $_now"
+            case "$_now" in
+                killswitch) journal killswitch      "${_prev:-none}" killswitch "all tunnels down (fail #$_n)" ;;
+                zapret)     journal zapret_fallback  "${_prev:-none}" zapret     "all tunnels down (fail #$_n)" ;;
+                wan)        journal wan_fallback     "${_prev:-none}" wan        "all tunnels down (fail #$_n)" ;;
+            esac
+        fi
+    fi
+}
+
+# ---- entry ------------------------------------------------------------------
+if [ "${1:-}" = "--daemon" ]; then
+    [ -x /usr/local/sbin/wg-split-apply ] && /usr/local/sbin/wg-split-apply >/dev/null 2>&1 || true
+    # First-run / lost-list self-heal: a list that was never downloaded (file
+    # missing) gets fetched now in the background instead of waiting for the
+    # daily cron. The updaters check enabled/URL themselves and re-apply on
+    # success, so this only does work when a file is actually absent.
+    # WAIT_LOCK: a missing list must actually be fetched, not skipped behind a
+    # concurrent cron/apply run — wait out the holder rather than dropping it.
+    ( export WG_SPLIT_WAIT_LOCK=1
+      [ -s "$IPSUM_NFT_FILE" ]   || /usr/local/sbin/wg-split-update-ipsum
+      [ -s "$RU_FILE" ]          || /usr/local/sbin/wg-split-update-ru
+      [ -s "$DOMAINS_VPN_FILE" ] || /usr/local/sbin/wg-split-update-domains
+    ) >/dev/null 2>&1 &
+    while :; do
+        tick
+        _iv="$(uci -q get wg-split.global.interval 2>/dev/null)"
+        [ "$_iv" -ge 5 ] 2>/dev/null || _iv=180
+        sleep "$_iv"
+    done
+fi
+tick

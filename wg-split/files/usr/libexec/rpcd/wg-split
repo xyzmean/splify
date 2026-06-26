@@ -1,0 +1,77 @@
+#!/bin/sh
+# wg-split rpcd plugin — the canonical, least-privilege bridge between the LuCI
+# dashboard and the shell core (design §4.3). Exposes ONE ubus object `wg-split`
+# with three methods, so the LuCI ACL grants narrow ubus access instead of broad
+# `file:exec`. These are thin wrappers over the same CLI scripts that SSH users
+# run, so behaviour is identical and the change is easy to reason about/roll back.
+#
+#   status  -> wg-split-doctor --json      (diagnostics object)
+#   events  -> { "events": [ … ] }         (failover timeline)
+#   action  -> { "code": N, "stdout": "" } (run one allow-listed maintenance op)
+#
+# rpcd runs this as root; the ACL decides which session may call which method
+# (read = status/events, write = action).
+. /usr/share/libubox/jshn.sh
+
+DOCTOR=/usr/local/sbin/wg-split-doctor
+
+case "$1" in
+    list)
+        json_init
+        json_add_object "status";  json_close_object
+        json_add_object "events";  json_close_object
+        json_add_object "action"
+            json_add_string "name" ""
+            json_add_string "iface" ""
+        json_close_object
+        json_dump
+        ;;
+    call)
+        case "$2" in
+            status)
+                # already a JSON object — emit verbatim. doctor exits with the
+                # worst severity (non-zero on any WARN/FIXABLE/FAIL) BY DESIGN for
+                # CLI use; but a non-zero rpcd handler makes LuCI's callStatus()
+                # reject exactly when there's a problem to render. Normalize to 0 —
+                # the JSON itself carries the severity. (CLI exit code unchanged.)
+                "$DOCTOR" --json || true
+                ;;
+            events)
+                # doctor emits a bare array; wrap it so the ubus reply is an object
+                printf '{"events":%s}\n' "$("$DOCTOR" --events)"
+                ;;
+            action)
+                input="$(cat)"
+                json_load "$input" 2>/dev/null
+                json_get_var name name
+                json_get_var iface iface
+
+                code=0; out=""
+                case "$name" in
+                    apply)          out="$(/usr/local/sbin/wg-split-apply 2>&1)";          code=$? ;;
+                    restart)        out="$(/etc/init.d/wg-split restart 2>&1)";            code=$? ;;
+                    disable)        out="$(/usr/local/sbin/wg-split-disable 2>&1)";        code=$? ;;
+                    update_ipsum)   out="$(/usr/local/sbin/wg-split-update-ipsum 2>&1)";   code=$? ;;
+                    update_ru)      out="$(/usr/local/sbin/wg-split-update-ru 2>&1)";      code=$? ;;
+                    update_domains) out="$(/usr/local/sbin/wg-split-update-domains 2>&1)"; code=$? ;;
+                    fw_fix)
+                        # iface is passed as argv (never shell-evaluated); the
+                        # charset check is input hygiene only. The authoritative
+                        # guard is in wg-split-firewall, which refuses any iface
+                        # that isn't a configured wg-split endpoint (so a write-ACL
+                        # caller can't fix the firewall of, e.g., `wan`).
+                        case "$iface" in
+                            ''|*[!A-Za-z0-9_.-]*) out="invalid or missing iface"; code=2 ;;
+                            *) out="$(/usr/local/sbin/wg-split-firewall fix "$iface" 2>&1)"; code=$? ;;
+                        esac ;;
+                    *) out="unknown action: ${name:-(none)}"; code=2 ;;
+                esac
+
+                json_init
+                json_add_int    code   "$code"
+                json_add_string stdout "$out"
+                json_dump
+                ;;
+        esac
+        ;;
+esac

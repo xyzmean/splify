@@ -1,0 +1,87 @@
+name: Auto Version
+
+on:
+  push:
+    branches:
+      - master
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.tag_version.outputs.new_tag }}
+      new_version: ${{ steps.tag_version.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Bump version and push tag
+        id: tag_version
+        uses: mathieudutour/github-tag-action@v6.1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          default_bump: patch
+
+      - name: Create a GitHub release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.tag_version.outputs.new_tag }}
+          name: Release ${{ steps.tag_version.outputs.new_tag }}
+          body: ${{ steps.tag_version.outputs.changelog }}
+
+      - name: Update VERSION file
+        run: |
+          echo "${{ steps.tag_version.outputs.new_version }}" > VERSION
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add VERSION
+          git commit -m "chore: bump version to ${{ steps.tag_version.outputs.new_version }} [skip ci]" || true
+          git push
+
+  # Build the .apk and attach to the release here, in the same workflow — a tag
+  # pushed by GITHUB_TOKEN above would NOT trigger build.yml's tag event.
+  packages:
+    needs: version
+    if: needs.version.outputs.new_tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      # check out main (after the VERSION bump) so the package version matches the tag
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build packages in OpenWrt SDK
+        uses: docker/build-push-action@v6
+        with:
+          file: ./Dockerfile-apk
+          context: .
+          load: true
+          tags: wg-split:rel
+          build-args: |
+            VERSION=${{ needs.version.outputs.new_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract built packages
+        run: |
+          mkdir -p artifacts
+          id=$(docker create wg-split:rel)
+          docker cp "$id:/builder/bin/packages/." ./out/
+          docker rm "$id"
+          find ./out \( -name 'wg-split*.apk' -o -name 'luci-app-wg-split*.apk' \
+                        -o -name 'luci-i18n-wg-split-*.apk' \) \
+               -exec cp -v {} artifacts/ \;
+          ls -l artifacts
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.new_tag }}
+          files: artifacts/*

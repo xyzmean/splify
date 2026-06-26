@@ -1,0 +1,367 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: luci-app-wg-split\n"
+"Last-Translator: Claude <noreply@anthropic.com>\n"
+"Language-Team: Russian\n"
+"Language: ru\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<12 || n%100>14) ? 1 : 2);\n"
+
+msgid "yes"
+msgstr "да"
+
+msgid "no"
+msgstr "нет"
+
+msgid "Loading diagnostics…"
+msgstr "Загрузка диагностики…"
+
+msgid "unknown"
+msgstr "неизвестно"
+
+msgid "Overall"
+msgstr "Итог"
+
+msgid "Active path"
+msgstr "Активный путь"
+
+msgid "Mode"
+msgstr "Режим"
+
+msgid "killswitch"
+msgstr "блокировка"
+
+msgid "on"
+msgstr "вкл"
+
+msgid "off"
+msgstr "выкл"
+
+msgid "failures"
+msgstr "сбоев"
+
+msgid "LAN"
+msgstr "LAN"
+
+msgid "(none detected)"
+msgstr "(не определено)"
+
+msgid "Tunnel"
+msgstr "Туннель"
+
+msgid "Prio"
+msgstr "Приор."
+
+msgid "Handshake"
+msgstr "Рукопожатие"
+
+msgid "Health"
+msgstr "Здоровье"
+
+msgid "Zone"
+msgstr "Зона"
+
+msgid "Masq"
+msgstr "Masq"
+
+msgid "LAN fwd"
+msgstr "Форвард LAN"
+
+msgid "(missing)"
+msgstr "(отсутствует)"
+
+msgid "none"
+msgstr "нет"
+
+msgid "List"
+msgstr "Список"
+
+msgid "Entries"
+msgstr "Записей"
+
+msgid "Min"
+msgstr "Мин."
+
+msgid "Age"
+msgstr "Возраст"
+
+msgid "State"
+msgstr "Состояние"
+
+msgid "(disabled)"
+msgstr "(выключено)"
+
+msgid "No problems detected."
+msgstr "Проблем не обнаружено."
+
+msgid "Failover tunnels"
+msgstr "Туннели отказоустойчивости"
+
+msgid "Lists"
+msgstr "Списки"
+
+msgid "Diagnostics"
+msgstr "Диагностика"
+
+msgid "Could not parse diagnostics:"
+msgstr "Не удалось разобрать диагностику:"
+
+msgid "Diagnostics failed: "
+msgstr "Ошибка диагностики: "
+
+msgid "Run diagnostics"
+msgstr "Запустить диагностику"
+
+msgid "Apply"
+msgstr "Применить"
+
+msgid "Configuration applied"
+msgstr "Конфигурация применена"
+
+msgid "Restart service"
+msgstr "Перезапустить службу"
+
+msgid "Service restarted"
+msgstr "Служба перезапущена"
+
+msgid "Refresh ipsum"
+msgstr "Обновить ipsum"
+
+msgid "ipsum refreshed"
+msgstr "ipsum обновлён"
+
+msgid "Refresh ru/cn"
+msgstr "Обновить ru/cn"
+
+msgid "ru/cn refreshed"
+msgstr "ru/cn обновлён"
+
+msgid "Refresh domains"
+msgstr "Обновить домены"
+
+msgid "domains refreshed"
+msgstr "домены обновлены"
+
+msgid "Emergency disable"
+msgstr "Аварийно отключить"
+
+msgid "Disable split routing now? All LAN traffic will exit via WAN until the service re-enables it (or you stop it)."
+msgstr "Отключить split-маршрутизацию сейчас? Весь трафик LAN пойдёт через WAN, пока служба не включит её снова (или пока вы её не остановите)."
+
+msgid "Split routing disabled"
+msgstr "Split-маршрутизация отключена"
+
+msgid "Status & diagnostics"
+msgstr "Статус и диагностика"
+
+msgid "wg-split"
+msgstr "wg-split"
+
+msgid "Local split-tunnel: policy-route LAN traffic over priority-ordered WireGuard/AmneziaWG tunnels, with downloaded IP/domain lists and optional zapret DPI-bypass. Create the tunnel interfaces normally under Network → Interfaces, then list them below by priority."
+msgstr "Локальный split-туннель: маршрутизация трафика LAN по приоритетным туннелям WireGuard/AmneziaWG, со скачиваемыми списками IP/доменов и опциональным обходом DPI через zapret. Создайте интерфейсы туннелей обычным образом в Network → Interfaces, затем перечислите их ниже по приоритету."
+
+msgid "General"
+msgstr "Общие"
+
+msgid "Routing mode"
+msgstr "Режим маршрутизации"
+
+msgid "blocklist — only listed/ipsum IPs ride the VPN"
+msgstr "blocklist — через VPN идут только IP из списков/ipsum"
+
+msgid "full — default via VPN, direct list = exceptions"
+msgstr "full — по умолчанию через VPN, список direct = исключения"
+
+msgid "split — only explicit VPN lists ride the VPN"
+msgstr "split — через VPN идут только явные VPN-списки"
+
+msgid "Failover interval"
+msgstr "Интервал отказоустойчивости"
+
+msgid "Seconds between health/failover checks."
+msgstr "Секунды между проверками здоровья/отказоустойчивости."
+
+msgid "Kill switch"
+msgstr "Аварийная блокировка"
+
+msgid "Drop policy-VPN traffic when every tunnel is down instead of leaking to WAN."
+msgstr "Сбрасывать VPN-трафик политики, когда все туннели недоступны, вместо утечки в WAN."
+
+msgid "LAN interface"
+msgstr "Интерфейс LAN"
+
+msgid "LAN subnet (CIDR)"
+msgstr "Подсеть LAN (CIDR)"
+
+msgid "Health ping targets"
+msgstr "Цели health-ping"
+
+msgid "Pinged through each tunnel to test it (any reply = healthy)."
+msgstr "Пингуются через каждый туннель для проверки (любой ответ = здоров)."
+
+msgid "WAN health URL"
+msgstr "URL проверки WAN"
+
+msgid "curled over WAN to decide the zapret vs plain-WAN fallback rung."
+msgstr "Запрашивается через WAN (curl) для выбора между zapret и обычным WAN-резервом."
+
+msgid "Enable ipsum (VPN IP list)"
+msgstr "Включить ipsum (список VPN-IP)"
+
+msgid "ipsum list URL"
+msgstr "URL списка ipsum"
+
+msgid "Enable ru/cn direct list"
+msgstr "Включить direct-список ru/cn"
+
+msgid "ru/cn list URL"
+msgstr "URL списка ru/cn"
+
+msgid "VPN domains list URL"
+msgstr "URL списка VPN-доменов"
+
+msgid "Downloaded domains tagged to the VPN at dnsmasq resolve time."
+msgstr "Скачанные домены помечаются в VPN на этапе разрешения dnsmasq."
+
+msgid "Ignore/direct domains list URL"
+msgstr "URL списка игнор/direct-доменов"
+
+msgid "Use zapret DPI-bypass"
+msgstr "Использовать обход DPI zapret"
+
+msgid "Auto-skipped if zapret is not installed."
+msgstr "Автоматически пропускается, если zapret не установлен."
+
+msgid "Manual entries"
+msgstr "Ручные записи"
+
+msgid "VPN subnets"
+msgstr "VPN-подсети"
+
+msgid "Direct subnets"
+msgstr "Direct-подсети"
+
+msgid "VPN domains"
+msgstr "VPN-домены"
+
+msgid "Direct domains"
+msgstr "Direct-домены"
+
+msgid "Lowest priority number wins. Pick interfaces you created under Network → Interfaces."
+msgstr "Меньший номер приоритета побеждает. Выбирайте интерфейсы, созданные в Network → Interfaces."
+
+msgid "Interface"
+msgstr "Интерфейс"
+
+msgid "(no wireguard/amneziawg interfaces found)"
+msgstr "(интерфейсы wireguard/amneziawg не найдены)"
+
+msgid "Priority"
+msgstr "Приоритет"
+
+msgid "Per-device overrides"
+msgstr "Переопределения по устройствам"
+
+msgid "Pin a LAN host to vpn or direct by its IP."
+msgstr "Закрепить LAN-хост за vpn или direct по его IP."
+
+msgid "Device IP"
+msgstr "IP устройства"
+
+msgid "Route via"
+msgstr "Маршрут через"
+
+msgid "VPN"
+msgstr "VPN"
+
+msgid "Direct"
+msgstr "Direct"
+
+msgid "idle"
+msgstr "простаивает"
+
+msgid "ok"
+msgstr "ок"
+
+msgid "VPN active via %s"
+msgstr "VPN активен через %s"
+
+msgid "No tunnel — WAN with zapret DPI-bypass"
+msgstr "Нет туннеля — WAN с обходом DPI zapret"
+
+msgid "Kill switch — policy traffic blocked"
+msgstr "Аварийная блокировка — трафик политики заблокирован"
+
+msgid "No tunnel — direct WAN (traffic exposed)"
+msgstr "Нет туннеля — прямой WAN (трафик открыт)"
+
+msgid "Unknown"
+msgstr "Неизвестно"
+
+msgid "Failures"
+msgstr "Сбоев"
+
+msgid "down"
+msgstr "выкл"
+
+msgid "zapret"
+msgstr "zapret"
+
+msgid "DPI-bypass"
+msgstr "обход DPI"
+
+msgid "blocked"
+msgstr "блокировано"
+
+msgid "kill switch"
+msgstr "блокировка"
+
+msgid "WAN"
+msgstr "WAN"
+
+msgid "direct"
+msgstr "напрямую"
+
+msgid "Firewall settings"
+msgstr "Настройки межсетевого экрана"
+
+msgid "Network interfaces"
+msgstr "Сетевые интерфейсы"
+
+msgid "Create a WireGuard/AmneziaWG interface under "
+msgstr "Создайте интерфейс WireGuard/AmneziaWG в "
+
+msgid "Network → Interfaces"
+msgstr "Network → Interfaces"
+
+msgid " (wg-split does not manage keys/peers)."
+msgstr " (wg-split не управляет ключами/пирами)."
+
+msgid "You have %d WireGuard/AmneziaWG interface(s) — good."
+msgstr "У вас есть интерфейсов WireGuard/AmneziaWG: %d — отлично."
+
+msgid "Add it below under “Failover tunnels” with a priority, then Save & Apply."
+msgstr "Добавьте его ниже в «Туннели отказоустойчивости» с приоритетом, затем Сохранить и применить."
+
+msgid "Put the tunnel interface in a firewall zone (masq on) and allow forwarding lan → that zone."
+msgstr "Поместите интерфейс туннеля в зону межсетевого экрана (masq вкл) и разрешите форвардинг lan → эта зона."
+
+msgid "Let’s get the first tunnel routing"
+msgstr "Настроим маршрутизацию первого туннеля"
+
+msgid "No failover tunnels are configured yet, so all LAN traffic currently exits over plain WAN."
+msgstr "Туннели отказоустойчивости ещё не настроены, поэтому весь трафик LAN сейчас идёт через обычный WAN."
+
+msgid "Refresh now"
+msgstr "Обновить сейчас"
+
+msgid "Live"
+msgstr "Онлайн"
+
+msgid "Live (every %ds)"
+msgstr "Онлайн (каждые %d с)"
+
+msgid "Paused"
+msgstr "Пауза"

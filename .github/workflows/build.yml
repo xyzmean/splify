@@ -1,0 +1,53 @@
+name: Build packages
+
+# CI build for PRs and manual runs (artifacts only). Mirrors release.yml: builds
+# the .apk via Dockerfile-apk with the buildx gha layer cache, so the heavy
+# kernel/deps layer is SHARED with releases and PR builds finish in minutes
+# instead of rebuilding the SDK from scratch. Both packages are PKGARCH:=all, so
+# the single x86_64 SDK build yields the same .apk for every target.
+#
+# Tagged releases are built and attached by auto-version.yml — a tag pushed there
+# by GITHUB_TOKEN would not trigger a `push: tags` event here anyway.
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read package version
+        id: ver
+        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build packages in OpenWrt SDK
+        uses: docker/build-push-action@v6
+        with:
+          file: ./Dockerfile-apk
+          context: .
+          load: true
+          tags: wg-split:ci
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract built packages
+        run: |
+          mkdir -p artifacts out
+          id=$(docker create wg-split:ci)
+          docker cp "$id:/builder/bin/packages/." ./out/
+          docker rm "$id"
+          find ./out \( -name 'wg-split*.apk' -o -name 'luci-app-wg-split*.apk' \
+                        -o -name 'luci-i18n-wg-split-*.apk' \) \
+               -exec cp -v {} artifacts/ \;
+          echo "--- built ---"; ls -l artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: artifacts/*

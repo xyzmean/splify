@@ -1,0 +1,29 @@
+#!/bin/sh
+# wg-split 2.0.0 config migration — PURELY ADDITIVE and idempotent.
+#
+# OpenWrt's /etc/init.d/boot runs every /etc/uci-defaults/* script once on the
+# first boot after install/upgrade, then deletes it if it exits 0. 1.7.x configs
+# keep working untouched; this only fills in new 2.0.0 defaults so the new code
+# always has a value to read (no schema renames/removals — see design §2.1).
+
+# Nothing to migrate if wg-split was never configured (fresh install ships its
+# own /etc/config/wg-split with the new defaults already).
+[ -n "$(uci -q get wg-split.global)" ] || exit 0
+
+changed=0
+
+# Tag every endpoint with an explicit transport `type` (default wg, covering
+# wireguard+amneziawg). The transport-agnostic dispatch (design §2.2) switches on
+# this, and a future sing-box (vless/hysteria) backend will be selected per
+# endpoint by setting type=singbox.
+i=0
+while [ -n "$(uci -q get "wg-split.@endpoint[$i]" 2>/dev/null)" ]; do
+    if [ -z "$(uci -q get "wg-split.@endpoint[$i].type" 2>/dev/null)" ]; then
+        uci set "wg-split.@endpoint[$i].type=wg"
+        changed=1
+    fi
+    i=$((i + 1))
+done
+
+[ "$changed" = 1 ] && uci commit wg-split
+exit 0

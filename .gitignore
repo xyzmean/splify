@@ -1,0 +1,7 @@
+# Tooling / local agent state
+.serena/
+
+# Build output
+out/
+bin/
+*.apk

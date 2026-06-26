@@ -1,0 +1,44 @@
+# Build the wg-split .apk packages in the OpenWrt SDK.
+#
+# Both packages are PKGARCH:=all (pure shell + LuCI files, nothing compiles), so
+# any SDK arch yields identical .apk — we use x86_64.
+#
+# The slow part is unavoidable ONCE: a targeted `make package/<p>/compile` still
+# builds the runtime DEPENDS, and +kmod-nft-core drags in a full kernel build
+# (~15 min). The trick is to do that in a CACHE-STABLE layer, BEFORE our source
+# is copied, so it is keyed only on the SDK + this Dockerfile — not on our
+# scripts or the release version. With buildx gha cache the kernel/deps are built
+# once ever; every release after restores that layer and only recompiles our two
+# data-only packages (seconds).
+ARG SDK=ghcr.io/openwrt/sdk:x86_64-25.12.4
+FROM ${SDK}
+
+WORKDIR /builder
+
+# External feeds + the heavy dependency build. Cache-stable: nothing here depends
+# on our repo source or the release version, so this layer (kernel + kmods +
+# nftables/curl/dnsmasq/ip-full/luci-base) is built once and reused.
+RUN ./scripts/feeds update luci packages base \
+ && ./scripts/feeds install nftables curl dnsmasq-full ip-full kmod-nft-core luci-base \
+ && make defconfig \
+ && make -j"$(nproc)" V=s \
+        package/nftables/compile \
+        package/curl/compile \
+        package/dnsmasq/compile \
+        package/iproute2/compile \
+        package/luci-base/compile
+
+# Our local feed — changes here (every fix) only invalidate the cheap layers
+# below; the dependency/kernel layer above stays cached.
+COPY --chown=buildbot:buildbot wg-split          feed/wg-split
+COPY --chown=buildbot:buildbot luci-app-wg-split feed/luci-app-wg-split
+RUN echo "src-link wgsplit /builder/feed" >> feeds.conf.default \
+ && ./scripts/feeds update wgsplit \
+ && ./scripts/feeds install -p wgsplit wg-split luci-app-wg-split
+
+# Stamp the release version and build only our two packages. Deps are already in
+# build_dir/staging_dir from the cached layer, so make skips them.
+ARG VERSION=0.0.0
+RUN sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=${VERSION}/" \
+        feed/wg-split/Makefile feed/luci-app-wg-split/Makefile \
+ && make V=s package/wg-split/compile package/luci-app-wg-split/compile

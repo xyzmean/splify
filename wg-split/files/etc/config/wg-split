@@ -1,0 +1,47 @@
+config wg-split 'global'
+	# routing mode: blocklist (only listed/ipsum IPs ride VPN) | full (default via
+	# VPN, direct list = exceptions) | split (only explicit vpn lists ride VPN)
+	option mode 'blocklist'
+	# failover loop cadence, seconds (the procd service sleeps this between ticks)
+	option interval '180'
+	# 1 = drop policy-VPN traffic when every tunnel is down instead of leaking to WAN
+	option killswitch '0'
+	option lan_iface 'br-lan'
+	option lan_cidr '192.168.1.0/24'
+
+	# health probing: ping these THROUGH a candidate iface; curl this URL for WAN/zapret
+	list health_target '1.1.1.1'
+	list health_target '8.8.8.8'
+	option health_url 'https://1.1.1.1/cdn-cgi/trace'
+
+	# zapret DPI-bypass on WAN egress (auto-skipped if zapret is not installed)
+	option zapret_enabled '1'
+
+	# ipsum: blocked/foreign IP list -> VPN (downloaded by URL, refreshed daily)
+	option ipsum_enabled '1'
+	option ipsum_url 'https://github.com/1andrevich/Re-filter-lists/releases/latest/download/ipsum.lst'
+	# ru/cn subnets kept direct; feed the zapret bypass set
+	option ru_enabled '1'
+	option ru_url 'https://github.com/xyzmean/radb-tools/releases/download/latest/ru_cn_final.lst'
+
+	# optional downloadable DOMAIN lists -> tagged at dnsmasq resolve time
+	option vpn_domains_url ''
+	option ignore_domains_url ''
+
+	# manual additions (edit in LuCI). CIDRs go straight into nft sets; domains
+	# into dnsmasq nftset directives.
+	list vpn_cidr ''
+	list direct_cidr ''
+	list vpn_domain ''
+	list direct_domain ''
+
+# one section per failover tunnel. iface = an existing amneziawg/wireguard
+# interface you created normally in LuCI. Lowest priority number wins.
+config endpoint
+	option iface 'wg0'
+	option priority '1'
+
+# per-device override (optional): pin a LAN host to vpn or direct
+#config device
+#	option ip '192.168.1.50'
+#	option mode 'vpn'

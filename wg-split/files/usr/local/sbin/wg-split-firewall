@@ -1,0 +1,203 @@
+#!/bin/sh
+# wg-split-firewall — create or repair the firewall zone a tunnel endpoint needs.
+#
+# wg-split owns ROUTING (marks + table 200) but never the firewall, yet fw4 still
+# runs every forwarded LAN->tunnel packet through the firewall and REJECTs it
+# unless the tunnel iface is in a zone (with masq + lan<->zone + zone->wan
+# forwarding). That "looks exactly like a dead tunnel" is the #1 post-reflash
+# gotcha. This one-shot fixes it, modelling the zone EXACTLY on a known-good
+# AmneziaWG zone (accept-all + masq + mtu_fix). It is EXPLICIT and operator-
+# invoked (LuCI "Fix automatically" button or CLI) — never auto-applied.
+#
+#   wg-split-firewall check <iface>   report what's missing (exit 0 = complete)
+#   wg-split-firewall fix   <iface>   idempotently create/repair, commit, reload
+#
+# No `set -u`: OpenWrt's config_* helpers (sourced below) aren't nounset-safe.
+. /usr/local/lib/wg-split/common.sh
+
+CMD="${1:-}"; IFACE="${2:-}"
+[ -n "$IFACE" ] || die "usage: wg-split-firewall {check|fix} <iface>"
+case "$CMD" in check|fix) : ;; *) die "usage: wg-split-firewall {check|fix} <iface>" ;; esac
+
+# Security gate: only ever operate on a CONFIGURED wg-split endpoint. `fix` adds
+# lan<->zone + zone->wan forwardings as root; without this, a caller (e.g. via the
+# ubus `action` method with the write ACL) could pass `wan` and open WAN->LAN.
+# Both check and fix are restricted so the tool can never touch a foreign iface.
+is_endpoint "$IFACE" || die "$IFACE is not a configured wg-split endpoint — refusing"
+# Second gate: the endpoint must be a REAL WireGuard/AmneziaWG interface, not just
+# a name in wg-split's UCI. A write-ACL caller could add an arbitrary iface (e.g.
+# `guest`, already in its own zone) as an endpoint section and then fw_fix it,
+# adding masq + guest->lan/wan forwarding to that foreign zone. Requiring the
+# tunnel proto stops firewall mutation from ever reaching a non-tunnel network.
+iface_is_wg "$IFACE" || die "$IFACE is not a WireGuard/AmneziaWG interface — refusing to modify its firewall zone"
+
+# fw_wan_zone (zone covering 'wan', else conventional 'wan') and fw_zone_is_shared
+# (refuse to touch the WAN/LAN zone — fixing it would open the whole infra zone,
+# not just the tunnel) live in common.sh so the doctor reuses the same logic.
+
+# ---- check -----------------------------------------------------------------
+check_iface() {
+    _miss=""
+    _z="$(fw_zone_of_net "$IFACE" 2>/dev/null)" || _z=""
+    if [ -z "$_z" ]; then
+        if _gz="$(fw_zone_glob_covering "$IFACE")"; then
+            echo "zone        : WILDCARD ($IFACE is matched by zone '$_gz' via a device glob — repair that zone manually; auto-create refuses to overlap it)"
+        else
+            echo "zone        : MISSING ($IFACE is in no firewall zone)"
+        fi
+        return 1
+    fi
+    if _role="$(fw_zone_is_shared "$_z")"; then
+        echo "zone        : SHARED ($_z is your $_role zone — give $IFACE its own firewall zone; fix refuses to modify a shared zone)"
+        return 1
+    fi
+    if ! fw_zone_is_tunnel_only "$_z"; then
+        echo "zone        : MIXED ($_z also holds non-tunnel networks — give $IFACE its own firewall zone; fix refuses to change a mixed zone's masq/forwarding/policy)"
+        return 1
+    fi
+    echo "zone        : $_z"
+    if fw_zone_has_masq "$_z"; then echo "masq        : on"
+    else echo "masq        : MISSING on zone $_z"; _miss="$_miss masq"; fi
+    if fw_zone_has_mtu_fix "$_z"; then echo "mtu_fix     : on"
+    else echo "mtu_fix     : MISSING (MSS clamping off; large packets stall on low-MTU paths)"; _miss="$_miss mtu_fix"; fi
+    if fw_zone_policies_open "$_z"; then echo "policies    : accept-all"
+    else echo "policies    : RESTRICTIVE (input/output/forward not all ACCEPT — blocks probes/site-to-site)"; _miss="$_miss policy"; fi
+    _lz="$(fw_lan_zone)"
+    if [ -n "$_lz" ]; then
+        if fw_has_forwarding "$_lz" "$_z"; then echo "fwd lan->ep : $_lz -> $_z"
+        else echo "fwd lan->ep : MISSING ($_lz -> $_z)"; _miss="$_miss fwd-lan"; fi
+        # Zone is tunnel-only (asserted above), so the reverse zone->lan forwarding
+        # (site-to-site inbound) is safe and the fix always adds it — demand it here.
+        if fw_has_forwarding "$_z" "$_lz"; then echo "fwd ep->lan : $_z -> $_lz"
+        else echo "fwd ep->lan : MISSING ($_z -> $_lz)"; _miss="$_miss fwd-eplan"; fi
+    fi
+    _wz="$(fw_wan_zone)"
+    if fw_has_forwarding "$_z" "$_wz"; then echo "fwd ep->wan : $_z -> $_wz"
+    else echo "fwd ep->wan : MISSING ($_z -> $_wz)"; _miss="$_miss fwd-wan"; fi
+    [ -z "$_miss" ] && { echo "OK: firewall complete for $IFACE"; return 0; }
+    echo "INCOMPLETE:$_miss"
+    return 1
+}
+
+# ---- fix helpers -----------------------------------------------------------
+CHANGED=0
+
+# Add a forwarding src->dest only if an active (enabled, IPv4) one isn't present.
+add_forwarding() {  # src dest
+    [ -n "$1" ] && [ -n "$2" ] || return 0
+    fw_has_forwarding "$1" "$2" && return 0
+    _fs="$(uci add firewall forwarding)"
+    uci set "firewall.$_fs.src=$1"
+    uci set "firewall.$_fs.dest=$2"
+    CHANGED=1
+}
+
+# Ensure masq + mtu_fix on the existing (tunnel-only) zone named $1.
+ensure_masq() {  # zone-name
+    _zi=0
+    while [ -n "$(uci -q get "firewall.@zone[$_zi]" 2>/dev/null)" ]; do
+        if [ "$(uci -q get "firewall.@zone[$_zi].name" 2>/dev/null)" = "$1" ]; then
+            fw_bool "$(uci -q get "firewall.@zone[$_zi].masq" 2>/dev/null)" \
+                || { uci set "firewall.@zone[$_zi].masq=1"; CHANGED=1; }
+            # mtu_fix is an fw4 bool too: an explicit '0' must be FLIPPED, not left
+            # as-is (MSS clamping off => large-packet stalls on low-MTU wg/PPPoE).
+            fw_bool "$(uci -q get "firewall.@zone[$_zi].mtu_fix" 2>/dev/null)" \
+                || { uci set "firewall.@zone[$_zi].mtu_fix=1"; CHANGED=1; }
+            return 0
+        fi
+        _zi=$((_zi + 1))
+    done
+    return 1
+}
+
+# Normalize input/output/forward to ACCEPT on the existing (tunnel-only) zone $1
+# so it matches the reference accept-all tunnel zone. A leftover REJECT/DROP (or
+# unset, restrictive default) input/forward otherwise blocks router-originated
+# tunnel probes and site-to-site / intra-zone traffic even after the repair.
+ensure_accept_policies() {  # zone-name
+    _zi=0
+    while [ -n "$(uci -q get "firewall.@zone[$_zi]" 2>/dev/null)" ]; do
+        if [ "$(uci -q get "firewall.@zone[$_zi].name" 2>/dev/null)" = "$1" ]; then
+            for _zp in input output forward; do
+                [ "$(uci -q get "firewall.@zone[$_zi].$_zp" 2>/dev/null)" = "ACCEPT" ] \
+                    || { uci set "firewall.@zone[$_zi].$_zp=ACCEPT"; CHANGED=1; }
+            done
+            return 0
+        fi
+        _zi=$((_zi + 1))
+    done
+    return 1
+}
+
+# ---- fix -------------------------------------------------------------------
+fix_iface() {
+    ZONE="$(fw_zone_of_net "$IFACE" 2>/dev/null)" || ZONE=""
+    if [ -n "$ZONE" ]; then
+        # An EXISTING zone is only safe to mutate if it carries tunnels ALONE.
+        # Otherwise masq / accept-all policies / forwarding would change firewall
+        # policy for every other (non-tunnel) member of the zone — refuse and tell
+        # the operator to give the tunnel its own zone.
+        if _role="$(fw_zone_is_shared "$ZONE")"; then
+            die "$IFACE is in the shared '$ZONE' ($_role) firewall zone; give the tunnel its own zone before fixing — refusing to mutate a shared zone"
+        fi
+        fw_zone_is_tunnel_only "$ZONE" \
+            || die "$IFACE is in firewall zone '$ZONE', which also holds non-tunnel networks; give the tunnel its own zone before fixing — refusing to change a mixed zone's masq/forwarding/policy"
+        ensure_masq "$ZONE"             # masq + mtu_fix
+        ensure_accept_policies "$ZONE"  # input/output/forward -> ACCEPT
+    else
+        # fw_zone_of_net doesn't expand globs: if a zone already covers this iface
+        # via a device wildcard (e.g. 'wg+'), creating a name=iface zone would make
+        # fw4 see overlapping zones and never repair the real one. Refuse instead.
+        if _gz="$(fw_zone_glob_covering "$IFACE")"; then
+            die "$IFACE is already covered by firewall zone '$_gz' via a device wildcard; repair that zone (masq + lan<->zone + zone->wan) instead — refusing to create an overlapping zone"
+        fi
+        # New zone modelled on the reference AmneziaWG zone: accept-all + masq +
+        # mtu_fix, carrying the endpoint network. Zone name = iface (the convention).
+        ZONE="$IFACE"
+        _zs="$(uci add firewall zone)"
+        uci set "firewall.$_zs.name=$ZONE"
+        uci set "firewall.$_zs.input=ACCEPT"
+        uci set "firewall.$_zs.output=ACCEPT"
+        uci set "firewall.$_zs.forward=ACCEPT"
+        uci set "firewall.$_zs.masq=1"
+        uci set "firewall.$_zs.mtu_fix=1"
+        uci add_list "firewall.$_zs.network=$IFACE"
+        CHANGED=1
+        log "firewall: created zone '$ZONE' for $IFACE (accept-all + masq + mtu_fix)"
+    fi
+
+    _lz="$(fw_lan_zone)"
+    _wz="$(fw_wan_zone)"
+    # ZONE is now guaranteed tunnel-only (freshly created, or verified above), so
+    # all three forwardings are safe: lan->zone (LAN reaches the tunnel), the
+    # reverse zone->lan (site-to-site inbound), and zone->wan (transport / DoH).
+    if [ -n "$_lz" ]; then add_forwarding "$_lz" "$ZONE"; add_forwarding "$ZONE" "$_lz"; fi
+    add_forwarding "$ZONE" "$_wz"
+
+    if [ "$CHANGED" = 1 ]; then
+        uci commit firewall
+        # A bare `fw4 reload` REPLACES table inet fw4, wiping the live policy/domain
+        # nft sets (ipsum/vpn/direct + dnsmasq resolve-time elements) — policy
+        # routing would break until the next failover tick. Delegate to
+        # wg-split-apply, which reloads fw4 AND re-runs its repopulation follow-up
+        # (regenerate ruleset, restart dnsmasq, run failover). Fall back to a plain
+        # reload only if apply is somehow unavailable.
+        if [ -x /usr/local/sbin/wg-split-apply ] \
+           && /usr/local/sbin/wg-split-apply >/dev/null 2>&1; then
+            :   # apply reloaded fw4 and repopulated the sets
+        else
+            # apply missing or failed (e.g. PATH/env) — at least reload the firewall
+            # so the committed zone/forwarding takes effect.
+            fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1 || true
+        fi
+        log "firewall: applied zone/forwarding for $IFACE (zone=$ZONE lan=${_lz:-?} wan=$_wz); re-applied policy"
+        echo "fixed: zone=$ZONE lan=${_lz:-?} wan=$_wz"
+    else
+        echo "already complete: zone=$ZONE"
+    fi
+}
+
+case "$CMD" in
+    check) check_iface ;;
+    fix)   fix_iface ;;
+esac

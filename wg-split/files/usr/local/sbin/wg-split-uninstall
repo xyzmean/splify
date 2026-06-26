@@ -1,0 +1,51 @@
+#!/bin/sh
+# wg-split-uninstall — tear down runtime state + generated files.
+#
+# Also used as the apk pre-remove hook. Removes ip rules/routes, generated nft +
+# dnsmasq drop-ins, cron entries and runtime state, and stops the service. Does
+# NOT touch your awg/wg interfaces, zapret, or (when run by hand) the package
+# scripts themselves — use `apk del wg-split` to remove the package files.
+set -u
+
+LOG_TAG="wg-split"
+log() { logger -t "$LOG_TAG" "$*"; }
+
+WG_TABLE="200"; WG_RULE_PRIO="999"; ANTI_LOOP_PRIO="1000"
+DOH_IPS="8.8.8.8 8.8.4.4 1.1.1.1 1.0.0.1 9.9.9.9 149.112.112.112"
+STATE_FILE="/var/run/wg-split-state"
+FAIL_COUNTER_FILE="/var/run/wg-split-failcount"
+
+log "UNINSTALL: removing wg-split runtime"
+
+# 0. service
+if [ -x /etc/init.d/wg-split ]; then
+    /etc/init.d/wg-split stop    >/dev/null 2>&1 || true
+    /etc/init.d/wg-split disable >/dev/null 2>&1 || true
+fi
+
+# 1. runtime routing state
+while ip -4 rule del priority "$WG_RULE_PRIO"   >/dev/null 2>&1; do :; done
+while ip -4 rule del priority "$ANTI_LOOP_PRIO" >/dev/null 2>&1; do :; done
+ip -4 route flush table "$WG_TABLE" >/dev/null 2>&1 || true
+for _if in $(uci show wg-split 2>/dev/null | sed -n "s/.*\.iface='\([^']*\)'/\1/p"); do
+    for _ip in $DOH_IPS; do ip -4 route del "$_ip" dev "$_if" >/dev/null 2>&1 || true; done
+done
+
+# 2. cron (list refresh entries)
+if [ -f /etc/crontabs/root ]; then
+    grep -v 'wg-split-' /etc/crontabs/root > /tmp/wg-split-cron.new || true
+    cat /tmp/wg-split-cron.new > /etc/crontabs/root
+    rm -f /tmp/wg-split-cron.new
+    /etc/init.d/cron restart >/dev/null 2>&1 || true
+fi
+
+# 3. generated files + runtime state
+rm -f /etc/nftables.d/30-wg-split.nft
+rm -f /tmp/dnsmasq.d/wg-split-*.conf /tmp/dnsmasq.cfg*.d/wg-split-*.conf
+rm -f "$STATE_FILE" "$FAIL_COUNTER_FILE"
+
+# 4. reload to drop the chains/sets + domain tags
+/etc/init.d/firewall reload >/dev/null 2>&1 || true
+/etc/init.d/dnsmasq reload  >/dev/null 2>&1 || true
+
+echo "wg-split runtime removed. To remove package files: apk del wg-split"

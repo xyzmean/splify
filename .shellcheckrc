@@ -1,0 +1,13 @@
+# wg-split shellcheck config. These scripts are busybox-ash for OpenWrt and use
+# patterns shellcheck flags but that are correct here; disable only those, so real
+# bugs (unquoted expansions, SC2086, etc.) still fail CI.
+#
+# SC1091  can't follow `. /lib/functions.sh` / common.sh (not present in CI)
+# SC2034  "unused" constants — common.sh is a sourced library; sbin scripts use them
+# SC3043  `local` — undefined in strict POSIX, but busybox ash supports it
+# SC2015  `A && B || C` — intentional terse idiom throughout
+# SC2018  tr 'A-Z'  — ASCII-only config text, ranges are deliberate
+# SC2019  tr 'a-z'  — ditto
+# SC2153  VPN_IFACE/LAN_IFACE "misspelling" false positives
+# SC2154  vars assigned indirectly by OpenWrt's config_get
+disable=SC1091,SC2034,SC3043,SC2015,SC2018,SC2019,SC2153,SC2154

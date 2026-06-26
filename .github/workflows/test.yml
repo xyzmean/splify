@@ -1,0 +1,37 @@
+name: Lint & test
+
+# Release-hygiene gate (design §4.4): static lint of the shell core + pure-logic
+# unit tests, on every PR / push to a feature or main branch. Fast (no SDK build)
+# so it runs ahead of the heavier package build in build.yml.
+on:
+  pull_request:
+  push:
+    branches: [ main, 'feature/**' ]
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
+      - name: shellcheck (busybox-ash shell core)
+        run: |
+          shellcheck -s sh \
+            wg-split/files/usr/local/sbin/wg-split-* \
+            wg-split/files/usr/local/lib/wg-split/*.sh \
+            wg-split/files/usr/libexec/rpcd/wg-split \
+            wg-split/files/etc/init.d/wg-split \
+            wg-split/files/etc/uci-defaults/*
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: doctor self-test (pure logic, off-box)
+        run: WG_SPLIT_SELFTEST=1 sh wg-split/files/usr/local/sbin/wg-split-doctor
+      - name: Install bats
+        run: sudo apt-get update -qq && sudo apt-get install -y bats
+      - name: bats unit tests
+        run: bats tests/
