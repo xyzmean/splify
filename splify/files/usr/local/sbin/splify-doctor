@@ -213,8 +213,15 @@ if [ "$PATH_KIND" = vpn ] && [ -n "$VPN_CIDRS" ] && [ -n "$ACTIVE" ]; then
 fi
 
 # ---- lists -----------------------------------------------------------------
-list_row() {  # NAME ENABLED COUNT MIN FILE COUNTOK
-    LIST_JSON="$LIST_JSON{\"name\":\"$1\",\"enabled\":$2,\"count\":$3,\"min\":$4,\"file\":\"$(json_esc "$5")\",\"age\":$6,\"ok\":$7},"
+# In blocklist/split, the live RU_SET is unreferenced — ru's real job is feeding
+# the nozapret bypass set, so report its FILE prefix count (its contribution),
+# not the empty set (which made doctor show a working list as count:0 — N3). In
+# full mode the live set IS load-bearing, so report that.
+ru_count_for_mode() {  # MODE SET_COUNT FILE_COUNT
+    if [ "$1" = full ]; then echo "${2:-0}"; else echo "${3:-0}"; fi
+}
+list_row() {  # NAME ENABLED COUNT MIN FILE AGE COUNTOK [FILECOUNT]
+    LIST_JSON="$LIST_JSON{\"name\":\"$1\",\"enabled\":$2,\"count\":$3,\"min\":$4,\"file\":\"$(json_esc "$5")\",\"age\":$6,\"ok\":$7,\"file_count\":${8:--1}},"
 }
 # ipsum (VPN set) — failover self-heals it from IPSUM_NFT_FILE. Only blocklist mode
 # wires @IPSUM_SET into routing (see splify-apply); in full/split the set is
@@ -228,19 +235,22 @@ if [ "$IPSUM_ENABLED" = 1 ]; then
         [ -s "$IPSUM_FILE" ] || add WARN lists "ipsum list file not yet downloaded ($IPSUM_FILE)" "splify-update-ipsum"
         [ "$_age" -gt "$STALE_AGE" ] 2>/dev/null && add WARN lists "ipsum list is stale ($((_age/86400))d old)" "splify-update-ipsum"
     fi
-    list_row ipsum true "${_c:-0}" "$IPSUM_MIN_COUNT" "$IPSUM_FILE" "$_age" "$_ok"
+    _ifc=0; [ -s "$IPSUM_FILE" ] && _ifc="$(grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' "$IPSUM_FILE" 2>/dev/null)"
+    list_row ipsum true "${_c:-0}" "$IPSUM_MIN_COUNT" "$IPSUM_FILE" "$_age" "$_ok" "${_ifc:-0}"
 else list_row ipsum false 0 "$IPSUM_MIN_COUNT" "$IPSUM_FILE" -1 true; fi
 # ru/cn (direct list; live nft set only exists in full mode)
 _age=-1; [ -s "$RU_FILE" ] && _age="$(file_age "$RU_FILE")"
 if [ "$RU_ENABLED" = 1 ]; then
-    _c="$(set_count "$RU_TABLE" "$RU_SET")"; _ok=true
+    _set="$(set_count "$RU_TABLE" "$RU_SET")"
+    _rfc=0; [ -s "$RU_FILE" ] && _rfc="$(grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' "$RU_FILE" 2>/dev/null)"
+    _c="$(ru_count_for_mode "$MODE" "${_set:-0}" "${_rfc:-0}")"; _ok=true
     if [ "$MODE" = full ]; then
-        [ "${_c:-0}" -ge "$RU_MIN_COUNT" ] || { _ok=false; add FIXABLE lists "ru/cn set has $_c entries (<$RU_MIN_COUNT)" "splify-update-ru, or it reloads on the next failover tick"; }
+        [ "${_set:-0}" -ge "$RU_MIN_COUNT" ] || { _ok=false; add FIXABLE lists "ru/cn set has $_set entries (<$RU_MIN_COUNT)" "splify-update-ru, or it reloads on the next failover tick"; }
     fi
     [ -s "$RU_FILE" ] || add WARN lists "ru/cn list file not yet downloaded ($RU_FILE)" "splify-update-ru"
     [ "$_age" -gt "$STALE_AGE" ] 2>/dev/null && add WARN lists "ru/cn list is stale ($((_age/86400))d old)" "splify-update-ru"
-    list_row ru true "${_c:-0}" "$RU_MIN_COUNT" "$RU_FILE" "$_age" "$_ok"
-else list_row ru false 0 "$RU_MIN_COUNT" "$RU_FILE" -1 true; fi
+    list_row ru true "${_c:-0}" "$RU_MIN_COUNT" "$RU_FILE" "$_age" "$_ok" "${_rfc:-0}"
+else list_row ru false 0 "$RU_MIN_COUNT" "$RU_FILE" -1 true 0; fi
 
 # ---- zapret + nozapret -----------------------------------------------------
 if [ "$ZAPRET_ENABLED" = 1 ]; then

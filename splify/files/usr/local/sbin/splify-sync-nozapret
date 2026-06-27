@@ -13,6 +13,18 @@
 set -e   # fail-fast on curl/validation; no `-u`, /lib/functions.sh isn't nounset-safe
 . /usr/local/lib/splify/common.sh
 
+# The nozapret set is rebuilt on EVERY failover tick (set_vpn -> rebuild_nozapret).
+# When inputs haven't changed and the live set is healthy, that rebuild + its log
+# line is pure churn (N1 log-flood / N2 CPU). nozapret_current decides "already
+# current?": same signature AND live set >= min floor AND not force-requested.
+# Pure logic (no nft/uci) so it is unit-tested off-box via tests/helper.bash.
+nozapret_current() {   # NEW_SIG OLD_SIG LIVE_COUNT MIN FORCED
+    [ "$5" = 1 ] && return 1                         # forced -> rebuild
+    [ -n "$1" ] && [ "$1" = "$2" ] || return 1       # sig empty/changed -> rebuild
+    [ "${3:-0}" -ge "${4:-0}" ] 2>/dev/null || return 1  # live set drained -> rebuild
+    return 0
+}
+
 [ "$ZAPRET_ENABLED" = "1" ] || { log "zapret disabled (ZAPRET_ENABLED=0)"; exit 0; }
 # An explicit caller (failover) sets NOZAPRET_INCLUDE_VPN. When unset (daily cron
 # / ipsum-ru refresh cascade), derive it from the live state so a refresh while in
@@ -28,6 +40,7 @@ else
 fi
 
 TMP="/tmp/splify-sync-nozapret.$$"
+NOZAPRET_SIG="/var/run/splify-nozapret.sig"
 mkdir -p "$TMP"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
@@ -48,7 +61,18 @@ if [ "$INCLUDE_VPN" = "1" ] && [ "$count" -lt "$ZAPRET_NOZAPRET_MIN" ]; then
     die "too few entries: $count (need $ZAPRET_NOZAPRET_MIN)"
 fi
 
+# N1/N2: skip the rebuild + log entirely when the candidate set is byte-identical
+# to the last synced one AND the live set is still healthy. INCLUDE_VPN is part of
+# the signature so the degradation toggle (1->0) always forces a rebuild.
+NEW_SIG="$INCLUDE_VPN:$(md5sum < "$TMP/all.lst" | cut -d' ' -f1)"
+OLD_SIG="$(cat "$NOZAPRET_SIG" 2>/dev/null)"
+LIVE="$(set_count "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET")"
+if nozapret_current "$NEW_SIG" "$OLD_SIG" "${LIVE:-0}" "$ZAPRET_NOZAPRET_MIN" "${SPLIFY_FORCE_SYNC:-0}"; then
+    exit 0
+fi
+
 emit_nft_set_block "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET" < "$TMP/all.lst" > "$TMP/sync.nft"
 
 nft -f "$TMP/sync.nft" || die "atomic nft sync failed (kept: $TMP/sync.nft)"
+printf '%s\n' "$NEW_SIG" > "$NOZAPRET_SIG"
 log "nozapret synced: $count entries"
