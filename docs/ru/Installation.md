@@ -1,75 +1,40 @@
 # Установка
 
-← [Назад на главную](Home.md)
+← [На главную](Home.md)
 
-Требуется **OpenWrt 24.10+ / 25.12+ (менеджер пакетов apk)**.
+## Одной командой (рекомендуется)
 
-## 1. Получить пакеты
+На роутере с OpenWrt **24.10+ / 25.12+** (менеджер пакетов `apk`), от root:
 
-Собираются два (плюс языковой) пакета:
+    wget -O - https://raw.githubusercontent.com/xyzmean/splify/main/install.sh | sh
 
-- `splify` — ядро (скрипты, служба, nftables/dnsmasq-слой);
-- `luci-app-splify` — страница настроек LuCI;
-- `luci-i18n-splify-ru` — русский перевод интерфейса (опционально).
+Установщик сам:
 
-Способы получить `.apk`:
+- находит последний релиз splify на GitHub;
+- скачивает пакеты `splify`, `luci-app-splify`, `luci-i18n-splify-ru`;
+- ставит их (`apk add`), зависимости подтягиваются из фидов OpenWrt;
+- поднимает службу и ежедневное обновление списков.
 
-### Релизы GitHub
-Готовые `.apk` прикладываются к каждому релизу (workflow `release.yml` /
-`auto-version.yml`). Скачайте все три файла.
+После установки откройте **Сервисы → splify → Главная**.
 
-### Сборка в CI
-Открыть **Actions → Build packages → Run workflow**. Артефакт `packages` будет
-содержать `splify-*.apk`, `luci-app-splify-*.apk` и
-`luci-i18n-splify-*.apk`.
+## Требования
 
-### Локальная сборка через Docker (OpenWrt SDK)
-```sh
-docker build -f Dockerfile-apk --build-arg VERSION=1.7.2 -t splify:local .
-id=$(docker create splify:local)
-docker cp "$id:/builder/bin/packages/." ./out/
-docker rm "$id"
-find ./out -name '*splify*.apk'
-```
-Тяжёлый слой зависимостей (ядро + nftables/curl/dnsmasq/ip-full/luci-base)
-кэшируется один раз; пересборка наших пакетов занимает секунды.
+- OpenWrt **24.10+** или **25.12+** с менеджером `apk`.
+- Доступ в интернет на роутере (для скачивания пакетов и списков).
+- Права root.
 
-## 2. Установить на роутер
+## Вручную (из файлов релиза)
 
-Скопируйте `.apk` на роутер и установите:
+Если нужно поставить из заранее скачанных файлов:
 
-```sh
-apk add ./splify-*.apk ./luci-app-splify-*.apk ./luci-i18n-splify-*.apk
-```
+    apk add --allow-untrusted ./splify-*.apk ./luci-app-splify-*.apk ./luci-i18n-splify-ru-*.apk
 
-`luci-i18n-splify-*` — пакет перевода; без него интерфейс будет на английском
-(английский встроен). zapret ставится **отдельно** и определяется в рантайме — он
-не является зависимостью.
-
-## 3. Что произойдёт при установке
-
-`postinst` пакета `splify`:
-
-- добавит в `cron` ежедневное обновление списков (04:30 ipsum, 04:45 ru/cn,
-  04:50 домены);
-- включит и запустит службу `splify`;
-- перезагрузит `rpcd`, чтобы зарегистрировать ubus-объект `splify`
-  (`/usr/libexec/rpcd/splify`), через который ходит панель LuCI;
-- в фоне скачает списки первый раз (установка возвращается сразу).
-
-При обновлении с 1.7.x `uci-defaults`-миграция аддитивно проставляет новые
-значения по умолчанию (например `type=wg` на существующих эндпоинтах) —
-существующий `/etc/config/splify` не ломается.
-
-## 4. Дальше
-
-Перейдите к [настройке и панели LuCI](Configuration.md). До создания туннельного
-интерфейса и добавления его в splify весь трафик безопасно идёт через WAN.
+`zapret` опционален — поставьте отдельно, если нужен обход DPI; splify определит
+его в рантайме.
 
 ## Удаление
 
-```sh
-apk del luci-app-splify splify
-```
-`prerm` вызывает `splify-uninstall` (снимает правила/маршруты/сеты). Ручной
-полный демонтаж — командой `splify-uninstall`.
+    wget -O - https://raw.githubusercontent.com/xyzmean/splify/main/uninstall.sh | sh
+
+Конфигурация `/etc/config/splify` при удалении сохраняется — удалите вручную,
+если она больше не нужна.
