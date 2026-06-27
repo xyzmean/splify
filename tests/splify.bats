@@ -216,3 +216,9 @@ config_get() { eval "$1=\"\${cfg_${2}_${3}:-$4}\""; }
     run fw_zone_glob_covering tun0; [ "$status" -ne 0 ]   # nothing covers it
     run fw_zone_glob_covering eth0; [ "$status" -ne 0 ]   # exact device, not a glob
 }
+
+# The simple Главная toggle relies on two allow-listed rpcd actions, on/off.
+@test "rpcd action handles on/off" {
+    run grep -nE '^[[:space:]]*(on|off)\)' splify/files/usr/libexec/rpcd/splify
+    [ "$status" -eq 0 ]
+}

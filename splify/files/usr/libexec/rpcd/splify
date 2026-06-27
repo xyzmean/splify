@@ -64,6 +64,13 @@ case "$1" in
                             ''|*[!A-Za-z0-9_.-]*) out="invalid or missing iface"; code=2 ;;
                             *) out="$(/usr/local/sbin/splify-firewall fix "$iface" 2>&1)"; code=$? ;;
                         esac ;;
+                    on)
+                        /etc/init.d/splify enable >/dev/null 2>&1
+                        out="$(/etc/init.d/splify restart 2>&1)"; code=$? ;;
+                    off)
+                        /etc/init.d/splify disable >/dev/null 2>&1
+                        /etc/init.d/splify stop >/dev/null 2>&1
+                        out="$(/usr/local/sbin/splify-disable 2>&1)"; code=$? ;;
                     *) out="unknown action: ${name:-(none)}"; code=2 ;;
                 esac
 
