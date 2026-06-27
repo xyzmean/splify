@@ -11,20 +11,17 @@ include $(INCLUDE_DIR)/package.mk
 define Package/splify
   SECTION:=net
   CATEGORY:=Network
-  TITLE:=Local WireGuard/AmneziaWG split-tunnel with priority failover + zapret
+  TITLE:=splify — простой split-tunnel VPN-шлюз для OpenWrt
   URL:=https://github.com/xyzmean/splify
   DEPENDS:=+nftables +curl +dnsmasq-full +ip-full +kmod-nft-core
   PKGARCH:=all
 endef
 
 define Package/splify/description
- Policy-routes LAN traffic over one of several WireGuard/AmneziaWG tunnels.
- Downloads IP lists (blocked/foreign -> VPN, ru/cn -> direct) and optional domain
- lists, builds a zapret nozapret bypass set, and runs a priority failover loop
- across the configured tunnels: restart a stuck tunnel first, fall over to the
- next priority, then degrade to zapret DPI-bypass on WAN, then plain WAN, always
- recovering toward priority #1. Fully local — configured via UCI/LuCI, no API.
- zapret is optional and detected at runtime.
+ splify маршрутизирует трафик локальной сети через WireGuard/AmneziaWG-туннель:
+ заблокированное идёт через VPN, остальное — напрямую. Приоритетный failover между
+ туннелями, автообновляемые списки, опциональный обход DPI (zapret). Управление —
+ через простую страницу в LuCI. zapret опционален и определяется в рантайме.
 endef
 
 define Package/splify/conffiles

@@ -5,7 +5,7 @@ PKG_RELEASE:=1
 PKG_MAINTAINER:=xyzmean
 PKG_LICENSE:=MIT
 
-LUCI_TITLE:=LuCI interface for splify
+LUCI_TITLE:=splify — веб-интерфейс
 LUCI_DEPENDS:=+luci-base +splify
 LUCI_PKGARCH:=all
 
