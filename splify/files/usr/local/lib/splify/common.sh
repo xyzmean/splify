@@ -158,15 +158,27 @@ _ep_type_emit() {  # $1=section $2=wanted iface — print type if it matches
 }
 ep_type() { config_foreach _ep_type_emit endpoint "$1" | head -1; }
 
+# A `singbox` endpoint is the documented future-transport stub: there is no
+# working sing-box backend yet, so every dispatcher treats it as DOWN and the
+# failover loop simply skips it. Warn once per process to avoid log spam.
+_SINGBOX_WARNED=
+_ep_singbox_down() {
+    [ -n "$_SINGBOX_WARNED" ] || {
+        logger -t splify "sing-box backend not implemented yet (endpoint $1); treated as down"
+        _SINGBOX_WARNED=1
+    }
+}
+
 # Is there a live egress device for this endpoint? (wg = kernel link present)
-ep_present() { case "$(ep_type "$1")" in wg|*) iface_present "$1" ;; esac; }
+ep_present() { case "$(ep_type "$1")" in singbox) _ep_singbox_down "$1"; return 1 ;; wg|*) iface_present "$1" ;; esac; }
 # L3 device for `ip route … dev` (wg = the iface itself).
-ep_egress_dev() { case "$(ep_type "$1")" in wg|*) echo "$1" ;; esac; }
+ep_egress_dev() { case "$(ep_type "$1")" in singbox) _ep_singbox_down "$1"; return 1 ;; wg|*) echo "$1" ;; esac; }
 # Liveness age in seconds, smaller = healthier (wg = handshake age; 999999 down).
-ep_liveness() { case "$(ep_type "$1")" in wg|*) wg_handshake_age "$1" ;; esac; }
+ep_liveness() { case "$(ep_type "$1")" in singbox) _ep_singbox_down "$1"; echo 999999 ;; wg|*) wg_handshake_age "$1" ;; esac; }
 # rx/tx cumulative bytes — echoes "rx tx" (wg = summed `wg show transfer`).
 ep_transfer() {
     case "$(ep_type "$1")" in
+        singbox) _ep_singbox_down "$1"; echo "0 0" ;;
         wg|*) wgshow "$1" transfer \
             | awk '{rx+=$2; tx+=$3} END{printf "%d %d", rx+0, tx+0}' ;;
     esac
@@ -175,12 +187,14 @@ ep_transfer() {
 # to wait for liveness do so themselves (failover's wait_handshake).
 ep_bringup() {
     case "$(ep_type "$1")" in
+        singbox) _ep_singbox_down "$1" ;;
         wg|*) ifup "$1" >/dev/null 2>&1 \
             || /etc/init.d/network reload >/dev/null 2>&1 || true ;;
     esac
 }
 ep_restart() {
     case "$(ep_type "$1")" in
+        singbox) _ep_singbox_down "$1" ;;
         wg|*) ifdown "$1" >/dev/null 2>&1 || true
               ifup "$1" >/dev/null 2>&1 || true ;;
     esac

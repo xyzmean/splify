@@ -141,6 +141,7 @@ return view.extend({
 		// умолчанием, чтобы конфиг всегда нёс явный тип.
 		o = s.option(form.ListValue, 'type', _('Тип'));
 		o.value('wg', _('WireGuard / AmneziaWG'));
+		o.value('singbox', _('sing-box (скоро)'));
 		o.default = 'wg';
 		o.modalonly = true;
 
