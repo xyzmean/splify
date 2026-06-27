@@ -44,6 +44,7 @@ jobs:
           find ./out \( -name 'splify*.apk' -o -name 'luci-app-splify*.apk' \
                         -o -name 'luci-i18n-splify-*.apk' \) \
                -exec cp -v {} release/ \;
+          cp -v install.sh release/
           echo "--- shipped ---"; ls -l release
 
       - name: Publish release
@@ -53,11 +54,18 @@ jobs:
           name: splify v${{ inputs.version }}
           prerelease: false
           make_latest: true
-          files: release/*.apk
+          files: |
+            release/*.apk
+            release/install.sh
           body: |
             Релиз splify v${{ inputs.version }}.
 
-            Установка на роутер (OpenWrt 25.12+ / apk):
+            Установка одной командой на роутере (OpenWrt 24.10+/25.12+ / apk):
             ```
-            apk add ./splify-*.apk ./luci-app-splify-*.apk ./luci-i18n-splify-*.apk
+            wget -O - https://raw.githubusercontent.com/xyzmean/splify/main/install.sh | sh
+            ```
+
+            Или вручную из приложённых файлов:
+            ```
+            apk add --allow-untrusted ./splify-*.apk ./luci-app-splify-*.apk ./luci-i18n-splify-ru-*.apk
             ```
