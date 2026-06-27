@@ -2,15 +2,15 @@
 
 ← [Назад на главную](Home.md)
 
-wg-split тянет IP- и доменные списки по URL и обновляет их ежедневно (cron). Сеты
+splify тянет IP- и доменные списки по URL и обновляет их ежедневно (cron). Сеты
 nftables живут внутри `table inet fw4`.
 
 ## IP-списки
 
 | Список | Файл | nft-сет | Куда | Мин. записей |
 |--------|------|---------|------|:------------:|
-| **ipsum** | `/etc/wg-split/ipsum.lst` | `wg_split_ipsum_v4` | VPN | 5000 |
-| **ru/cn** | `/etc/wg-split/ru_subnets.lst` | `wg_split_ru_subnets_v4` | direct (+ feed nozapret) | 5000 |
+| **ipsum** | `/etc/splify/ipsum.lst` | `splify_ipsum_v4` | VPN | 5000 |
+| **ru/cn** | `/etc/splify/ru_subnets.lst` | `splify_ru_subnets_v4` | direct (+ feed nozapret) | 5000 |
 
 - **ipsum** — заблокированные/зарубежные IP, которые должны ехать через VPN
   (используется в режиме `blocklist`).
@@ -29,7 +29,7 @@ nftables живут внутри `table inet fw4`.
 `direct_domain`) превращаются в директивы `nftset=` для dnsmasq и помечают домен
 **в момент DNS-резолва**: имя резолвится → его IP попадает в VPN- или direct-сет.
 
-Файлы: `/etc/wg-split/vpn-domains.lst`, `/etc/wg-split/ignore-domains.lst`,
+Файлы: `/etc/splify/vpn-domains.lst`, `/etc/splify/ignore-domains.lst`,
 дроп-ин dnsmasq генерируется в живой conf-dir dnsmasq.
 
 ## zapret (обход DPI на WAN)
@@ -53,12 +53,12 @@ WAN), предупреждение об этом не критично.
 Ежедневный cron (добавляется в `postinst`):
 
 ```
-30 4 * * *  wg-split-update-ipsum
-45 4 * * *  wg-split-update-ru
-50 4 * * *  wg-split-update-domains
+30 4 * * *  splify-update-ipsum
+45 4 * * *  splify-update-ru
+50 4 * * *  splify-update-domains
 ```
 
-Вручную/из LuCI: `wg-split-update-ipsum`, `-ru`, `-domains`. Апдейтеры
+Вручную/из LuCI: `splify-update-ipsum`, `-ru`, `-domains`. Апдейтеры
 сериализуются на `flock`, чтобы параллельные запуски (cron + Save&Apply) не
 спамили ошибками. После успешного скачивания список переприменяется.
 

@@ -19,18 +19,18 @@ jobs:
       - name: shellcheck (busybox-ash shell core)
         run: |
           shellcheck -s sh \
-            wg-split/files/usr/local/sbin/wg-split-* \
-            wg-split/files/usr/local/lib/wg-split/*.sh \
-            wg-split/files/usr/libexec/rpcd/wg-split \
-            wg-split/files/etc/init.d/wg-split \
-            wg-split/files/etc/uci-defaults/*
+            splify/files/usr/local/sbin/splify-* \
+            splify/files/usr/local/lib/splify/*.sh \
+            splify/files/usr/libexec/rpcd/splify \
+            splify/files/etc/init.d/splify \
+            splify/files/etc/uci-defaults/*
 
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: doctor self-test (pure logic, off-box)
-        run: WG_SPLIT_SELFTEST=1 sh wg-split/files/usr/local/sbin/wg-split-doctor
+        run: SPLIFY_SELFTEST=1 sh splify/files/usr/local/sbin/splify-doctor
       - name: Install bats
         run: sudo apt-get update -qq && sudo apt-get install -y bats
       - name: bats unit tests

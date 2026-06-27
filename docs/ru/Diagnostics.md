@@ -1,20 +1,20 @@
-# Диагностика — wg-split-doctor
+# Диагностика — splify-doctor
 
 ← [Назад на главную](Home.md)
 
-`wg-split-doctor` отвечает на вопрос «что сломано и что чинить?» без ручного
+`splify-doctor` отвечает на вопрос «что сломано и что чинить?» без ручного
 лазания по SSH. Это **пассивный** инструмент: он только читает состояние и
 **никогда не зондирует** туннели (зондирование меняет маршрутизацию и должно жить
 только в демоне failover).
 
 ```sh
-wg-split-doctor          # человекочитаемый отчёт (для SSH)
-wg-split-doctor --json   # машинный формат (его показывает панель LuCI)
-wg-split-doctor --events # JSON-журнал переходов failover (таймлайн)
+splify-doctor          # человекочитаемый отчёт (для SSH)
+splify-doctor --json   # машинный формат (его показывает панель LuCI)
+splify-doctor --events # JSON-журнал переходов failover (таймлайн)
 ```
 
 Панель LuCI получает этот JSON не напрямую, а через least-privilege
-ubus-объект `wg-split` (`status` = `--json`, `events` = `--events`); см.
+ubus-объект `splify` (`status` = `--json`, `events` = `--events`); см.
 [CLI и файлы](CLI-Reference.md).
 
 Код выхода = худшая серьёзность, поэтому работает и как пост-инсталляционная
@@ -36,13 +36,13 @@ ubus-объект `wg-split` (`status` = `--json`, `events` = `--events`); см.
   свежее = `ok`, старое = `idle`, без активной пробы); `route_allowed_ips=0` на
   пирах; накопленный трафик `rx`/`tx` и `type` эндпоинта (в `--json`).
 - **firewall:** туннель в зоне; на зоне `masq=1`; есть форвардинг `lan → зона`.
-  Каждое замечание чинится одной кнопкой в LuCI (`wg-split-firewall fix <iface>`).
+  Каждое замечание чинится одной кнопкой в LuCI (`splify-firewall fix <iface>`).
 - **site-to-site:** каждый `vpn_cidr` (LAN пира) реально уходит в туннель.
   Проверка пассивная и двухступенчатая: (1) в режимах `blocklist`/`split` подсеть
-  должна быть в живом nft-сете VPN (`wg_split_vpn_v4`) — иначе трафик к ней вообще
+  должна быть в живом nft-сете VPN (`splify_vpn_v4`) — иначе трафик к ней вообще
   не маркируется (в `full` есть catch-all, шаг пропускается); (2) маркированный
   трафик должен выходить через активный туннель. FIXABLE с подсказкой
-  `wg-split-apply`. Forced-`mark`-`ip route get` сам по себе этого не ловит —
+  `splify-apply`. Forced-`mark`-`ip route get` сам по себе этого не ловит —
   таблица 200 всё равно резолвится в туннель, поэтому ключевой сигнал — членство
   в сете.
 - **routing/killswitch:** правильные `ip rule` (анти-loop prio 1000, wg-марка
@@ -65,11 +65,11 @@ ubus-объект `wg-split` (`status` = `--json`, `events` = `--events`); см.
 
 - Самотест чистой логики **вне роутера** (без зависимостей):
   ```sh
-  WG_SPLIT_SELFTEST=1 wg-split-doctor
+  SPLIFY_SELFTEST=1 splify-doctor
   ```
 - Машинный вывод для скриптов/CI:
   ```sh
-  wg-split-doctor --json | jq .overall
+  splify-doctor --json | jq .overall
   ```
 
 Панель LuCI показывает этот же JSON в виде hero-баннера, цепочки, таблиц и блока

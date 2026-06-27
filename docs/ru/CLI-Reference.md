@@ -6,39 +6,39 @@
 
 | Команда | Назначение |
 |---------|-----------|
-| `wg-split-doctor` | структурированная диагностика (текст; `--json` для LuCI; `--events` — JSON-журнал failover) |
-| `wg-split-firewall {check\|fix} <iface>` | проверить/починить firewall-зону туннеля (зона + masq + forwarding lan↔туннель↔wan) |
-| `wg-split-status` | компактный снимок рантайма |
-| `wg-split-apply` | регенерировать nft/dnsmasq-слой из UCI и переустановить маршруты |
-| `wg-split-failover` | один проход failover (`--daemon` — цикл, это и есть служба) |
-| `wg-split-disable` | аварийно: только WAN |
-| `wg-split-uninstall` | полный демонтаж (правила/маршруты/сеты) |
-| `wg-split-update-ipsum` | скачать/применить список ipsum (VPN) |
-| `wg-split-update-ru` | скачать/применить список ru/cn (direct) |
-| `wg-split-update-domains` | скачать/применить доменные списки |
-| `wg-split-sync-nozapret` | пересобрать bypass-сет zapret |
-| `/etc/init.d/wg-split {start\|stop\|restart\|enable}` | управление службой procd |
-| `logread -e wg-split` | журнал службы/failover |
+| `splify-doctor` | структурированная диагностика (текст; `--json` для LuCI; `--events` — JSON-журнал failover) |
+| `splify-firewall {check\|fix} <iface>` | проверить/починить firewall-зону туннеля (зона + masq + forwarding lan↔туннель↔wan) |
+| `splify-status` | компактный снимок рантайма |
+| `splify-apply` | регенерировать nft/dnsmasq-слой из UCI и переустановить маршруты |
+| `splify-failover` | один проход failover (`--daemon` — цикл, это и есть служба) |
+| `splify-disable` | аварийно: только WAN |
+| `splify-uninstall` | полный демонтаж (правила/маршруты/сеты) |
+| `splify-update-ipsum` | скачать/применить список ipsum (VPN) |
+| `splify-update-ru` | скачать/применить список ru/cn (direct) |
+| `splify-update-domains` | скачать/применить доменные списки |
+| `splify-sync-nozapret` | пересобрать bypass-сет zapret |
+| `/etc/init.d/splify {start\|stop\|restart\|enable}` | управление службой procd |
+| `logread -e splify` | журнал службы/failover |
 
 ## Файлы
 
 | Путь | Роль |
 |------|------|
-| `/etc/config/wg-split` | UCI-конфиг (global + endpoint + device) |
-| `/usr/local/sbin/wg-split-failover` | машина состояний failover + демон procd |
-| `/usr/local/sbin/wg-split-doctor` | диагностика (текст + `--json`) |
-| `/usr/local/sbin/wg-split-apply` | регенерация nft/dnsmasq-слоя из UCI |
-| `/usr/local/sbin/wg-split-firewall` | создание/починка firewall-зоны туннеля |
-| `/usr/libexec/rpcd/wg-split` | ubus-объект `wg-split` (status/events/action) для LuCI |
-| `/var/run/wg-split-events` | RAM-журнал событий failover (таймлайн) |
-| `/usr/local/sbin/wg-split-update-{ipsum,ru,domains}` | загрузчики списков |
-| `/usr/local/sbin/wg-split-sync-nozapret` | пересборка bypass-сета zapret |
-| `/usr/local/lib/wg-split/common.sh` | общие хелперы (загружают UCI) |
-| `/etc/nftables.d/30-wg-split.nft` | канонический ruleset (регенерируется apply) |
-| `/var/run/wg-split-state` | активный путь (`vpn:<if>`/`zapret`/`wan`/`killswitch`) |
-| `/var/run/wg-split-failcount` | счётчик сбоев |
-| `/etc/wg-split/*.lst` | скачанные списки |
-| `luci-app-wg-split/` | страница настроек LuCI |
+| `/etc/config/splify` | UCI-конфиг (global + endpoint + device) |
+| `/usr/local/sbin/splify-failover` | машина состояний failover + демон procd |
+| `/usr/local/sbin/splify-doctor` | диагностика (текст + `--json`) |
+| `/usr/local/sbin/splify-apply` | регенерация nft/dnsmasq-слоя из UCI |
+| `/usr/local/sbin/splify-firewall` | создание/починка firewall-зоны туннеля |
+| `/usr/libexec/rpcd/splify` | ubus-объект `splify` (status/events/action) для LuCI |
+| `/var/run/splify-events` | RAM-журнал событий failover (таймлайн) |
+| `/usr/local/sbin/splify-update-{ipsum,ru,domains}` | загрузчики списков |
+| `/usr/local/sbin/splify-sync-nozapret` | пересборка bypass-сета zapret |
+| `/usr/local/lib/splify/common.sh` | общие хелперы (загружают UCI) |
+| `/etc/nftables.d/30-splify.nft` | канонический ruleset (регенерируется apply) |
+| `/var/run/splify-state` | активный путь (`vpn:<if>`/`zapret`/`wan`/`killswitch`) |
+| `/var/run/splify-failcount` | счётчик сбоев |
+| `/etc/splify/*.lst` | скачанные списки |
+| `luci-app-splify/` | страница настроек LuCI |
 
 ## Внутренние константы (не настраиваются)
 
@@ -55,9 +55,9 @@
 ## UCI-секции
 
 ```
-config wg-split 'global'   # все глобальные опции (mode, interval, killswitch, …)
+config splify 'global'   # все глобальные опции (mode, interval, killswitch, …)
 config endpoint            # один туннель: option iface, option priority
 config device              # пин хоста: option ip, option mode (vpn|direct)
 ```
 
-Правка через LuCI или `uci set wg-split.global.<opt>=...; uci commit; wg-split-apply`.
+Правка через LuCI или `uci set splify.global.<opt>=...; uci commit; splify-apply`.

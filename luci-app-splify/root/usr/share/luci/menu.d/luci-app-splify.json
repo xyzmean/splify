@@ -1,0 +1,34 @@
+{
+	"admin/services/splify": {
+		"title": "splify",
+		"order": 60,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-splify" ]
+		}
+	},
+	"admin/services/splify/status": {
+		"title": "Status",
+		"order": 1,
+		"action": {
+			"type": "view",
+			"path": "splify/status"
+		},
+		"depends": {
+			"acl": [ "luci-app-splify" ]
+		}
+	},
+	"admin/services/splify/settings": {
+		"title": "Settings",
+		"order": 2,
+		"action": {
+			"type": "view",
+			"path": "splify/settings"
+		},
+		"depends": {
+			"acl": [ "luci-app-splify" ]
+		}
+	}
+}

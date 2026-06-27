@@ -1,4 +1,4 @@
-# Build the wg-split .apk packages in the OpenWrt SDK.
+# Build the splify .apk packages in the OpenWrt SDK.
 #
 # Both packages are PKGARCH:=all (pure shell + LuCI files, nothing compiles), so
 # any SDK arch yields identical .apk — we use x86_64.
@@ -30,15 +30,15 @@ RUN ./scripts/feeds update luci packages base \
 
 # Our local feed — changes here (every fix) only invalidate the cheap layers
 # below; the dependency/kernel layer above stays cached.
-COPY --chown=buildbot:buildbot wg-split          feed/wg-split
-COPY --chown=buildbot:buildbot luci-app-wg-split feed/luci-app-wg-split
-RUN echo "src-link wgsplit /builder/feed" >> feeds.conf.default \
- && ./scripts/feeds update wgsplit \
- && ./scripts/feeds install -p wgsplit wg-split luci-app-wg-split
+COPY --chown=buildbot:buildbot splify          feed/splify
+COPY --chown=buildbot:buildbot luci-app-splify feed/luci-app-splify
+RUN echo "src-link splify /builder/feed" >> feeds.conf.default \
+ && ./scripts/feeds update splify \
+ && ./scripts/feeds install -p splify splify luci-app-splify
 
 # Stamp the release version and build only our two packages. Deps are already in
 # build_dir/staging_dir from the cached layer, so make skips them.
 ARG VERSION=0.0.0
 RUN sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=${VERSION}/" \
-        feed/wg-split/Makefile feed/luci-app-wg-split/Makefile \
- && make V=s package/wg-split/compile package/luci-app-wg-split/compile
+        feed/splify/Makefile feed/luci-app-splify/Makefile \
+ && make V=s package/splify/compile package/luci-app-splify/compile

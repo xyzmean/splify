@@ -1,0 +1,20 @@
+{
+	"luci-app-splify": {
+		"description": "Grant access to splify status, diagnostics and maintenance actions",
+		"read": {
+			"uci": [ "splify", "network" ],
+			"ubus": {
+				"network.interface": [ "dump" ],
+				"network": [ "get_proto_handlers" ],
+				"luci-rpc": [ "getHostHints" ],
+				"splify": [ "status", "events" ]
+			}
+		},
+		"write": {
+			"uci": [ "splify" ],
+			"ubus": {
+				"splify": [ "action" ]
+			}
+		}
+	}
+}

@@ -1,4 +1,4 @@
-# Shared bats helper for wg-split unit tests.
+# Shared bats helper for splify unit tests.
 #
 # The runtime scripts are battle-tested OpenWrt shell that source
 # /lib/functions.sh and call uci/nft/ip — none of which exist in CI. Rather than
@@ -8,8 +8,8 @@
 # count returns to zero, so the extracted text is byte-identical to what ships.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMMON_SH="$REPO_ROOT/wg-split/files/usr/local/lib/wg-split/common.sh"
-DOCTOR_SH="$REPO_ROOT/wg-split/files/usr/local/sbin/wg-split-doctor"
+COMMON_SH="$REPO_ROOT/splify/files/usr/local/lib/splify/common.sh"
+DOCTOR_SH="$REPO_ROOT/splify/files/usr/local/sbin/splify-doctor"
 
 # extract_fn FILE FNNAME -> prints the function's source.
 extract_fn() {

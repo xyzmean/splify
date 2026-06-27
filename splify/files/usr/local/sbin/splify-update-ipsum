@@ -1,0 +1,48 @@
+#!/bin/sh
+# splify-update-ipsum — daily refresh of ipsum.lst → nft set.
+#
+# Strategy: pull URL → validate prefixes → atomic live nft reload via a single
+# compact `flush set; add element { a,b,c }` block. Persist the same block to
+# IPSUM_NFT_FILE so watchdog can replay it after reboots / firewall reloads.
+#
+# Memory model: compact comma-block parses in ~10MB even for 38k IPs (vs
+# ~84MB OOM for per-line `add element { x }`).
+# IPSUM_NFT_FILE lives OUTSIDE /etc/nftables.d/ so fw4 does not auto-include
+# it (the set definition is in /etc/nftables.d/30-splify.nft).
+
+set -e   # fail-fast on curl/validation; no `-u`, /lib/functions.sh isn't nounset-safe
+. /usr/local/lib/splify/common.sh
+
+[ "$IPSUM_ENABLED" = "1" ] || { log "ipsum disabled (IPSUM_ENABLED=0)"; exit 0; }
+[ -n "$IPSUM_URL" ] || die "no ipsum_url configured"
+single_run update-ipsum   # bail if a concurrent run (cron vs self-heal) holds the lock
+
+TMP="/tmp/splify-update-ipsum.$$"
+mkdir -p "$TMP" "$(dirname "$IPSUM_FILE")" "$(dirname "$IPSUM_NFT_FILE")"
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+curl -fsSL --connect-timeout 10 --max-time 180 --retry 2 \
+    -o "$TMP/raw.lst" "$IPSUM_URL" || die "curl failed: $IPSUM_URL"
+
+clean_ip_list < "$TMP/raw.lst" > "$TMP/clean.lst"
+
+count=$(wc -l < "$TMP/clean.lst")
+[ "$count" -ge "$IPSUM_MIN_COUNT" ] || die "only $count valid prefixes (need $IPSUM_MIN_COUNT)"
+
+# Command stream: flush + one comma-block add (no table wrap, no set definition).
+emit_nft_set_block "$IPSUM_TABLE" "$IPSUM_SET" < "$TMP/clean.lst" > "$TMP/live.nft"
+
+# Atomic live reload.
+nft -f "$TMP/live.nft" || die "atomic nft live update failed (kept: $TMP/live.nft)"
+
+# Persist. IPSUM_NFT_FILE is itself the replay source (failover reloads it after a
+# fw4 flush); the list is re-downloaded daily and gated by IPSUM_MIN_COUNT above,
+# so no separate timestamped backups are kept.
+cat "$TMP/live.nft" > "$IPSUM_NFT_FILE"
+cat "$TMP/clean.lst" > "$IPSUM_FILE"
+
+log "ipsum refresh OK: $count prefixes from $IPSUM_URL"
+
+# Cascade: rebuild zapret bypass since it depends on ipsum.lst.
+[ -x /usr/local/sbin/splify-sync-nozapret ] \
+    && /usr/local/sbin/splify-sync-nozapret >/dev/null 2>&1 || true

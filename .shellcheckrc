@@ -1,4 +1,4 @@
-# wg-split shellcheck config. These scripts are busybox-ash for OpenWrt and use
+# splify shellcheck config. These scripts are busybox-ash for OpenWrt and use
 # patterns shellcheck flags but that are correct here; disable only those, so real
 # bugs (unquoted expansions, SC2086, etc.) still fail CI.
 #

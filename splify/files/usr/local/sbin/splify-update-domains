@@ -1,0 +1,44 @@
+#!/bin/sh
+# splify-update-domains — download domain lists for VPN / ignore routing.
+#
+# Pulls vpn_domains_url -> DOMAINS_VPN_FILE and ignore_domains_url ->
+# DOMAINS_IGNORE_FILE (one bare domain per line), then runs splify-apply so the
+# domains are folded into the dnsmasq nftset directives (tagged at resolve time).
+# Domains can't go in the IP-based nozapret set, so they only drive tunnel routing.
+
+set -e   # fail-fast on curl/validation; no `-u`, /lib/functions.sh isn't nounset-safe
+. /usr/local/lib/splify/common.sh
+
+single_run update-domains   # bail if a concurrent run (cron vs self-heal) holds the lock
+
+TMP="/tmp/splify-update-domains.$$"
+mkdir -p "$TMP" "$(dirname "$DOMAINS_VPN_FILE")"
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+# strip comments / adblock markers / whitespace, keep bare hostnames, lowercase, dedup
+clean_domains() {
+    awk '
+        { l=$0; sub(/\r$/,"",l); sub(/[ \t]*#.*/,"",l); sub(/!.*/,"",l)
+          gsub(/[ \t]/,"",l); sub(/^\|\|/,"",l); sub(/\^.*/,"",l); sub(/^\*\./,"",l)
+          l=tolower(l)
+          if (l ~ /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}$/ && !seen[l]++) print l }
+    '
+}
+
+fetch_one() {  # url dest label
+    [ -n "$1" ] || { : > "$2"; return 0; }   # empty URL -> clear the dest list ($2)
+    curl -fsSL --connect-timeout 10 --max-time 120 --retry 2 -o "$TMP/raw" "$1" \
+        || { warn "domains fetch failed: $1"; return 1; }
+    clean_domains < "$TMP/raw" > "$TMP/clean"
+    _n=$(wc -l < "$TMP/clean")
+    [ "$_n" -gt 0 ] || { warn "no valid domains from $1"; return 1; }
+    cat "$TMP/clean" > "$2"
+    log "$3 domains: $_n from $1"
+}
+
+_changed=0
+fetch_one "$VPN_DOMAINS_URL"    "$DOMAINS_VPN_FILE"    vpn    && _changed=1
+fetch_one "$IGNORE_DOMAINS_URL" "$DOMAINS_IGNORE_FILE" ignore && _changed=1
+
+[ "$_changed" = 1 ] && [ -x /usr/local/sbin/splify-apply ] \
+    && /usr/local/sbin/splify-apply >/dev/null 2>&1 || true

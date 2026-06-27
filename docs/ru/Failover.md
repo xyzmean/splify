@@ -2,7 +2,7 @@
 
 ← [Назад на главную](Home.md)
 
-Служба `wg-split` (procd-демон `wg-split-failover --daemon`) каждый тик
+Служба `splify` (procd-демон `splify-failover --daemon`) каждый тик
 (`interval`, по умолч. 180 с) выбирает лучший здоровый туннель и перестраивает
 маршруты. Туннели берутся из секций `endpoint` в UCI, **меньший приоритет
 побеждает**.
@@ -63,14 +63,14 @@ WAN**. Блэкхол ставится и заранее, на время раз
 
 ## Счётчик сбоев
 
-`fail_count` (в `/var/run/wg-split-failcount`) растёт при каждом тике, когда ни
+`fail_count` (в `/var/run/splify-failcount`) растёт при каждом тике, когда ни
 один туннель не здоров, и обнуляется при выборе VPN. Виден в hero-баннере LuCI и в
-`wg-split-doctor`.
+`splify-doctor`.
 
 ## Журнал событий (таймлайн)
 
 Каждый значимый переход демон дописывает в RAM-журнал
-`/var/run/wg-split-events` (кольцевой буфер, последние ~200 строк, формат
+`/var/run/splify-events` (кольцевой буфер, последние ~200 строк, формат
 `ts<TAB>kind<TAB>from<TAB>to<TAB>reason`). Виды событий:
 
 | Вид | Когда |
@@ -83,14 +83,14 @@ WAN**. Блэкхол ставится и заранее, на время раз
 | `wan_fallback` | деградация на обычный WAN |
 
 Журналирование — best-effort и **никогда не ломает** failover. CLI-доступ:
-`wg-split-doctor --events` (JSON, новейшие сверху). Панель LuCI рисует это как
+`splify-doctor --events` (JSON, новейшие сверху). Панель LuCI рисует это как
 **таймлайн отказоустойчивости**.
 
 ## Состояние
 
-Активный путь хранится в `/var/run/wg-split-state`: `vpn:<iface>` | `zapret` |
-`wan` | `killswitch`. Полный журнал службы — `logread -e wg-split`; компактный
-таймлайн переходов — `wg-split-doctor --events`.
+Активный путь хранится в `/var/run/splify-state`: `vpn:<iface>` | `zapret` |
+`wan` | `killswitch`. Полный журнал службы — `logread -e splify`; компактный
+таймлайн переходов — `splify-doctor --events`.
 
 См. [Диагностику](Diagnostics.md) для разбора, почему туннель считается мёртвым
 (чаще всего — firewall, см. [Устранение неполадок](Troubleshooting.md)).

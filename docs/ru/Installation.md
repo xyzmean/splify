@@ -8,9 +8,9 @@
 
 Собираются два (плюс языковой) пакета:
 
-- `wg-split` — ядро (скрипты, служба, nftables/dnsmasq-слой);
-- `luci-app-wg-split` — страница настроек LuCI;
-- `luci-i18n-wg-split-ru` — русский перевод интерфейса (опционально).
+- `splify` — ядро (скрипты, служба, nftables/dnsmasq-слой);
+- `luci-app-splify` — страница настроек LuCI;
+- `luci-i18n-splify-ru` — русский перевод интерфейса (опционально).
 
 Способы получить `.apk`:
 
@@ -20,16 +20,16 @@
 
 ### Сборка в CI
 Открыть **Actions → Build packages → Run workflow**. Артефакт `packages` будет
-содержать `wg-split-*.apk`, `luci-app-wg-split-*.apk` и
-`luci-i18n-wg-split-*.apk`.
+содержать `splify-*.apk`, `luci-app-splify-*.apk` и
+`luci-i18n-splify-*.apk`.
 
 ### Локальная сборка через Docker (OpenWrt SDK)
 ```sh
-docker build -f Dockerfile-apk --build-arg VERSION=1.7.2 -t wg-split:local .
-id=$(docker create wg-split:local)
+docker build -f Dockerfile-apk --build-arg VERSION=1.7.2 -t splify:local .
+id=$(docker create splify:local)
 docker cp "$id:/builder/bin/packages/." ./out/
 docker rm "$id"
-find ./out -name '*wg-split*.apk'
+find ./out -name '*splify*.apk'
 ```
 Тяжёлый слой зависимостей (ядро + nftables/curl/dnsmasq/ip-full/luci-base)
 кэшируется один раз; пересборка наших пакетов занимает секунды.
@@ -39,37 +39,37 @@ find ./out -name '*wg-split*.apk'
 Скопируйте `.apk` на роутер и установите:
 
 ```sh
-apk add ./wg-split-*.apk ./luci-app-wg-split-*.apk ./luci-i18n-wg-split-*.apk
+apk add ./splify-*.apk ./luci-app-splify-*.apk ./luci-i18n-splify-*.apk
 ```
 
-`luci-i18n-wg-split-*` — пакет перевода; без него интерфейс будет на английском
+`luci-i18n-splify-*` — пакет перевода; без него интерфейс будет на английском
 (английский встроен). zapret ставится **отдельно** и определяется в рантайме — он
 не является зависимостью.
 
 ## 3. Что произойдёт при установке
 
-`postinst` пакета `wg-split`:
+`postinst` пакета `splify`:
 
 - добавит в `cron` ежедневное обновление списков (04:30 ipsum, 04:45 ru/cn,
   04:50 домены);
-- включит и запустит службу `wg-split`;
-- перезагрузит `rpcd`, чтобы зарегистрировать ubus-объект `wg-split`
-  (`/usr/libexec/rpcd/wg-split`), через который ходит панель LuCI;
+- включит и запустит службу `splify`;
+- перезагрузит `rpcd`, чтобы зарегистрировать ubus-объект `splify`
+  (`/usr/libexec/rpcd/splify`), через который ходит панель LuCI;
 - в фоне скачает списки первый раз (установка возвращается сразу).
 
 При обновлении с 1.7.x `uci-defaults`-миграция аддитивно проставляет новые
 значения по умолчанию (например `type=wg` на существующих эндпоинтах) —
-существующий `/etc/config/wg-split` не ломается.
+существующий `/etc/config/splify` не ломается.
 
 ## 4. Дальше
 
 Перейдите к [настройке и панели LuCI](Configuration.md). До создания туннельного
-интерфейса и добавления его в wg-split весь трафик безопасно идёт через WAN.
+интерфейса и добавления его в splify весь трафик безопасно идёт через WAN.
 
 ## Удаление
 
 ```sh
-apk del luci-app-wg-split wg-split
+apk del luci-app-splify splify
 ```
-`prerm` вызывает `wg-split-uninstall` (снимает правила/маршруты/сеты). Ручной
-полный демонтаж — командой `wg-split-uninstall`.
+`prerm` вызывает `splify-uninstall` (снимает правила/маршруты/сеты). Ручной
+полный демонтаж — командой `splify-uninstall`.

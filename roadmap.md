@@ -1,8 +1,8 @@
-# wg-split Roadmap
+# splify Roadmap
 
 ## Direction
 
-Build wg-split into a self-diagnosing OpenWrt router product: reliable routing
+Build splify into a self-diagnosing OpenWrt router product: reliable routing
 core first, a clear LuCI operator panel second, and simple installation and
 recovery flows third.
 
@@ -14,10 +14,10 @@ The next development track focuses on:
 
 ## Shipped
 
-- **1.7.x** — `wg-split-doctor` structured checks (`OK`/`WARN`/`FIXABLE`/`FAIL`),
+- **1.7.x** — `splify-doctor` structured checks (`OK`/`WARN`/`FIXABLE`/`FAIL`),
   passive diagnostics, exact routing assertions; LuCI status panel + i18n.
 - **2.0.0** — dashboard/settings tab split; live per-tunnel traffic; failover
-  timeline (`--events`); one-click firewall auto-fix (`wg-split-firewall`);
+  timeline (`--events`); one-click firewall auto-fix (`splify-firewall`);
   least-privilege rpcd/ubus object; site-to-site doctor check; transport-agnostic
   endpoint seam (`type` + `ep_*`); CI `shellcheck`/`bats`; config migration.
 
@@ -36,7 +36,7 @@ without requiring manual SSH spelunking.
 
 ### Planned Work
 
-- Add `wg-split-doctor` or extend `wg-split-status --json`.
+- Add `splify-doctor` or extend `splify-status --json`.
 - Return structured checks with severity: `OK`, `WARN`, `FAIL`, `FIXABLE`.
 - Keep a human-readable CLI output for SSH users.
 - Provide machine-readable output for LuCI.
@@ -52,7 +52,7 @@ without requiring manual SSH spelunking.
 - Firewall zone exists for each endpoint.
 - Endpoint firewall zone has `masq=1`.
 - LAN to endpoint-zone forwarding exists.
-- `ip rule` entries match expected wg-split priorities.
+- `ip rule` entries match expected splify priorities.
 - Route table `200` contains the expected default route or blackhole.
 - Killswitch state matches config and runtime state.
 - nft sets exist: `ipsum`, `ru`, `nozapret` where applicable.
@@ -64,11 +64,11 @@ without requiring manual SSH spelunking.
 
 ### First Sprint
 
-1. Add `wg-split-doctor`.
+1. Add `splify-doctor`.
 2. Implement text output.
 3. Implement `--json` output.
 4. Move shared status/diagnostic helpers into `common.sh` only when reuse is real.
-5. Keep `wg-split-status` as a compact runtime snapshot, or make it call doctor
+5. Keep `splify-status` as a compact runtime snapshot, or make it call doctor
    for the diagnostic section.
 
 ## 2. LuCI Operator Panel
@@ -78,7 +78,7 @@ state, warnings, and direct actions.
 
 ### Planned Work
 
-- Consume `wg-split-doctor --json`.
+- Consume `splify-doctor --json`.
 - Show top-level state:
   - active path: `vpn:<iface>`, `zapret`, `wan`, or `killswitch`;
   - routing mode;
@@ -134,7 +134,7 @@ are not debugging OpenWrt internals every day.
 - Add a post-install verification flow:
   - install packages;
   - configure endpoint;
-  - run `wg-split-doctor`;
+  - run `splify-doctor`;
   - confirm active route;
   - confirm list counts;
   - confirm LuCI status.
@@ -148,14 +148,14 @@ are not debugging OpenWrt internals every day.
   - bad list URL;
   - zapret installed but not running;
   - killswitch blackholed traffic.
-- Consider a `wg-split-setup` helper later if diagnostics show repeated
+- Consider a `splify-setup` helper later if diagnostics show repeated
   fixable first-run issues.
 - Add first-run hints in LuCI when no endpoints or no WG/AWG interfaces exist.
 
 ## Suggested Order
 
-1. `wg-split-doctor` text output.
-2. `wg-split-doctor --json`.
+1. `splify-doctor` text output.
+2. `splify-doctor --json`.
 3. LuCI diagnostic panel fed by JSON.
 4. LuCI action buttons for refresh/restart/apply/disable.
 5. README verification and troubleshooting rewrite.

@@ -1,0 +1,44 @@
+#!/bin/sh
+# splify-update-ru — daily refresh of ru_subnets.lst.
+#
+# Primary consumer: splify-sync-nozapret (zapret bypass set).
+# Optional: if RU_NFT_FILE is set AND an operator has wired a chain that
+# uses RU_SET, the same command-stream refresh writes there too.
+
+set -e   # fail-fast on curl/validation; no `-u`, /lib/functions.sh isn't nounset-safe
+. /usr/local/lib/splify/common.sh
+
+[ "$RU_ENABLED" = "1" ] || { log "ru_subnets disabled (RU_ENABLED=0)"; exit 0; }
+[ -n "$RU_URL" ] || die "no ru_url configured"
+single_run update-ru   # bail if a concurrent run (cron vs self-heal) holds the lock
+
+TMP="/tmp/splify-update-ru.$$"
+mkdir -p "$TMP" "$(dirname "$RU_FILE")"
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+curl -fsSL --connect-timeout 10 --max-time 120 --retry 2 \
+    -o "$TMP/raw.lst" "$RU_URL" || die "curl failed: $RU_URL"
+
+clean_ip_list < "$TMP/raw.lst" > "$TMP/clean.lst"
+
+count=$(wc -l < "$TMP/clean.lst")
+[ "$count" -ge "$RU_MIN_COUNT" ] || die "only $count valid prefixes (need $RU_MIN_COUNT)"
+
+# Persist plain list (consumed by sync-nozapret).
+cat "$TMP/clean.lst" > "$RU_FILE"
+log "ru_subnets refresh OK: $count prefixes from $RU_URL"
+
+# Optional nft set refresh — only if RU_SET is actually defined live (full mode).
+# RU_NFT_FILE is the replay source for failover; like ipsum it's regenerated from
+# the daily, min-count-gated download, so no separate backups are kept.
+if nft list set "$RU_TABLE" "$RU_SET" >/dev/null 2>&1; then
+    mkdir -p "$(dirname "$RU_NFT_FILE")"
+    emit_nft_set_block "$RU_TABLE" "$RU_SET" < "$TMP/clean.lst" > "$TMP/live.nft"
+    nft -f "$TMP/live.nft" || die "atomic ru nft update failed"
+    cat "$TMP/live.nft" > "$RU_NFT_FILE"
+    log "ru nft set refreshed: $count entries"
+fi
+
+# Cascade to zapret bypass.
+[ -x /usr/local/sbin/splify-sync-nozapret ] \
+    && /usr/local/sbin/splify-sync-nozapret >/dev/null 2>&1 || true

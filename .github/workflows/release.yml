@@ -29,7 +29,7 @@ jobs:
           file: ./Dockerfile-apk
           context: .
           load: true
-          tags: wg-split:rel
+          tags: splify:rel
           build-args: |
             VERSION=${{ inputs.version }}
           cache-from: type=gha
@@ -38,11 +38,11 @@ jobs:
       - name: Extract built packages
         run: |
           mkdir -p release
-          id=$(docker create wg-split:rel)
+          id=$(docker create splify:rel)
           docker cp "$id:/builder/bin/packages/." ./out/
           docker rm "$id"
-          find ./out \( -name 'wg-split*.apk' -o -name 'luci-app-wg-split*.apk' \
-                        -o -name 'luci-i18n-wg-split-*.apk' \) \
+          find ./out \( -name 'splify*.apk' -o -name 'luci-app-splify*.apk' \
+                        -o -name 'luci-i18n-splify-*.apk' \) \
                -exec cp -v {} release/ \;
           echo "--- shipped ---"; ls -l release
 
@@ -50,14 +50,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ inputs.version }}
-          name: wg-split v${{ inputs.version }}
+          name: splify v${{ inputs.version }}
           prerelease: false
           make_latest: true
           files: release/*.apk
           body: |
-            Релиз wg-split v${{ inputs.version }}.
+            Релиз splify v${{ inputs.version }}.
 
             Установка на роутер (OpenWrt 25.12+ / apk):
             ```
-            apk add ./wg-split-*.apk ./luci-app-wg-split-*.apk ./luci-i18n-wg-split-*.apk
+            apk add ./splify-*.apk ./luci-app-splify-*.apk ./luci-i18n-splify-*.apk
             ```

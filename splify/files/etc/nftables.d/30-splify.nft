@@ -1,0 +1,15 @@
+# splify canonical ruleset. Installed at /etc/nftables.d/30-splify.nft.
+# fw4 inline-includes this INSIDE `table inet fw4 { ... }` — DO NOT wrap.
+#
+# This is only the install-time SEED (ipsum set, no chains = all-WAN, safe).
+# splify-apply REGENERATES this same file from UCI (/etc/config/splify),
+# adding the chains (splify_endpoint_mark_prerouting @ mangle,
+# splify_ipsum_mark_prerouting @ mangle+1). The ipsum set is populated live by
+# splify-update-ipsum / splify-failover (daily refresh).
+
+set splify_ipsum_v4 {
+    type ipv4_addr
+    flags interval
+    auto-merge
+    size 65536
+}

@@ -1,4 +1,4 @@
-# wg-split
+# splify
 
 Turn an OpenWrt router into a **local, self-contained split-tunnel gateway**.
 LAN traffic is policy-routed over one of several WireGuard/AmneziaWG tunnels with
@@ -17,12 +17,12 @@ optional **zapret** does DPI-bypass on WAN. Everything is configured locally via
   **Status** (hero state, live routing chain, **live rx/tx per tunnel**, lists,
   diagnostics, **failover timeline**) and **Settings** (the UCI form).
 - **One-click firewall fix.** Every firewall finding gets a **“Fix automatically”**
-  button (and a `wg-split-firewall check|fix <iface>` CLI) that creates/repairs the
+  button (and a `splify-firewall check|fix <iface>` CLI) that creates/repairs the
   tunnel’s zone — accept-all + masquerading + lan↔tunnel↔wan forwarding — modelled
   on a known-good AmneziaWG zone. No more three `FAIL`s you have to solve by hand.
 - **Failover event journal.** Switch/recover/restart/fallback transitions are
-  recorded to a RAM ring buffer and shown as a timeline (`wg-split-doctor --events`).
-- **Least-privilege ubus.** LuCI now talks to a `wg-split` rpcd object
+  recorded to a RAM ring buffer and shown as a timeline (`splify-doctor --events`).
+- **Least-privilege ubus.** LuCI now talks to a `splify` rpcd object
   (`status`/`events`/`action`) instead of broad `file:exec` — the ACL grants only
   those three methods.
 - **Site-to-site aware.** “VPN subnets” are labelled for peer LANs, and the doctor
@@ -38,7 +38,7 @@ Configs from 1.7.x keep working unchanged — the UCI schema only grew, additive
 ## What it does
 
 nftables marks → `ip rule` → table 200 → the active tunnel. The policy chains are
-regenerated from UCI by `wg-split-apply`; the `wg-split` service runs the failover
+regenerated from UCI by `splify-apply`; the `splify` service runs the failover
 loop and self-heals the IP sets.
 
 - **`blocklist` mode (default):** only the `ipsum` set (blocked/foreign IPs) rides
@@ -73,10 +73,10 @@ OpenWrt 24.10+ (apk). Build the two packages in CI (see `.github/workflows/build
 or with an OpenWrt SDK, then:
 
 ```sh
-apk add ./wg-split-*.apk ./luci-app-wg-split-*.apk ./luci-i18n-wg-split-*.apk
+apk add ./splify-*.apk ./luci-app-splify-*.apk ./luci-i18n-splify-*.apk
 ```
 
-(`luci-i18n-wg-split-*` is the LuCI translation package — install it for the
+(`luci-i18n-splify-*` is the LuCI translation package — install it for the
 localized UI; it's optional and English is built in.)
 
 `zapret` is optional — install it separately if you want the DPI-bypass rung; it's
@@ -86,14 +86,14 @@ detected at runtime.
 
 1. Create your WireGuard/AmneziaWG tunnel interface(s) the normal way under
    **Network → Interfaces** (the app does not manage WG keys/params).
-2. Open **Services → wg-split**: pick mode, add each tunnel interface with a
+2. Open **Services → splify**: pick mode, add each tunnel interface with a
    priority, set the list URLs and the failover interval, toggle zapret, and add
    any manual CIDRs/domains/device pins. Save & Apply.
 
-CLI: `wg-split-doctor` (diagnose; `--json` for tooling), `wg-split-status`
-(snapshot), `wg-split-apply` (regenerate from UCI), `wg-split-disable` (emergency
-WAN-only), `wg-split-uninstall` (teardown), `logread -e wg-split` (service log).
-Config lives in `/etc/config/wg-split`.
+CLI: `splify-doctor` (diagnose; `--json` for tooling), `splify-status`
+(snapshot), `splify-apply` (regenerate from UCI), `splify-disable` (emergency
+WAN-only), `splify-uninstall` (teardown), `logread -e splify` (service log).
+Config lives in `/etc/config/splify`.
 
 ## Verify
 
@@ -101,8 +101,8 @@ After configuring, run the doctor — it answers "what is broken and what should
 fix?" without SSH spelunking:
 
 ```sh
-wg-split-doctor          # human-readable report
-wg-split-doctor --json   # machine-readable (this is what the LuCI panel shows)
+splify-doctor          # human-readable report
+splify-doctor --json   # machine-readable (this is what the LuCI panel shows)
 ```
 
 It exits `0` when everything is OK and non-zero otherwise, so it also works in a
@@ -121,39 +121,39 @@ LAN forwarding, and the `ipsum` set above its minimum. The same flow applies to
 
 ## Troubleshooting
 
-`wg-split-doctor` names each of these directly; the fix is in its `→ fix:` line.
+`splify-doctor` names each of these directly; the fix is in its `→ fix:` line.
 
 | Symptom (doctor message) | Fix |
 |---|---|
-| `no failover tunnels configured` | Add a tunnel under Services → wg-split. |
+| `no failover tunnels configured` | Add a tunnel under Services → splify. |
 | `LAN subnet not set or not detected` | Set the LAN subnet/interface; until then all traffic exits WAN. |
-| `<if>: interface does not exist` | Create the WG/AWG interface under Network → Interfaces, or remove it from wg-split. |
+| `<if>: interface does not exist` | Create the WG/AWG interface under Network → Interfaces, or remove it from splify. |
 | `<if>: not in any firewall zone` | Add the tunnel iface to a firewall zone (fw4 REJECTs LAN→tunnel otherwise — the #1 post-reflash gotcha). |
 | `<if>: zone '…' has masquerading disabled` | Enable masq on that zone, or VPN replies won't route back. |
 | `<if>: no forwarding '…' -> '…'` | Add firewall forwarding from the LAN zone to the tunnel zone. |
-| `<if>: route_allowed_ips not 0` | `wg-split-apply` — it forces `route_allowed_ips=0` so the tunnel can't hijack main routes. |
+| `<if>: route_allowed_ips not 0` | `splify-apply` — it forces `route_allowed_ips=0` so the tunnel can't hijack main routes. |
 | `<if>: health probe failed` | Check the peer endpoint/keys; failover will pick another tunnel meanwhile. |
-| `ipsum/ru set has N (<min)` | `wg-split-update-ipsum` / `-ru`; also reloads automatically next tick. |
-| `… list is stale` / `not yet downloaded` | Check the list URL; run the matching `wg-split-update-*`. |
+| `ipsum/ru set has N (<min)` | `splify-update-ipsum` / `-ru`; also reloads automatically next tick. |
+| `… list is stale` / `not yet downloaded` | Check the list URL; run the matching `splify-update-*`. |
 | `zapret is installed but not running` | The failover loop starts it; or `/etc/init.d/zapret start`. |
-| `zapret is enabled … but not installed` | Install zapret, or untick it in Services → wg-split. |
-| `dnsmasq nftset drop-in is missing` | `wg-split-apply` regenerates it and reloads dnsmasq. |
+| `zapret is enabled … but not installed` | Install zapret, or untick it in Services → splify. |
+| `dnsmasq nftset drop-in is missing` | `splify-apply` regenerates it and reloads dnsmasq. |
 | `killswitch is ON but active path is 'wan'/'zapret'` | No tunnel is healthy; under killswitch traffic should blackhole — check the tunnels. |
 
 ## Files
 
 | Path | Role |
 |------|------|
-| `wg-split/files/etc/config/wg-split` | UCI config (global + endpoint + device) |
-| `wg-split/files/usr/local/sbin/wg-split-failover` | failover state machine + procd daemon |
-| `wg-split/files/usr/local/sbin/wg-split-doctor` | structured diagnostics (text + `--json`) |
-| `wg-split/files/usr/local/sbin/wg-split-apply` | regenerate nft/dnsmasq layer from UCI |
-| `wg-split/files/usr/local/sbin/wg-split-firewall` | create/repair the tunnel firewall zone (`check`/`fix`) |
-| `wg-split/files/usr/libexec/rpcd/wg-split` | least-privilege ubus object (`status`/`events`/`action`) for LuCI |
-| `wg-split/files/usr/local/sbin/wg-split-update-{ipsum,ru,domains}` | list downloaders |
-| `wg-split/files/usr/local/sbin/wg-split-sync-nozapret` | rebuild zapret bypass set |
-| `wg-split/files/usr/local/lib/wg-split/common.sh` | shared helpers (loads UCI) |
-| `luci-app-wg-split/` | LuCI configuration page |
+| `splify/files/etc/config/splify` | UCI config (global + endpoint + device) |
+| `splify/files/usr/local/sbin/splify-failover` | failover state machine + procd daemon |
+| `splify/files/usr/local/sbin/splify-doctor` | structured diagnostics (text + `--json`) |
+| `splify/files/usr/local/sbin/splify-apply` | regenerate nft/dnsmasq layer from UCI |
+| `splify/files/usr/local/sbin/splify-firewall` | create/repair the tunnel firewall zone (`check`/`fix`) |
+| `splify/files/usr/libexec/rpcd/splify` | least-privilege ubus object (`status`/`events`/`action`) for LuCI |
+| `splify/files/usr/local/sbin/splify-update-{ipsum,ru,domains}` | list downloaders |
+| `splify/files/usr/local/sbin/splify-sync-nozapret` | rebuild zapret bypass set |
+| `splify/files/usr/local/lib/splify/common.sh` | shared helpers (loads UCI) |
+| `luci-app-splify/` | LuCI configuration page |
 
 ## Documentation
 

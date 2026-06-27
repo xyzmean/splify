@@ -4,21 +4,21 @@
 
 ## Предусловие: создайте туннель
 
-wg-split **не управляет ключами и пирами** WireGuard/AmneziaWG. Сначала создайте
+splify **не управляет ключами и пирами** WireGuard/AmneziaWG. Сначала создайте
 туннельный интерфейс обычным образом в **Network → Interfaces** (протокол
-`wireguard` или `amneziawg`). Затем добавьте его в wg-split.
+`wireguard` или `amneziawg`). Затем добавьте его в splify.
 
 ## Где настраивать
 
-**Services → wg-split**. Конфигурация хранится в UCI: `/etc/config/wg-split`.
+**Services → splify**. Конфигурация хранится в UCI: `/etc/config/splify`.
 В 2.0.0 страница разделена на **две вкладки**:
 
 - **Статус** — живой дашборд (диагностика, только чтение + кнопки действий);
 - **Настройки** — форма UCI.
 
 Дашборд общается с роутером не через широкий `file:exec`, а через
-least-privilege ubus-объект `wg-split` (`status` / `events` / `action`),
-реализованный rpcd-плагином `/usr/libexec/rpcd/wg-split`. ACL приложения выдаёт
+least-privilege ubus-объект `splify` (`status` / `events` / `action`),
+реализованный rpcd-плагином `/usr/libexec/rpcd/splify`. ACL приложения выдаёт
 только эти три метода. См. [Диагностику](Diagnostics.md) и
 [CLI и файлы](CLI-Reference.md).
 
@@ -40,20 +40,20 @@ least-privilege ubus-объект `wg-split` (`status` / `events` / `action`),
   возраст, статус.
 - **Диагностика** — только проблемы (severity + сообщение + `→ исправление`).
   Для каждой firewall-проблемы есть кнопка **«Починить автоматически»** —
-  она вызывает `wg-split-firewall fix <iface>` (создаёт/чинит зону туннеля:
+  она вызывает `splify-firewall fix <iface>` (создаёт/чинит зону туннеля:
   accept-all + masq + mtu_fix, форвардинг lan↔туннель↔wan) и обновляет панель.
   Рядом — ссылки **«Настройки межсетевого экрана»** и **«Сетевые интерфейсы»**.
 - **Таймлайн отказоустойчивости** — последние переходы failover (`switch`,
   `recover`, `restart`, `killswitch`, `zapret_fallback`, `wan_fallback`) из
-  RAM-журнала `/var/run/wg-split-events` (CLI: `wg-split-doctor --events`).
+  RAM-журнала `/var/run/splify-events` (CLI: `splify-doctor --events`).
 - **Авто-обновление** — панель сама опрашивает ubus каждые ~8 секунд;
   переключатель **«Онлайн / Пауза»** справа в панели действий.
 - **Подсказки первого запуска** — если туннелей ещё нет, панель объясняет три
   шага (создать интерфейс → добавить с приоритетом → зона firewall + форвардинг).
 
 ### Кнопки действий
-`Обновить сейчас`, `Применить` (`wg-split-apply`), `Перезапустить службу`,
-`Обновить ipsum/ru-cn/домены`, `Аварийно отключить` (`wg-split-disable`).
+`Обновить сейчас`, `Применить` (`splify-apply`), `Перезапустить службу`,
+`Обновить ipsum/ru-cn/домены`, `Аварийно отключить` (`splify-disable`).
 Все действия идут через ubus-метод `action`, а не через прямой запуск файлов.
 
 > Тема **Argon** поддерживается: панель использует CSS-переменные темы
@@ -75,7 +75,7 @@ least-privilege ubus-объект `wg-split` (`status` / `events` / `action`),
 | Цели health-ping | `health_target` | пингуются через каждый туннель |
 | URL проверки WAN | `health_url` | curl через WAN для выбора zapret vs обычный WAN |
 
-> **Авто-определение LAN.** wg-split объединяет вашу `lan_cidr` с реальными
+> **Авто-определение LAN.** splify объединяет вашу `lan_cidr` с реальными
 > connected-маршрутами `lan_iface`. Это закрывает гочу «после смены нумерации LAN
 > ничего не маршрутизируется».
 
@@ -105,6 +105,6 @@ DHCP/соседей), чтобы не вспоминать адреса вруч
 
 ## После «Сохранить и применить»
 
-LuCI вызывает `wg-split-apply`: регенерирует `/etc/nftables.d/30-wg-split.nft` и
+LuCI вызывает `splify-apply`: регенерирует `/etc/nftables.d/30-splify.nft` и
 dnsmasq-дроп-ин из UCI, перезагружает fw4 + dnsmasq, перезапускает службу (демон
 читает UCI один раз при старте) и при смене URL списков — дочитывает их в фоне.

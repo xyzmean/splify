@@ -30,7 +30,7 @@ jobs:
           file: ./Dockerfile-apk
           context: .
           load: true
-          tags: wg-split:ci
+          tags: splify:ci
           build-args: |
             VERSION=${{ steps.ver.outputs.version }}
           cache-from: type=gha
@@ -39,11 +39,11 @@ jobs:
       - name: Extract built packages
         run: |
           mkdir -p artifacts out
-          id=$(docker create wg-split:ci)
+          id=$(docker create splify:ci)
           docker cp "$id:/builder/bin/packages/." ./out/
           docker rm "$id"
-          find ./out \( -name 'wg-split*.apk' -o -name 'luci-app-wg-split*.apk' \
-                        -o -name 'luci-i18n-wg-split-*.apk' \) \
+          find ./out \( -name 'splify*.apk' -o -name 'luci-app-splify*.apk' \
+                        -o -name 'luci-i18n-splify-*.apk' \) \
                -exec cp -v {} artifacts/ \;
           echo "--- built ---"; ls -l artifacts
 
