@@ -365,3 +365,51 @@ msgstr "Онлайн (каждые %d с)"
 
 msgid "Paused"
 msgstr "Пауза"
+
+msgid "Add it on the "
+msgstr "Добавьте его на вкладке "
+
+msgid "Create/repair the firewall zone for “%s” (accept-all + masquerading + lan↔tunnel↔wan forwarding) and reload the firewall?"
+msgstr "Создать/починить зону брандмауэра для «%s» (accept-all + маскарадинг + проброс lan↔tunnel↔wan) и перезагрузить брандмауэр?"
+
+msgid "Diagnostics unavailable (is the splify service installed and running?)"
+msgstr "Диагностика недоступна (служба splify установлена и запущена?)"
+
+msgid "Endpoint"
+msgstr "Туннель"
+
+msgid "Firewall fixed for %s"
+msgstr "Брандмауэр настроен для %s"
+
+msgid "Firewall fix failed: "
+msgstr "Не удалось настроить брандмауэр: "
+
+msgid "Firewall fix failed for %s"
+msgstr "Не удалось настроить брандмауэр для %s"
+
+msgid "Fix automatically"
+msgstr "Починить автоматически"
+
+msgid "Last seen"
+msgstr "Последняя активность"
+
+msgid "No failover events recorded yet."
+msgstr "Событий переключения пока нет."
+
+msgid "Put the tunnel interface in a firewall zone (masq on) and allow forwarding lan → that zone — or use “Fix automatically” on any firewall finding below."
+msgstr "Поместите интерфейс туннеля в зону брандмауэра (с маскарадингом) и разрешите проброс lan → в эту зону — или нажмите «Починить автоматически» у любой проблемы брандмауэра ниже."
+
+msgid "Recent failover events"
+msgstr "Недавние переключения"
+
+msgid "Settings"
+msgstr "Дополнительно"
+
+msgid " tab under “Failover tunnels” with a priority, then Save & Apply."
+msgstr " в разделе «Туннели (с приоритетом)» с приоритетом, затем Сохранить и применить."
+
+msgid "Traffic"
+msgstr "Трафик"
+
+msgid "WireGuard / AmneziaWG"
+msgstr "WireGuard / AmneziaWG"
