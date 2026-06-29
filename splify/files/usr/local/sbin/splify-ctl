@@ -535,11 +535,15 @@ cmd_api_set() {
 # Generate a 32-byte url-safe token from the kernel CSPRNG.
 gen_token() {
     if [ -r /dev/urandom ]; then
-        head -c 24 /dev/urandom | base64 2>/dev/null | tr '+/' '-_' | tr -d '=\n'
-    else
-        # last-resort fallback (no urandom): time+pid hash
-        printf '%s%s' "$(date +%s%N)" "$$" | md5sum | cut -c1-32
+        # busybox often ships without base64, which would yield an EMPTY token
+        # (and a server-side 400 "missing node_token"). Alnum-filtering urandom
+        # is the most portable path; sha256sum is the fallback.
+        _t="$(tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 32)"
+        [ -n "$_t" ] || _t="$(head -c 64 /dev/urandom 2>/dev/null | sha256sum 2>/dev/null | cut -c1-32)"
+        [ -n "$_t" ] && { printf '%s' "$_t"; return; }
     fi
+    # last-resort fallback (no urandom): time+pid hash
+    printf '%s%s' "$(date +%s%N)" "$$" | md5sum | cut -c1-32
 }
 
 cmd_token_regen() {

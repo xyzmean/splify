@@ -1,0 +1,36 @@
+# Reference systemd unit for the splify control plane.
+#
+#   install:  cp splify-control.service /etc/systemd/system/
+#             # edit ExecStart IPs/ports for your host, then:
+#             systemctl daemon-reload
+#             systemctl enable --now splify-control
+#
+# The IPs below are EXAMPLES from the reference lab:
+#   10.8.0.1        — control host's WG address (admin console binds here → WG-only)
+#   85.192.49.134   — control host's public IP (routers reach the node API over WAN)
+# Replace them with your own. --internal-url / --external-url are what end up in
+# the connection JSON routers import.
+
+[Unit]
+Description=splify control plane (node API + WG-only admin console)
+Documentation=file:///root/splify/splify-control/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/root/splify/splify-control
+ExecStart=/usr/bin/python3 /root/splify/splify-control/splify-control \
+    --node-host 0.0.0.0 --node-port 18080 \
+    --admin-host 10.8.0.1 --admin-port 18099 \
+    --data-dir /var/lib/splify-control \
+    --internal-url http://10.8.0.1:18080 \
+    --external-url http://85.192.49.134:18080
+# The admin console binds to the WG address (wg0). If wg0 is not up yet at boot
+# the bind fails; Restart retries until the tunnel interface appears.
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

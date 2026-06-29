@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
-import { Plug, Radio, KeyRound, Eye, EyeOff, RefreshCw } from 'lucide-react'
+import { Plug, Radio, KeyRound, Eye, EyeOff, RefreshCw, Tag } from 'lucide-react'
 
 function notify(msg: string, kind: 'info' | 'warning' | 'error' = 'info') {
   try { if (window.ui?.addNotification) { window.ui.addNotification(null, window.L ? window.L.dom.create('p', {}, msg) : msg, kind); return } } catch { /* */ }
@@ -25,6 +25,7 @@ export default function ApiPanel() {
   const [ce, setCe] = useState('')
   const [interval, setIntervalV] = useState('')
   const [allow, setAllow] = useState('')
+  const [nodeId, setNodeId] = useState('')
 
   const load = async () => {
     try {
@@ -32,9 +33,20 @@ export default function ApiPanel() {
       setInfo(i)
       setCi(i.control_internal || ''); setCe(i.control_external || '')
       setIntervalV(i.interval || ''); setAllow(i.allow_subnet || '')
+      setNodeId(i.node_id || '')
     } catch (e: any) { notify('Не удалось загрузить настройки API: ' + (e?.message || e), 'error') }
   }
   useEffect(() => { load() }, [])
+
+  const NODE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+  async function saveNode() {
+    const n = nodeId.trim()
+    if (!NODE_RE.test(n)) { notify('Имя ноды: латиница/цифры и . _ - , без пробелов, до 64 символов', 'warning'); return }
+    setBusy('node')
+    try { await rpc.apiSet({ node_id: n }); notify('Имя ноды сохранено'); load() }
+    catch (e: any) { notify('Ошибка: ' + (e?.message || e), 'error') }
+    finally { setBusy('') }
+  }
 
   async function connect() {
     if (!connJson.trim()) return
@@ -93,6 +105,19 @@ export default function ApiPanel() {
         <StatTile label="Последний опрос" value={<span className="text-sm font-medium">{fmtUnix(info.last_poll)}</span>}
           sub={info.last_result || undefined} />
       </div>
+
+      {/* node name (node_id) */}
+      <Card>
+        <CardHeader className="p-4 pb-2"><CardTitle className="flex items-center gap-2 text-sm"><Tag className="size-4" />Имя ноды</CardTitle></CardHeader>
+        <CardContent className="p-4 pt-2">
+          <p className="mb-2 text-xs text-muted-foreground">Под этим именем роутер виден в панели. Латиница/цифры и <code>. _ -</code>, без пробелов, до 64 символов. Задайте его <b>до подключения</b> — это самое простое.</p>
+          <div className="flex gap-2">
+            <input className={cn(field, 'max-w-xs')} value={nodeId} onChange={(e) => setNodeId(e.target.value)} placeholder="office-rt1" />
+            <Button size="sm" variant="outline" disabled={!!busy} onClick={saveNode}>{busy === 'node' ? 'Сохраняю…' : 'Сохранить имя'}</Button>
+          </div>
+          {enrolled && <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">Нода уже подключена. После смены имени нажмите «Перерегистрировать» — в панели появится новая запись с новым именем, старую можно удалить.</p>}
+        </CardContent>
+      </Card>
 
       {/* connect via connection JSON */}
       <Card>

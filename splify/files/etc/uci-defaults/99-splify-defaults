@@ -33,7 +33,9 @@ done
 [ -n "$(uci -q get splify.api)" ] || { uci set splify.api=api; changed=1; }
 if [ -z "$(uci -q get splify.api.token)" ]; then
     if [ -r /dev/urandom ]; then
-        tok="$(head -c 24 /dev/urandom | base64 2>/dev/null | tr '+/' '-_' | tr -d '=\n')"
+        # busybox often lacks base64; alnum-filter urandom (sha256sum as backup).
+        tok="$(tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 32)"
+        [ -n "$tok" ] || tok="$(head -c 64 /dev/urandom 2>/dev/null | sha256sum 2>/dev/null | cut -c1-32)"
     fi
     [ -n "$tok" ] || tok="$(printf '%s%s' "$(date +%s%N)" "$$" | md5sum | cut -c1-32)"
     uci set "splify.api.token=$tok"; changed=1
