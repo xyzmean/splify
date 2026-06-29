@@ -108,14 +108,14 @@ poll_once() {
         return 0
     fi
 
-    # Empty / explicit no-op -> nothing to do. A desired snapshot carries wg or
-    # splify; the server only sends one when our applied_gen is behind, so we do
-    # NOT re-apply (and re-bounce the tunnel) on every poll.
+    # Empty / explicit no-op -> nothing to do. A desired snapshot carries wg,
+    # splify or sites; the server only sends one when our applied_gen is behind,
+    # so we do NOT re-apply (and re-bounce the tunnel) on every poll.
     case "$_resp" in
         ''|'{}'|*'"noop"'*) note "ok, no change via $_via @ $(date '+%H:%M:%S')"; return 0 ;;
     esac
     case "$_resp" in
-        *'"wg"'*|*'"splify"'*) : ;;
+        *'"wg"'*|*'"splify"'*|*'"sites"'*) : ;;
         *) note "ok, unrecognised reply @ $(date '+%H:%M:%S')"; return 0 ;;
     esac
 

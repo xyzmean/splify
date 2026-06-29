@@ -109,13 +109,25 @@ Response — **a change is pending** (`applied_gen < generation`): the **desired
 snapshot** (§5) plus its `generation`:
 
 ```json
-{ "generation": 4, "splify": { ... }, "wg": { "awg0": { ... } } }
+{ "generation": 4, "splify": { ... }, "wg": { "awg0": { ... } },
+  "sites": ["10.8.2.0/24", "10.8.3.0/24"] }
 ```
 
 The router applies it, persists `generation`, and reports the new `applied_gen`
 on the next poll — so the dashboard then returns `noop` and the router does **not
 re-apply** (this is what prevents a tunnel-bounce loop). Errors: `401` bad token,
 `403` not enrolled, `400` bad body.
+
+### Site-to-site mesh (`sites`)
+
+The desired snapshot may carry a `sites` array of remote LAN subnets (CIDR). The
+router installs a route to each over the tunnel (main table) and excludes them
+from the tunnel zone's masquerade, giving **true site-to-site** (real source
+IPs) — see `splify-ctl sites-apply`. An empty `sites: []` clears them. The
+dashboard computes this per node from every node's reported LAN (`config.lan`,
+§5): full mesh = each node gets the set of all OTHER nodes' LANs. `sites` changes
+bump `generation` like any other desired change, so it converges once and never
+loops.
 
 ## 4. Generation discipline
 
@@ -136,6 +148,8 @@ and only sent by the dashboard when actually rotating a secret.
 {
   "version": 1,
   "node": "router-7a3f",
+  "lan": "10.8.1.0/24",
+  "sites": "10.8.2.0/24",
   "splify": {
     "global": { "mode": "blocklist", "interval": "180", "killswitch": "0",
                 "lan_iface": "br-lan", "lan_cidr": "192.168.1.0/24",

@@ -89,6 +89,7 @@ def list_nodes():
             continue
         rep = rec.get('last_report') or {}
         summ = ((rep.get('status') or {}).get('summary')) or {}
+        cfg = rep.get('config') or {}
         out.append({
             'node': rec['node'],
             'generation': rec.get('generation', 0),
@@ -99,6 +100,8 @@ def list_nodes():
             'overall': (rep.get('status') or {}).get('overall', '?'),
             'state': summ.get('state', '?'),
             'mode': summ.get('mode', '?'),
+            'lan': cfg.get('lan') or '',
+            'sites': cfg.get('sites') or '',
         })
     return out
 
@@ -117,6 +120,71 @@ def bearer(headers):
 
 def tok_eq(a, b):
     return bool(a) and bool(b) and hmac.compare_digest(str(a), str(b))
+
+
+# ---- site-to-site mesh -----------------------------------------------------
+# Every node reports its LAN subnet (report.config.lan). When the mesh is on, we
+# push each node the set of OTHER nodes' LANs as desired.sites — the agent routes
+# them over the tunnel (true site-to-site). Recomputed on every poll and toggle;
+# a node's generation only bumps when its own set actually changes.
+def node_lan(rec):
+    cfg = ((rec or {}).get('last_report') or {}).get('config') or {}
+    v = cfg.get('lan')
+    return v.strip() if isinstance(v, str) else ''
+
+
+def _node_names():
+    try:
+        return sorted(n[:-5] for n in os.listdir(CFG['data_dir']) if n.endswith('.json'))
+    except OSError:
+        return []
+
+
+def mesh_flag_path():
+    return os.path.join(CFG['data_dir'], 'mesh.on')
+
+
+def set_mesh(enabled):
+    CFG['mesh_enabled'] = bool(enabled)
+    try:
+        if enabled:
+            open(mesh_flag_path(), 'w').close()
+        elif os.path.exists(mesh_flag_path()):
+            os.remove(mesh_flag_path())
+    except OSError:
+        pass
+    recompute_mesh()
+
+
+def recompute_mesh():
+    with LOCK:
+        names = _node_names()
+        lans = {}
+        for n in names:
+            r = load_node(n)
+            if r:
+                lans[n] = node_lan(r)
+        on = bool(CFG.get('mesh_enabled'))
+        for n in names:
+            rec = load_node(n)
+            if not rec:
+                continue
+            mine = lans.get(n, '')
+            remotes = (sorted({l for m, l in lans.items() if m != n and l and l != mine})
+                       if on else [])
+            desired = dict(rec.get('desired') or {})
+            cur = sorted(desired['sites']) if isinstance(desired.get('sites'), list) else None
+            if cur == remotes:
+                continue
+            if remotes:
+                desired['sites'] = remotes
+            elif 'sites' in desired:
+                desired['sites'] = []        # push empty once to clear the node
+            else:
+                continue                     # never meshed; nothing to clear
+            rec['desired'] = desired or None
+            rec['generation'] = int(rec.get('generation', 0)) + 1
+            save_node(rec)
 
 
 # The "connection JSON" a router imports (LuCI → API → Подключить, or
@@ -279,10 +347,15 @@ class NodeHandler(Base):
             hist.append({'ts': rec['last_seen'], 'overall': st.get('overall', '?'),
                          'state': summ.get('state', '?')})
             rec['history'] = hist[-200:]
-            generation = int(rec.get('generation', 0))
             applied = int(report.get('applied_gen', 0) or 0)
-            desired = rec.get('desired')
             save_node(rec)
+        # Propagate this node's freshly-reported LAN into the mesh, then re-read
+        # so a newly-computed sites push reaches the node on this same poll.
+        recompute_mesh()
+        with LOCK:
+            rec = load_node(node) or {}
+            generation = int(rec.get('generation', 0))
+            desired = rec.get('desired')
         if desired and applied < generation:
             resp = dict(desired)
             resp['generation'] = generation
@@ -313,6 +386,22 @@ class AdminHandler(Base):
             return self._json(200, {'nodes': list_nodes()})
         if path == '/admin/api/connect':
             return self._json(200, connect_json())
+        if path == '/admin/api/mesh':
+            rows = []
+            for n in _node_names():
+                rec = load_node(n)
+                if not rec:
+                    continue
+                desired = rec.get('desired') or {}
+                rows.append({
+                    'node': n,
+                    'lan': node_lan(rec),
+                    'want': desired.get('sites') if isinstance(desired.get('sites'), list) else [],
+                    'applied': ((rec.get('last_report') or {}).get('config') or {}).get('sites') or '',
+                    'pending': bool(rec.get('desired')) and
+                               int((rec.get('last_report') or {}).get('applied_gen', 0) or 0) < int(rec.get('generation', 0)),
+                })
+            return self._json(200, {'enabled': bool(CFG.get('mesh_enabled')), 'nodes': rows})
         m = re.match(r'^/admin/api/nodes/([^/]+)$', path)
         if m:
             rec = load_node(m.group(1))
@@ -325,6 +414,13 @@ class AdminHandler(Base):
         if not self._auth_ok():
             return self._json(401, {'error': 'admin auth required'})
         path = self.path.split('?', 1)[0]
+        if path == '/admin/api/mesh':
+            try:
+                body = json.loads(self._body() or b'{}')
+            except ValueError:
+                return self._json(400, {'error': 'bad json'})
+            set_mesh(bool(body.get('enabled')))
+            return self._json(200, {'ok': True, 'enabled': bool(CFG.get('mesh_enabled'))})
         m = re.match(r'^/admin/api/nodes/([^/]+)/import-conf$', path)
         if m:
             node = m.group(1)
@@ -425,6 +521,7 @@ ADMIN_HTML = r"""<!doctype html>
  .toast.show{opacity:1}
 </style></head><body>
 <header><h1>splify-control</h1><span class="mut" id="sub">панель управления нодами</span><span class="sp"></span>
+ <button class="ghost" onclick="openMesh()">Site-to-site меш</button>
  <button class="ghost" onclick="showConnect()">Подключить роутер</button>
  <button class="ghost" onclick="loadNodes()">Обновить</button></header>
 <div class="wrap"><div class="list" id="list"></div><div class="detail" id="detail"><p class="mut">Выберите ноду слева.</p></div></div>
@@ -492,6 +589,19 @@ async function regen(node){if(!confirm('Сменить токен ноды? Ст
 async function delNode(node){if(!confirm('Удалить ноду '+node+'?'))return;try{await api('DELETE','/admin/api/nodes/'+node);cur=null;$('#detail').innerHTML='<p class="mut">Удалено.</p>';loadNodes();}catch(e){toast('ошибка: '+e.message);} }
 async function showConnect(){const j=await api('GET','/admin/api/connect');const s=JSON.stringify(j);try{await navigator.clipboard.writeText(s);toast('JSON подключения скопирован');}catch(e){}
  window.prompt('Connection JSON — вставьте на роутере (LuCI → Дополнительно → API → Подключить, либо: splify-ctl connect):',s);}
+async function openMesh(){cur=null;loadNodes();const j=await api('GET','/admin/api/mesh');
+ const rows=j.nodes.map(n=>`<tr><td><b>${n.node}</b></td><td><code>${n.lan||'—'}</code></td>
+  <td>${(n.want&&n.want.length)?n.want.map(s=>'<code>'+s+'</code>').join(' '):'<span class="mut">—</span>'}</td>
+  <td>${n.pending?'<span class="pill warn">ожидает</span>':'<span class="pill ok">применено</span>'}</td></tr>`).join('');
+ $('#detail').innerHTML=`<h2>Site-to-site меш</h2>
+  <p class="mut">Полный авто-меш: каждая LAN видит все остальные. Дашборд собирает подсети с нод и рассылает маршруты (без masquerade, реальные адреса). Добавил роутер — он автоматически в меше.</p>
+  <div class="card"><div class="row"><b>Меш</b><span class="pill ${j.enabled?'ok':'dim'}">${j.enabled?'включён':'выключен'}</span><span class="sp"></span>
+   <button onclick="toggleMesh(${j.enabled?'false':'true'})">${j.enabled?'Выключить':'Включить'}</button></div></div>
+  <div class="card"><h3>Ноды и их LAN</h3>
+   <table><thead><tr><th>Нода</th><th>Своя LAN</th><th>Маршруты к чужим LAN</th><th>Статус</th></tr></thead>
+   <tbody>${rows||'<tr><td colspan=4 class="mut">Нод пока нет.</td></tr>'}</tbody></table>
+   <p class="small mut" style="margin-top:8px">«LAN» берётся из отчёта ноды (br-lan). Если пусто — нода ещё не прислала свежий отчёт.</p></div>`;}
+async function toggleMesh(on){try{await api('POST','/admin/api/mesh',{enabled:on});toast(on?'меш включён':'меш выключен');openMesh();}catch(e){toast('ошибка: '+e.message);}}
 loadNodes();setInterval(loadNodes,15000);
 </script></body></html>"""
 
@@ -527,6 +637,7 @@ def main():
     CFG.update(vars(args))
     CFG['data_dir'] = args.data_dir
     os.makedirs(CFG['data_dir'], exist_ok=True)
+    CFG['mesh_enabled'] = os.path.exists(mesh_flag_path())
 
     # Enrollment key: reuse a persisted one so it survives restarts (a router
     # already holds it); otherwise generate, store, and surface it.

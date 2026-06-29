@@ -146,6 +146,8 @@ cmd_export() {
     json_add_int    version "$SNAP_VERSION"
     json_add_string node "$(g splify.api.node_id)"
     json_add_int    ts "$(date +%s)"
+    json_add_string lan "$(_lan_subnet)"
+    json_add_string sites "$(g splify.api.sites)"
 
     json_add_object splify
         json_add_object global; emit_splify_global; json_close_object
@@ -338,6 +340,17 @@ cmd_import() {
             json_select ..
         done
         json_select ..
+    fi
+
+    # Site-to-site mesh: remote LAN subnets to route over the tunnel. Applied
+    # live (route + no-masq), idempotent; the dashboard recomputes this per node.
+    json_get_type _t sites 2>/dev/null
+    if [ "$_t" = array ] && [ "$_apply" = 1 ]; then
+        json_select sites; json_get_keys _sks; _slist=""
+        for _sk in $_sks; do json_get_var _sv "$_sk" 2>/dev/null; [ -n "$_sv" ] && _slist="$_slist $_sv"; done
+        json_select ..
+        # shellcheck disable=SC2086
+        apply_sites $_slist
     fi
 
     [ "$_splify_changed" = 1 ] && uci commit splify
@@ -613,6 +626,10 @@ cmd_enroll() {
     uci set splify.api.access_key=''
     uci set splify.api.agent_enabled=1
     uci commit splify
+    # Reset the applied-generation counter: a fresh enrollment (often a fresh
+    # dashboard with generation starting at 0) must re-sync, else a stale
+    # flash-persisted applied_gen could mask the first desired pushes.
+    rm -f /etc/splify/agent.gen 2>/dev/null
     /etc/init.d/splify-agent enable >/dev/null 2>&1
     /etc/init.d/splify-agent restart >/dev/null 2>&1
 
@@ -639,10 +656,101 @@ cmd_connect() {
     cmd_enroll
 }
 
+# ---- site-to-site mesh -----------------------------------------------------
+# The LAN network this node serves, in CIDR (e.g. 10.8.1.0/24). Reported to the
+# dashboard so it can compute, for every node, the set of OTHER nodes' LANs.
+_lan_subnet() {
+    _li="$(g splify.global.lan_iface)"; [ -n "$_li" ] || _li=br-lan
+    _cidr="$(ip -o -4 addr show dev "$_li" 2>/dev/null | awk '{print $4; exit}')"
+    [ -n "$_cidr" ] || return 0
+    _pfx="${_cidr#*/}"
+    if [ -x /bin/ipcalc.sh ] || command -v ipcalc.sh >/dev/null 2>&1; then
+        _net="$(ipcalc.sh "$_cidr" 2>/dev/null | sed -n 's/^NETWORK=//p')"
+        [ -n "$_net" ] && { printf '%s/%s' "$_net" "$_pfx"; return; }
+    fi
+    printf '%s' "$_cidr"
+}
+
+# Primary splify tunnel iface (the path to the WG hub): first endpoint that is a
+# real wg/awg tunnel, else the first wg iface present.
+_tunnel_iface() {
+    _i=0
+    while [ -n "$(g "splify.@endpoint[$_i].iface")" ]; do
+        _ti="$(g "splify.@endpoint[$_i].iface")"
+        iface_is_wg "$_ti" 2>/dev/null && { printf '%s' "$_ti"; return; }
+        _i=$((_i + 1))
+    done
+    for _ti in $(wg_ifaces); do printf '%s' "$_ti"; return; done
+}
+
+# Firewall zone section (e.g. @zone[2]) whose network list contains $1.
+_fw_zone_for() {
+    _i=0
+    while [ -n "$(g "firewall.@zone[$_i]")" ]; do
+        for _n in $(g "firewall.@zone[$_i].network"); do
+            [ "$_n" = "$1" ] && { printf '@zone[%s]' "$_i"; return; }
+        done
+        _i=$((_i + 1))
+    done
+}
+
+# Deterministic named uci route section for a subnet (idempotent add/remove).
+_route_sec() { printf 'splify_site_%s' "$(printf '%s' "$1" | tr './' '__')"; }
+
+# Reconcile the set of remote LAN subnets routed over the tunnel. Diff against
+# the previously-applied set (splify.api.sites): add/remove persistent routes
+# (main table, via the tunnel) and no-masq exclusions, and mirror live with
+# `ip route` so it takes effect without bouncing the tunnel.
+apply_sites() {  # subnet...
+    _tun="$(_tunnel_iface)"
+    [ -n "$_tun" ] || { warn "site routes: no tunnel interface"; return 1; }
+    _zone="$(_fw_zone_for "$_tun")"
+    _old="$(g splify.api.sites)"
+    _new=""
+    for _s in "$@"; do case "$_s" in */*) _new="$_new $_s" ;; esac; done
+    _changed=0
+
+    for _s in $_old; do
+        case " $_new " in
+            *" $_s "*) : ;;
+            *)  ip route del "$_s" dev "$_tun" 2>/dev/null
+                [ -n "$_zone" ] && uci -q del_list "firewall.$_zone.masq_dest=!$_s"
+                uci -q delete "network.$(_route_sec "$_s")" 2>/dev/null
+                _changed=1 ;;
+        esac
+    done
+    for _s in $_new; do
+        case " $_old " in
+            *" $_s "*) : ;;
+            *)  _sec="$(_route_sec "$_s")"
+                uci set "network.$_sec=route"
+                uci set "network.$_sec.interface=$_tun"
+                uci set "network.$_sec.target=$_s"
+                [ -n "$_zone" ] && uci add_list "firewall.$_zone.masq_dest=!$_s"
+                _changed=1 ;;
+        esac
+        ip route replace "$_s" dev "$_tun" 2>/dev/null
+    done
+
+    uci -q delete splify.api.sites 2>/dev/null
+    for _s in $_new; do uci add_list "splify.api.sites=$_s"; done
+    uci commit splify
+    if [ "$_changed" = 1 ]; then
+        uci commit network; uci commit firewall
+        /etc/init.d/firewall reload >/dev/null 2>&1
+    fi
+    json_init; json_add_boolean ok 1; json_add_string tunnel "$_tun"
+    json_add_string sites "$(printf '%s' "$_new" | sed 's/^ //')"; json_dump
+}
+
 # ---- dispatch --------------------------------------------------------------
 case "$1" in
     export)     shift; cmd_export "$@" ;;
     import)     shift; cmd_import "$@" ;;
+    sites-apply) shift; apply_sites "$@" ;;
+    sites-clear) apply_sites ;;
+    sites-get)  g splify.api.sites ;;
+    lan)        _lan_subnet ;;
     wg-get)     shift; cmd_wg_get "$@" ;;
     wg-set)     shift; cmd_wg_set "$@" ;;
     wg-import)  shift; cmd_wg_import "$@" ;;
@@ -653,5 +761,5 @@ case "$1" in
     token-regen) cmd_token_regen ;;
     connect)    cmd_connect ;;
     enroll)     cmd_enroll ;;
-    *) die_json "usage: splify-ctl {export|import|wg-get|wg-set|wg-import|action|status|api-get|api-set|token-regen|connect|enroll}" 2 ;;
+    *) die_json "usage: splify-ctl {export|import|wg-get|wg-set|wg-import|action|status|api-get|api-set|token-regen|connect|enroll|sites-apply|sites-clear|sites-get|lan}" 2 ;;
 esac
