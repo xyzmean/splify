@@ -1,19 +1,31 @@
 #!/bin/sh
 # splify rpcd plugin — the canonical, least-privilege bridge between the LuCI
-# dashboard and the shell core (design §4.3). Exposes ONE ubus object `splify`
-# with three methods, so the LuCI ACL grants narrow ubus access instead of broad
-# `file:exec`. These are thin wrappers over the same CLI scripts that SSH users
-# run, so behaviour is identical and the change is easy to reason about/roll back.
+# dashboard and the shell core (design §4.3). Exposes ONE ubus object `splify`;
+# the LuCI ACL grants narrow ubus access instead of broad `file:exec`.
 #
-#   status  -> splify-doctor --json      (diagnostics object)
-#   events  -> { "events": [ … ] }         (failover timeline)
-#   action  -> { "code": N, "stdout": "" } (run one allow-listed maintenance op)
+# Diagnostics/actions are thin wrappers over the same CLI scripts an SSH user
+# runs; the remote-management surface (wg/awg params, full snapshot export/import,
+# api config) all funnels through `splify-ctl`, so the LuCI UI, the inbound REST
+# CGI and the outbound agent are guaranteed identical in behaviour.
 #
-# rpcd runs this as root; the ACL decides which session may call which method
-# (read = status/events, write = action).
+# Methods taking a JSON document take it as a STRING param `data` (or `conf`),
+# which the plugin pipes straight into splify-ctl — no re-serialisation, no jq.
+#
+#   status        -> splify-doctor --json      (diagnostics object)
+#   events        -> { "events": [ … ] }       (failover timeline)
+#   action        -> run one allow-listed maintenance op
+#   config_export -> full node snapshot (keys masked unless reveal=1)
+#   config_import -> apply a desired snapshot (data = JSON string)
+#   wg_get        -> one wg/awg interface
+#   wg_set        -> set one interface (data = JSON string)
+#   wg_import     -> import a wg/awg .conf (conf = text)
+#   api_get       -> api/agent config + runtime
+#   api_set       -> set api/agent config (data = JSON string)
+#   token_regen   -> rotate the API token
 . /usr/share/libubox/jshn.sh
 
 DOCTOR=/usr/local/sbin/splify-doctor
+CTL=/usr/local/sbin/splify-ctl
 
 case "$1" in
     list)
@@ -24,60 +36,95 @@ case "$1" in
             json_add_string "name" ""
             json_add_string "iface" ""
         json_close_object
+        json_add_object "config_export"
+            json_add_int "reveal" 0
+        json_close_object
+        json_add_object "config_import"
+            json_add_string "data" ""
+        json_close_object
+        json_add_object "wg_get"
+            json_add_string "iface" ""
+            json_add_int "reveal" 0
+        json_close_object
+        json_add_object "wg_set"
+            json_add_string "iface" ""
+            json_add_string "data" ""
+        json_close_object
+        json_add_object "wg_import"
+            json_add_string "iface" ""
+            json_add_string "conf" ""
+        json_close_object
+        json_add_object "api_get";  json_close_object
+        json_add_object "api_set"
+            json_add_string "data" ""
+        json_close_object
+        json_add_object "token_regen"; json_close_object
+        json_add_object "connect"
+            json_add_string "data" ""
+        json_close_object
+        json_add_object "enroll"; json_close_object
         json_dump
         ;;
     call)
         case "$2" in
             status)
-                # already a JSON object — emit verbatim. doctor exits with the
-                # worst severity (non-zero on any WARN/FIXABLE/FAIL) BY DESIGN for
-                # CLI use; but a non-zero rpcd handler makes LuCI's callStatus()
-                # reject exactly when there's a problem to render. Normalize to 0 —
-                # the JSON itself carries the severity. (CLI exit code unchanged.)
+                # already JSON — emit verbatim. doctor exits non-zero on any
+                # WARN/FAIL BY DESIGN for CLI; normalise to 0 so LuCI's
+                # callStatus() doesn't reject exactly when there's a problem to
+                # render (severity is carried in the JSON itself).
                 "$DOCTOR" --json || true
                 ;;
             events)
-                # doctor emits a bare array; wrap it so the ubus reply is an object
                 printf '{"events":%s}\n' "$("$DOCTOR" --events)"
                 ;;
             action)
-                input="$(cat)"
-                json_load "$input" 2>/dev/null
-                json_get_var name name
-                json_get_var iface iface
-
-                code=0; out=""
-                case "$name" in
-                    apply)          out="$(/usr/local/sbin/splify-apply 2>&1)";          code=$? ;;
-                    restart)        out="$(/etc/init.d/splify restart 2>&1)";            code=$? ;;
-                    disable)        out="$(/usr/local/sbin/splify-disable 2>&1)";        code=$? ;;
-                    update_ipsum)   out="$(/usr/local/sbin/splify-update-ipsum 2>&1)";   code=$? ;;
-                    update_ru)      out="$(/usr/local/sbin/splify-update-ru 2>&1)";      code=$? ;;
-                    update_domains) out="$(/usr/local/sbin/splify-update-domains 2>&1)"; code=$? ;;
-                    fw_fix)
-                        # iface is passed as argv (never shell-evaluated); the
-                        # charset check is input hygiene only. The authoritative
-                        # guard is in splify-firewall, which refuses any iface
-                        # that isn't a configured splify endpoint (so a write-ACL
-                        # caller can't fix the firewall of, e.g., `wan`).
-                        case "$iface" in
-                            ''|*[!A-Za-z0-9_.-]*) out="invalid or missing iface"; code=2 ;;
-                            *) out="$(/usr/local/sbin/splify-firewall fix "$iface" 2>&1)"; code=$? ;;
-                        esac ;;
-                    on)
-                        /etc/init.d/splify enable >/dev/null 2>&1
-                        out="$(/etc/init.d/splify restart 2>&1)"; code=$? ;;
-                    off)
-                        /etc/init.d/splify disable >/dev/null 2>&1
-                        /etc/init.d/splify stop >/dev/null 2>&1
-                        out="$(/usr/local/sbin/splify-disable 2>&1)"; code=$? ;;
-                    *) out="unknown action: ${name:-(none)}"; code=2 ;;
-                esac
-
-                json_init
-                json_add_int    code   "$code"
-                json_add_string stdout "$out"
-                json_dump
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var name name; json_get_var iface iface
+                "$CTL" action "$name" "$iface"
+                ;;
+            config_export)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var reveal reveal
+                if [ "$reveal" = "1" ]; then "$CTL" export --reveal; else "$CTL" export; fi
+                ;;
+            config_import)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var data data
+                printf '%s' "$data" | "$CTL" import
+                ;;
+            wg_get)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var iface iface; json_get_var reveal reveal
+                if [ "$reveal" = "1" ]; then "$CTL" wg-get "$iface" --reveal; else "$CTL" wg-get "$iface"; fi
+                ;;
+            wg_set)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var iface iface; json_get_var data data
+                printf '%s' "$data" | "$CTL" wg-set "$iface"
+                ;;
+            wg_import)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var iface iface; json_get_var conf conf
+                printf '%s' "$conf" | "$CTL" wg-import "$iface"
+                ;;
+            api_get)
+                "$CTL" api-get
+                ;;
+            api_set)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var data data
+                printf '%s' "$data" | "$CTL" api-set
+                ;;
+            token_regen)
+                "$CTL" token-regen
+                ;;
+            connect)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var data data
+                printf '%s' "$data" | "$CTL" connect
+                ;;
+            enroll)
+                "$CTL" enroll
                 ;;
         esac
         ;;

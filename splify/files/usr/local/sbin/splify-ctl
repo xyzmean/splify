@@ -1,0 +1,653 @@
+#!/bin/sh
+# splify-ctl — unified control backend for splify + WireGuard/AmneziaWG.
+#
+# Single source of truth behind THREE front-ends, so behaviour is identical no
+# matter how a change arrives (design §4.3 — one narrow, auditable seam):
+#   - inbound token REST CGI .......... /www/cgi-bin/splify-api
+#   - outbound poll agent ............. /usr/local/sbin/splify-agent
+#   - LuCI rpcd plugin (ubus 'splify') . the React dashboard
+#
+# The whole node is expressed as ONE JSON "snapshot": the full splify config
+# (global + failover endpoints + per-device rules) PLUS every wg/awg interface
+# (keys, addresses, dns, the AmneziaWG obfuscation knobs awg_*, and peers). A
+# controller reads it (export) and pushes a desired state back (import). Import
+# is a MERGE: only the keys present in the document are touched, so a controller
+# can change just `endpoint_host` without resending private keys.
+#
+# Private keys are MASKED on export unless --reveal — the agent's status report
+# must never ship secrets back to the control plane.
+#
+# Subcommands:
+#   export [--reveal]            full snapshot -> stdout (JSON)
+#   import [--no-apply]          apply desired snapshot from stdin (JSON)
+#   wg-get <iface> [--reveal]    one interface -> stdout (JSON)
+#   wg-set <iface> [--no-apply]  set one interface from stdin (JSON)
+#   wg-import <iface> [--no-apply]  parse a wg/awg .conf from stdin into <iface>
+#   action <name> [iface]        run one allow-listed maintenance action
+#   status                       splify-doctor --json (passthrough)
+#   api-get                      api/agent config + runtime -> stdout (JSON)
+#   api-set                      set api/agent config from stdin (JSON)
+#   token-regen                  generate+store a new API token, print it
+#
+# No `set -u`: OpenWrt's /lib/functions.sh config_* helpers are not nounset-safe
+# (see common.sh) — adding it would crash on the first config_get.
+
+SNAP_VERSION=1
+
+. /usr/share/libubox/jshn.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/splify/common.sh
+
+# ---- small utilities -------------------------------------------------------
+die_json() { json_init; json_add_string error "$1"; json_dump; exit "${2:-1}"; }
+
+# True iff $1 is a syntactically safe UCI interface name (we splice it into uci
+# paths). Defends every iface-taking subcommand against path injection.
+valid_iface() { case "$1" in ''|*[!A-Za-z0-9_]*) return 1 ;; *) return 0 ;; esac; }
+
+# uci -q get, empty string if unset (never errors out the script).
+g() { uci -q get "$1" 2>/dev/null; }
+
+# Split a space/comma/newline separated value into a jshn array under key $1.
+add_list() {  # key value...
+    json_add_array "$1"; shift
+    for _v in $(printf '%s' "$*" | tr ', ' '\n'); do
+        [ -n "$_v" ] && json_add_string "" "$_v"
+    done
+    json_close_array
+}
+
+# Peer section ids for an iface, e.g. "@amneziawg_awg0[0]" per line.
+wg_peer_secs() {  # iface
+    _proto="$(g "network.$1.proto")"
+    [ -n "$_proto" ] || return 0
+    _pt="${_proto}_$1"
+    _i=0
+    while [ -n "$(g "network.@${_pt}[$_i]")" ]; do
+        printf '@%s[%s]\n' "$_pt" "$_i"
+        _i=$((_i + 1))
+    done
+}
+
+# Every wg/awg interface name in /etc/config/network, one per line.
+wg_ifaces() {
+    for _s in $(uci show network 2>/dev/null | sed -n 's/^network\.\([^.=]*\)=interface$/\1/p'); do
+        iface_is_wg "$_s" && printf '%s\n' "$_s"
+    done
+}
+
+# ---- snapshot: export ------------------------------------------------------
+# Emit ONE wg/awg interface as a jshn object (caller has opened the object).
+emit_wg_iface() {  # iface reveal
+    _if="$1"; _reveal="$2"
+    json_add_string proto "$(g "network.$_if.proto")"
+
+    _pk="$(g "network.$_if.private_key")"
+    if [ -n "$_pk" ]; then
+        json_add_boolean has_private_key 1
+        [ "$_reveal" = 1 ] && json_add_string private_key "$_pk"
+    else
+        json_add_boolean has_private_key 0
+    fi
+
+    for _o in listen_port mtu nohostroute fwmark; do
+        _v="$(g "network.$_if.$_o")"; [ -n "$_v" ] && json_add_string "$_o" "$_v"
+    done
+    add_list addresses "$(g "network.$_if.addresses")"
+    add_list dns       "$(g "network.$_if.dns")"
+
+    # AmneziaWG obfuscation: every awg_* option, generically (future-proof: AWG
+    # 1.5 adds s3/s4/i2.. j1.. itime, and we pass through whatever exists).
+    json_add_object awg
+    for _ao in $(uci show "network.$_if" 2>/dev/null \
+            | sed -n "s/^network\.$_if\.\(awg_[a-z0-9_]*\)=.*/\1/p"); do
+        json_add_string "${_ao#awg_}" "$(g "network.$_if.$_ao")"
+    done
+    json_close_object
+
+    json_add_array peers
+    for _ps in $(wg_peer_secs "$_if"); do
+        json_add_object ""
+        for _o in description public_key endpoint_host endpoint_port \
+                  persistent_keepalive route_allowed_ips; do
+            _v="$(g "network.$_ps.$_o")"; [ -n "$_v" ] && json_add_string "$_o" "$_v"
+        done
+        _psk="$(g "network.$_ps.preshared_key")"
+        if [ -n "$_psk" ]; then
+            json_add_boolean has_preshared_key 1
+            [ "$_reveal" = 1 ] && json_add_string preshared_key "$_psk"
+        else
+            json_add_boolean has_preshared_key 0
+        fi
+        add_list allowed_ips "$(g "network.$_ps.allowed_ips")"
+        json_close_object
+    done
+    json_close_array
+}
+
+# splify.global -> jshn object (caller has opened it). Known schema; list-typed
+# keys become arrays, the rest strings. Reading raw UCI (not common.sh's derived
+# vars) keeps export faithful for round-tripping.
+emit_splify_global() {
+    for _o in mode interval killswitch lan_iface lan_cidr health_url \
+              zapret_enabled ipsum_enabled ipsum_url ru_enabled ru_url \
+              vpn_domains_url ignore_domains_url; do
+        _v="$(g "splify.global.$_o")"
+        [ -n "$_v" ] && json_add_string "$_o" "$_v"
+    done
+    for _l in health_target vpn_cidr direct_cidr vpn_domain direct_domain; do
+        add_list "$_l" "$(g "splify.global.$_l")"
+    done
+}
+
+cmd_export() {
+    _reveal=0; [ "$1" = "--reveal" ] && _reveal=1
+    json_init
+    json_add_int    version "$SNAP_VERSION"
+    json_add_string node "$(g splify.api.node_id)"
+    json_add_int    ts "$(date +%s)"
+
+    json_add_object splify
+        json_add_object global; emit_splify_global; json_close_object
+        json_add_array endpoints
+        _i=0
+        while [ -n "$(g "splify.@endpoint[$_i]")" ]; do
+            json_add_object ""
+            json_add_string iface    "$(g "splify.@endpoint[$_i].iface")"
+            json_add_string priority "$(g "splify.@endpoint[$_i].priority")"
+            json_add_string type     "$(g "splify.@endpoint[$_i].type")"
+            json_close_object
+            _i=$((_i + 1))
+        done
+        json_close_array
+        json_add_array devices
+        _i=0
+        while [ -n "$(g "splify.@device[$_i]")" ]; do
+            json_add_object ""
+            json_add_string ip   "$(g "splify.@device[$_i].ip")"
+            json_add_string mode "$(g "splify.@device[$_i].mode")"
+            json_close_object
+            _i=$((_i + 1))
+        done
+        json_close_array
+    json_close_object
+
+    json_add_object wg
+    for _if in $(wg_ifaces); do
+        json_add_object "$_if"; emit_wg_iface "$_if" "$_reveal"; json_close_object
+    done
+    json_close_object
+
+    json_dump
+}
+
+# ---- snapshot: import (merge) ---------------------------------------------
+# These run INSIDE a json_load context; they read the parsed document and
+# translate present keys into uci set/add_list. Absent keys are left untouched.
+
+# Set a scalar option from json var $2 (if present) onto uci path $1.
+set_opt() {  # uci-path json-key
+    json_get_type _t "$2" 2>/dev/null
+    [ -n "$_t" ] || return 0
+    json_get_var _val "$2"
+    uci set "$1=$_val"
+}
+
+# Replace a uci list option $1 from json array key $2 (only if the key exists).
+set_list() {  # uci-path json-key
+    json_get_type _t "$2" 2>/dev/null
+    [ "$_t" = array ] || return 0
+    uci -q delete "$1" 2>/dev/null || true
+    json_select "$2"
+    json_get_keys _ks
+    for _k in $_ks; do
+        json_get_var _v "$_k"
+        [ -n "$_v" ] && uci add_list "$1=$_v"
+    done
+    json_select ..
+}
+
+# Apply one wg/awg interface from the object currently selected in jshn.
+import_wg_iface() {  # iface
+    _if="$1"
+    valid_iface "$_if" || return 1
+    # Only touch an interface that already exists AND is a real wg/awg tunnel —
+    # splify never creates interfaces or keys, and confining writes to genuine
+    # tunnels means a desired-doc can't repurpose `wan`/`lan`.
+    iface_is_wg "$_if" || { warn "wg import: $_if is not a wg/awg interface — skipped"; return 1; }
+
+    set_opt "network.$_if.private_key" private_key
+    for _o in listen_port mtu; do set_opt "network.$_if.$_o" "$_o"; done
+    set_list "network.$_if.addresses" addresses
+    set_list "network.$_if.dns"       dns
+
+    json_get_type _t awg 2>/dev/null
+    if [ "$_t" = object ]; then
+        json_select awg
+        json_get_keys _aks
+        for _ak in $_aks; do
+            json_get_var _av "$_ak"
+            uci set "network.$_if.awg_$_ak=$_av"
+        done
+        json_select ..
+    fi
+
+    # peers: if the document carries a peers array, it REPLACES existing peers
+    # (delete all, re-add). A controller that only tweaks the interface omits it.
+    # Secrets are preserved across the replace: a peer object that omits
+    # preshared_key (e.g. a masked export edited by the controller) keeps the
+    # existing key, matched by public_key — so a round-trip never silently wipes
+    # a PSK. Sending a real preshared_key overrides it as expected.
+    json_get_type _t peers 2>/dev/null
+    if [ "$_t" = array ]; then
+        _proto="$(g "network.$_if.proto")"; _pt="${_proto}_$_if"
+        _pskmap="$(mktemp 2>/dev/null || echo /tmp/splify-psk.$$)"
+        : > "$_pskmap"
+        _j=0
+        while [ -n "$(g "network.@${_pt}[$_j]")" ]; do
+            printf '%s\t%s\n' "$(g "network.@${_pt}[$_j].public_key")" "$(g "network.@${_pt}[$_j].preshared_key")" >> "$_pskmap"
+            _j=$((_j + 1))
+        done
+        while [ -n "$(g "network.@${_pt}[0]")" ]; do uci -q delete "network.@${_pt}[0]"; done
+        json_select peers
+        json_get_keys _pks
+        for _pk in $_pks; do
+            json_select "$_pk"
+            uci add network "$_pt" >/dev/null
+            for _o in description public_key endpoint_host \
+                      endpoint_port persistent_keepalive route_allowed_ips; do
+                set_opt "network.@${_pt}[-1].$_o" "$_o"
+            done
+            # preshared_key: explicit value wins; otherwise restore by public_key
+            json_get_type _pt2 preshared_key 2>/dev/null
+            if [ -n "$_pt2" ]; then
+                json_get_var _pskv preshared_key; uci set "network.@${_pt}[-1].preshared_key=$_pskv"
+            else
+                json_get_var _pubv public_key 2>/dev/null
+                _old="$(awk -F'\t' -v k="$_pubv" '$1==k{print $2; exit}' "$_pskmap" 2>/dev/null)"
+                [ -n "$_old" ] && uci set "network.@${_pt}[-1].preshared_key=$_old"
+            fi
+            set_list "network.@${_pt}[-1].allowed_ips" allowed_ips
+            json_select ..
+        done
+        json_select ..
+        rm -f "$_pskmap" 2>/dev/null
+    fi
+    return 0
+}
+
+# Apply splify.global from the object currently selected in jshn.
+import_splify_global() {
+    for _o in mode interval killswitch lan_iface lan_cidr health_url \
+              zapret_enabled ipsum_enabled ipsum_url ru_enabled ru_url \
+              vpn_domains_url ignore_domains_url; do
+        set_opt "splify.global.$_o" "$_o"
+    done
+    for _l in health_target vpn_cidr direct_cidr vpn_domain direct_domain; do
+        set_list "splify.global.$_l" "$_l"
+    done
+}
+
+cmd_import() {
+    _apply=1; [ "$1" = "--no-apply" ] && _apply=0
+    _doc="$(cat)"
+    json_init
+    json_load "$_doc" 2>/dev/null || die_json "invalid JSON" 2
+
+    _net_changed=0; _splify_changed=0
+
+    json_get_type _t splify 2>/dev/null
+    if [ "$_t" = object ]; then
+        json_select splify
+        json_get_type _t global 2>/dev/null
+        if [ "$_t" = object ]; then json_select global; import_splify_global; json_select ..; _splify_changed=1; fi
+        # endpoints/devices: replace wholesale when present (they are small,
+        # ordered lists where partial merge has no sensible meaning).
+        json_get_type _t endpoints 2>/dev/null
+        if [ "$_t" = array ]; then
+            while [ -n "$(g 'splify.@endpoint[0]')" ]; do uci -q delete 'splify.@endpoint[0]'; done
+            json_select endpoints; json_get_keys _eks
+            for _ek in $_eks; do
+                json_select "$_ek"; uci add splify endpoint >/dev/null
+                for _o in iface priority type; do set_opt "splify.@endpoint[-1].$_o" "$_o"; done
+                json_select ..
+            done
+            json_select ..; _splify_changed=1
+        fi
+        json_get_type _t devices 2>/dev/null
+        if [ "$_t" = array ]; then
+            while [ -n "$(g 'splify.@device[0]')" ]; do uci -q delete 'splify.@device[0]'; done
+            json_select devices; json_get_keys _dks
+            for _dk in $_dks; do
+                json_select "$_dk"; uci add splify device >/dev/null
+                for _o in ip mode; do set_opt "splify.@device[-1].$_o" "$_o"; done
+                json_select ..
+            done
+            json_select ..; _splify_changed=1
+        fi
+        json_select ..
+    fi
+
+    json_get_type _t wg 2>/dev/null
+    if [ "$_t" = object ]; then
+        json_select wg
+        json_get_keys _wks
+        for _wif in $_wks; do
+            json_select "$_wif"
+            import_wg_iface "$_wif" && _net_changed=1
+            json_select ..
+        done
+        json_select ..
+    fi
+
+    [ "$_splify_changed" = 1 ] && uci commit splify
+    [ "$_net_changed" = 1 ] && uci commit network
+
+    if [ "$_apply" = 1 ]; then
+        # Bounce touched tunnels so awg_*/key/endpoint changes take effect, then
+        # let splify regenerate routing. Bouncing here (vs a full network reload)
+        # keeps the blast radius to splify's own tunnels.
+        if [ "$_net_changed" = 1 ]; then
+            json_select wg; json_get_keys _wks2 2>/dev/null
+            for _wif in $_wks2; do
+                valid_iface "$_wif" && iface_is_wg "$_wif" && { ifdown "$_wif" >/dev/null 2>&1; ifup "$_wif" >/dev/null 2>&1; }
+            done
+            json_select ..
+        fi
+        # A splify config change needs the daemon restarted (it samples UCI once
+        # at startup); restart also re-runs splify-apply. If only wg changed, a
+        # one-shot apply is enough.
+        if [ "$_splify_changed" = 1 ]; then
+            /etc/init.d/splify restart >/dev/null 2>&1
+        else
+            /usr/local/sbin/splify-apply >/dev/null 2>&1
+        fi
+    fi
+
+    json_init
+    json_add_boolean ok 1
+    json_add_boolean splify_changed "$_splify_changed"
+    json_add_boolean network_changed "$_net_changed"
+    json_add_boolean applied "$_apply"
+    json_dump
+}
+
+# ---- single-interface get/set ---------------------------------------------
+cmd_wg_get() {
+    valid_iface "$1" || die_json "invalid iface" 2
+    iface_is_wg "$1" || die_json "not a wg/awg interface" 2
+    _reveal=0; [ "$2" = "--reveal" ] && _reveal=1
+    json_init; emit_wg_iface "$1" "$_reveal"; json_dump
+}
+
+cmd_wg_set() {
+    valid_iface "$1" || die_json "invalid iface" 2
+    iface_is_wg "$1" || die_json "not a wg/awg interface" 2
+    _apply=1; [ "$2" = "--no-apply" ] && _apply=0
+    _doc="$(cat)"
+    json_init; json_load "$_doc" 2>/dev/null || die_json "invalid JSON" 2
+    import_wg_iface "$1" || die_json "interface rejected" 2
+    uci commit network
+    if [ "$_apply" = 1 ]; then
+        ifdown "$1" >/dev/null 2>&1; ifup "$1" >/dev/null 2>&1
+        /usr/local/sbin/splify-apply >/dev/null 2>&1
+    fi
+    json_init; json_add_boolean ok 1; json_add_boolean applied "$_apply"; json_dump
+}
+
+# ---- .conf import ----------------------------------------------------------
+# Parse a WireGuard/AmneziaWG client .conf (the text AmneziaVPN/wg-quick exports)
+# into UCI for an EXISTING interface. [Interface] -> network.<iface>, [Peer] ->
+# one peer section. AmneziaWG's Jc/Jmin/.../I1 and S1/S2/H1..H4 map to awg_*.
+cmd_wg_import() {
+    valid_iface "$1" || die_json "invalid iface" 2
+    iface_is_wg "$1" || die_json "not a wg/awg interface" 2
+    _apply=1; [ "$2" = "--no-apply" ] && _apply=0
+    _if="$1"; _proto="$(g "network.$_if.proto")"; _pt="${_proto}_$_if"
+
+    # wipe existing peers; rebuild interface secret/addresses/dns/awg + peers
+    while [ -n "$(g "network.@${_pt}[0]")" ]; do uci -q delete "network.@${_pt}[0]"; done
+
+    _section=""; _have_peer=0
+    # Read line by line; tolerate CRLF and inline spaces around '='.
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line="$(printf '%s' "$_line" | tr -d '\r')"
+        case "$_line" in
+            \#*|\;*|'') continue ;;
+            '[Interface]') _section=iface; continue ;;
+            '[Peer]')
+                _section=peer
+                uci add network "$_pt" >/dev/null; _have_peer=1
+                continue ;;
+        esac
+        _key="${_line%%=*}"; _val="${_line#*=}"
+        _key="$(printf '%s' "$_key" | tr 'A-Z' 'a-z' | tr -d ' \t')"
+        _val="$(printf '%s' "$_val" | sed 's/^[ \t]*//; s/[ \t]*$//')"
+        [ -n "$_key" ] && [ -n "$_val" ] || continue
+        if [ "$_section" = iface ]; then
+            case "$_key" in
+                privatekey) uci set "network.$_if.private_key=$_val" ;;
+                address|addresses)
+                    uci -q delete "network.$_if.addresses"
+                    for _a in $(printf '%s' "$_val" | tr ',' ' '); do uci add_list "network.$_if.addresses=$_a"; done ;;
+                dns)
+                    uci -q delete "network.$_if.dns"
+                    for _d in $(printf '%s' "$_val" | tr ',' ' '); do uci add_list "network.$_if.dns=$_d"; done ;;
+                listenport) uci set "network.$_if.listen_port=$_val" ;;
+                mtu)        uci set "network.$_if.mtu=$_val" ;;
+                jc|jmin|jmax|s1|s2|s3|s4|h1|h2|h3|h4|i1|i2|i3|i4|i5|j1|j2|j3|itime)
+                    uci set "network.$_if.awg_$_key=$_val" ;;
+            esac
+        elif [ "$_section" = peer ]; then
+            case "$_key" in
+                publickey)    uci set "network.@${_pt}[-1].public_key=$_val" ;;
+                presharedkey) uci set "network.@${_pt}[-1].preshared_key=$_val" ;;
+                allowedips)
+                    uci -q delete "network.@${_pt}[-1].allowed_ips"
+                    for _ip in $(printf '%s' "$_val" | tr ',' ' '); do uci add_list "network.@${_pt}[-1].allowed_ips=$_ip"; done ;;
+                endpoint)
+                    uci set "network.@${_pt}[-1].endpoint_host=${_val%:*}"
+                    uci set "network.@${_pt}[-1].endpoint_port=${_val##*:}" ;;
+                persistentkeepalive) uci set "network.@${_pt}[-1].persistent_keepalive=$_val" ;;
+            esac
+        fi
+    done
+
+    [ "$_have_peer" = 1 ] || die_json "no [Peer] section in config" 2
+    # AmneziaWG endpoints must NOT pull AllowedIPs into the main table (splify
+    # owns routing via marks+table 200); match the import default the UI uses.
+    uci set "network.$_if.route_allowed_ips=0"
+    uci commit network
+    if [ "$_apply" = 1 ]; then
+        ifdown "$_if" >/dev/null 2>&1; ifup "$_if" >/dev/null 2>&1
+        /usr/local/sbin/splify-apply >/dev/null 2>&1
+    fi
+    json_init; json_add_boolean ok 1; json_add_boolean applied "$_apply"; json_dump
+}
+
+# ---- allow-listed maintenance actions (mirror of the rpcd plugin) ----------
+cmd_action() {
+    _name="$1"; _iface="$2"; _code=0; _out=""
+    case "$_name" in
+        apply)          _out="$(/usr/local/sbin/splify-apply 2>&1)";          _code=$? ;;
+        restart)        _out="$(/etc/init.d/splify restart 2>&1)";            _code=$? ;;
+        disable)        _out="$(/usr/local/sbin/splify-disable 2>&1)";        _code=$? ;;
+        update_ipsum)   _out="$(/usr/local/sbin/splify-update-ipsum 2>&1)";   _code=$? ;;
+        update_ru)      _out="$(/usr/local/sbin/splify-update-ru 2>&1)";      _code=$? ;;
+        update_domains) _out="$(/usr/local/sbin/splify-update-domains 2>&1)"; _code=$? ;;
+        on)  /etc/init.d/splify enable >/dev/null 2>&1; _out="$(/etc/init.d/splify restart 2>&1)"; _code=$? ;;
+        off) /etc/init.d/splify disable >/dev/null 2>&1; /etc/init.d/splify stop >/dev/null 2>&1
+             _out="$(/usr/local/sbin/splify-disable 2>&1)"; _code=$? ;;
+        fw_fix)
+            case "$_iface" in
+                ''|*[!A-Za-z0-9_.-]*) _out="invalid or missing iface"; _code=2 ;;
+                *) _out="$(/usr/local/sbin/splify-firewall fix "$_iface" 2>&1)"; _code=$? ;;
+            esac ;;
+        *) _out="unknown action: ${_name:-(none)}"; _code=2 ;;
+    esac
+    json_init; json_add_int code "$_code"; json_add_string stdout "$_out"; json_dump
+}
+
+# ---- api / agent config ----------------------------------------------------
+ensure_api_section() { [ -n "$(g splify.api)" ] || { uci set splify.api=api; uci commit splify; }; }
+
+cmd_api_get() {
+    ensure_api_section
+    json_init
+    json_add_string  enabled          "$(g splify.api.enabled)"
+    json_add_string  agent_enabled    "$(g splify.api.agent_enabled)"
+    json_add_boolean has_token        "$([ -n "$(g splify.api.token)" ] && echo 1 || echo 0)"
+    json_add_string  token            "$(g splify.api.token)"
+    json_add_string  control_internal "$(g splify.api.control_internal)"
+    json_add_string  control_external "$(g splify.api.control_external)"
+    json_add_boolean has_access_key   "$([ -n "$(g splify.api.access_key)" ] && echo 1 || echo 0)"
+    json_add_string  enrolled         "$(g splify.api.enrolled)"
+    json_add_string  node_id          "$(g splify.api.node_id)"
+    json_add_string  interval         "$(g splify.api.interval)"
+    json_add_string  allow_subnet     "$(g splify.api.allow_subnet)"
+    # agent runtime: is the procd instance up, and when did it last poll?
+    _running=0; pgrep -f '[s]plify-agent' >/dev/null 2>&1 && _running=1
+    json_add_boolean agent_running    "$_running"
+    json_add_string  last_poll        "$(cat /var/run/splify-agent.last 2>/dev/null)"
+    json_add_string  last_result      "$(cat /var/run/splify-agent.status 2>/dev/null)"
+    json_dump
+}
+
+cmd_api_set() {
+    ensure_api_section
+    _doc="$(cat)"; json_init; json_load "$_doc" 2>/dev/null || die_json "invalid JSON" 2
+    for _o in enabled agent_enabled token control_internal control_external \
+              access_key node_id interval allow_subnet; do
+        set_opt "splify.api.$_o" "$_o"
+    done
+    uci commit splify
+    # apply agent enable/disable immediately
+    if [ "$(g splify.api.agent_enabled)" = "1" ]; then
+        /etc/init.d/splify-agent enable >/dev/null 2>&1
+        /etc/init.d/splify-agent restart >/dev/null 2>&1
+    else
+        /etc/init.d/splify-agent disable >/dev/null 2>&1
+        /etc/init.d/splify-agent stop >/dev/null 2>&1
+    fi
+    json_init; json_add_boolean ok 1; json_dump
+}
+
+# Generate a 32-byte url-safe token from the kernel CSPRNG.
+gen_token() {
+    if [ -r /dev/urandom ]; then
+        head -c 24 /dev/urandom | base64 2>/dev/null | tr '+/' '-_' | tr -d '=\n'
+    else
+        # last-resort fallback (no urandom): time+pid hash
+        printf '%s%s' "$(date +%s%N)" "$$" | md5sum | cut -c1-32
+    fi
+}
+
+cmd_token_regen() {
+    ensure_api_section
+    _tok="$(gen_token)"
+    uci set "splify.api.token=$_tok"; uci commit splify
+    json_init; json_add_string token "$_tok"; json_dump
+}
+
+_default_node_id() {
+    _h="$(uci -q get system.@system[0].hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || echo splify)"
+    _r="$(head -c4 /dev/urandom 2>/dev/null | hexdump -e '4/1 "%02x"' 2>/dev/null)"
+    [ -n "$_r" ] || _r="$(date +%s | tail -c6)"
+    printf '%s-%s' "$_h" "$_r"
+}
+
+# WAN egress device so external enrollment/poll leaves over the internet even
+# with the tunnel down (mirrors splify-agent's logic).
+_wan_device() {
+    if [ -f /lib/functions/network.sh ]; then
+        # shellcheck source=/dev/null
+        . /lib/functions/network.sh
+        network_flush_cache 2>/dev/null
+        _wd=""; network_get_device _wd wan 2>/dev/null
+    fi
+    [ -n "$_wd" ] || _wd="$(ip -4 route show default 2>/dev/null | awk '/default/{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')"
+    printf '%s' "$_wd"
+}
+
+# Register this node's OWN token with the dashboard, authenticated by the one-time
+# access_key. Internal URL first (over the tunnel, private), then external (over
+# WAN). On success: enrolled=1, access_key cleared, agent enabled + started.
+cmd_enroll() {
+    ensure_api_section
+    _ak="$(g splify.api.access_key)"
+    _internal="$(g splify.api.control_internal)"
+    _external="$(g splify.api.control_external)"
+    _node="$(g splify.api.node_id)"
+    _token="$(g splify.api.token)"
+    [ -n "$_ak" ] || die_json "no access_key — paste the dashboard connection JSON first (splify-ctl connect)" 2
+    [ -n "$_internal$_external" ] || die_json "no dashboard URL in connection profile" 2
+    [ -n "$_token" ] || { _token="$(gen_token)"; uci set "splify.api.token=$_token"; }
+    [ -n "$_node" ]  || { _node="$(_default_node_id)"; uci set "splify.api.node_id=$_node"; }
+    uci commit splify
+    _host="$(uci -q get system.@system[0].hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null)"
+    _body="$(printf '{"node_id":"%s","node_token":"%s","hostname":"%s","agent":"splify-ctl/1"}' "$_node" "$_token" "$_host")"
+
+    _ok=0; _resp=""; _via=""
+    if [ -n "$_internal" ]; then
+        _resp="$(printf '%s' "$_body" | curl -fsS --max-time 20 \
+            -H 'Content-Type: application/json' -H "Authorization: Bearer $_ak" \
+            --data-binary @- "${_internal%/}/enroll" 2>/dev/null)" && { _ok=1; _via=internal; }
+    fi
+    if [ "$_ok" != 1 ] && [ -n "$_external" ]; then
+        _wan="$(_wan_device)"; _pin=""; [ -n "$_wan" ] && _pin="--interface $_wan"
+        # shellcheck disable=SC2086
+        _resp="$(printf '%s' "$_body" | curl $_pin -fsS --max-time 20 \
+            -H 'Content-Type: application/json' -H "Authorization: Bearer $_ak" \
+            --data-binary @- "${_external%/}/enroll" 2>/dev/null)" && { _ok=1; _via=external; }
+    fi
+    [ "$_ok" = 1 ] || die_json "enroll failed — dashboard unreachable or access_key rejected" 1
+
+    # dashboard may confirm or reassign the node id
+    json_init; json_load "$_resp" 2>/dev/null; json_get_var _nid node_id 2>/dev/null
+    [ -n "$_nid" ] && { uci set "splify.api.node_id=$_nid"; _node="$_nid"; }
+    uci set splify.api.enrolled=1
+    uci set splify.api.access_key=''
+    uci set splify.api.agent_enabled=1
+    uci commit splify
+    /etc/init.d/splify-agent enable >/dev/null 2>&1
+    /etc/init.d/splify-agent restart >/dev/null 2>&1
+
+    json_init; json_add_boolean ok 1; json_add_string via "$_via"
+    json_add_string node_id "$_node"; json_dump
+}
+
+# Accept the dashboard's connection JSON { internal, external, access_key,
+# node_id? }, store the profile, then enroll immediately.
+cmd_connect() {
+    ensure_api_section
+    _doc="$(cat)"; json_init; json_load "$_doc" 2>/dev/null || die_json "invalid connection JSON" 2
+    json_get_var _internal internal 2>/dev/null
+    json_get_var _external external 2>/dev/null
+    json_get_var _ak       access_key 2>/dev/null
+    json_get_var _nid      node_id 2>/dev/null
+    [ -n "$_ak" ] || die_json "connection JSON missing access_key" 2
+    [ -n "$_internal$_external" ] || die_json "connection JSON missing internal/external URL" 2
+    [ -n "$_internal" ] && uci set "splify.api.control_internal=$_internal"
+    [ -n "$_external" ] && uci set "splify.api.control_external=$_external"
+    uci set "splify.api.access_key=$_ak"
+    [ -n "$_nid" ] && uci set "splify.api.node_id=$_nid"
+    uci commit splify
+    cmd_enroll
+}
+
+# ---- dispatch --------------------------------------------------------------
+case "$1" in
+    export)     shift; cmd_export "$@" ;;
+    import)     shift; cmd_import "$@" ;;
+    wg-get)     shift; cmd_wg_get "$@" ;;
+    wg-set)     shift; cmd_wg_set "$@" ;;
+    wg-import)  shift; cmd_wg_import "$@" ;;
+    action)     shift; cmd_action "$@" ;;
+    status)     /usr/local/sbin/splify-doctor --json || true ;;
+    api-get)    cmd_api_get ;;
+    api-set)    cmd_api_set ;;
+    token-regen) cmd_token_regen ;;
+    connect)    cmd_connect ;;
+    enroll)     cmd_enroll ;;
+    *) die_json "usage: splify-ctl {export|import|wg-get|wg-set|wg-import|action|status|api-get|api-set|token-regen|connect|enroll}" 2 ;;
+esac

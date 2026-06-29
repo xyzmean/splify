@@ -1,0 +1,557 @@
+#!/usr/bin/env python3
+# splify-control — reference control plane for splify nodes (routers).
+#
+# WHY THIS EXISTS: splify routers sit behind carrier-grade NAT with no static IP,
+# so nothing can connect IN to them, and the management channel has to keep
+# working when their WG tunnel is down. So each router runs an OUTBOUND agent
+# (splify-agent) that polls THIS server over the plain internet (WAN). The server
+# hands back a "desired" snapshot (full splify config + every wg/awg interface),
+# which the router applies — this is how you push a fixed AmneziaWG config to a
+# router whose tunnel just died.
+#
+# TWO listeners, deliberately split:
+#   * NODE API  (public)  — POST /poll : routers report status + receive desired
+#                           config. Bearer-token per node. Bind 0.0.0.0 so CGNAT
+#                           routers reach it over WAN. Put TLS in front of it.
+#   * ADMIN UI  (WG-only) — the management console + admin API. Bind it to the WG
+#                           address (e.g. 10.8.0.1) so it is reachable ONLY from
+#                           inside the WG network, never the public internet.
+#
+# Generation counter avoids a reboot/poll bounce-loop: the server returns the
+# desired snapshot only while the node's reported applied_gen is behind the
+# current generation; once the node converges it gets {"noop":true}.
+#
+# Stdlib only (http.server, json, ssl, hmac) — runs anywhere Python 3.7+ does.
+# Storage: one JSON file per node under --data-dir.
+#
+#   ./splify-control --admin-host 10.8.0.1 --admin-port 8088 \
+#                    --node-host 0.0.0.0  --node-port 8080 \
+#                    --data-dir /var/lib/splify-control
+#
+# See README.md for TLS / systemd / firewall guidance.
+
+import argparse
+import hmac
+import json
+import os
+import re
+import secrets
+import ssl
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+CFG = {}                       # filled from argparse
+LOCK = threading.Lock()        # serialise node-file read/modify/write
+NODE_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+MAX_BODY = 2 * 1024 * 1024     # 2 MiB cap on any request body
+
+
+# ---- storage ---------------------------------------------------------------
+def node_path(node):
+    if not NODE_RE.match(node or ''):
+        return None
+    return os.path.join(CFG['data_dir'], node + '.json')
+
+
+def load_node(node):
+    p = node_path(node)
+    if not p or not os.path.exists(p):
+        return None
+    try:
+        with open(p, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def save_node(rec):
+    p = node_path(rec['node'])
+    if not p:
+        return
+    tmp = p + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(rec, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
+
+
+def list_nodes():
+    out = []
+    try:
+        names = sorted(os.listdir(CFG['data_dir']))
+    except OSError:
+        names = []
+    for fn in names:
+        if not fn.endswith('.json'):
+            continue
+        rec = load_node(fn[:-5])
+        if not rec:
+            continue
+        rep = rec.get('last_report') or {}
+        summ = ((rep.get('status') or {}).get('summary')) or {}
+        out.append({
+            'node': rec['node'],
+            'generation': rec.get('generation', 0),
+            'applied_gen': rep.get('applied_gen', 0),
+            'has_desired': bool(rec.get('desired')),
+            'pending': bool(rec.get('desired')) and rep.get('applied_gen', 0) < rec.get('generation', 0),
+            'last_seen': rec.get('last_seen', 0),
+            'overall': (rep.get('status') or {}).get('overall', '?'),
+            'state': summ.get('state', '?'),
+            'mode': summ.get('mode', '?'),
+        })
+    return out
+
+
+# ---- helpers ---------------------------------------------------------------
+def gen_token():
+    return secrets.token_urlsafe(24)
+
+
+def bearer(headers):
+    h = headers.get('Authorization', '')
+    if h[:7].lower() == 'bearer ':
+        return h[7:].strip()
+    return headers.get('X-Splify-Token', '').strip()
+
+
+def tok_eq(a, b):
+    return bool(a) and bool(b) and hmac.compare_digest(str(a), str(b))
+
+
+# The "connection JSON" a router imports (LuCI → API → Подключить, or
+# `splify-ctl connect`). Carries BOTH reachable URLs + the one-time access_key.
+def connect_json():
+    return {
+        'version': 1,
+        'internal': CFG.get('internal_url') or '',
+        'external': CFG.get('external_url') or '',
+        'access_key': CFG.get('access_key') or '',
+    }
+
+
+# Parse a WireGuard/AmneziaWG .conf into a wg snapshot fragment for one iface.
+def parse_conf(text, iface):
+    iface_opts, awg, peer = {}, {}, {}
+    section = None
+    awg_keys = {'jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4',
+                'h1', 'h2', 'h3', 'h4', 'i1', 'i2', 'i3', 'i4', 'i5',
+                'j1', 'j2', 'j3', 'itime'}
+    for raw in text.replace('\r', '').split('\n'):
+        line = raw.strip()
+        if not line or line[0] in '#;':
+            continue
+        if line.lower() == '[interface]':
+            section = 'i'; continue
+        if line.lower() == '[peer]':
+            section = 'p'; continue
+        if '=' not in line:
+            continue
+        k, v = line.split('=', 1)
+        k = k.strip().lower(); v = v.strip()
+        if section == 'i':
+            if k == 'privatekey':
+                iface_opts['private_key'] = v
+            elif k in ('address', 'addresses'):
+                iface_opts['addresses'] = [x.strip() for x in v.split(',') if x.strip()]
+            elif k == 'dns':
+                iface_opts['dns'] = [x.strip() for x in v.split(',') if x.strip()]
+            elif k == 'listenport':
+                iface_opts['listen_port'] = v
+            elif k == 'mtu':
+                iface_opts['mtu'] = v
+            elif k in awg_keys:
+                awg[k] = v
+        elif section == 'p':
+            if k == 'publickey':
+                peer['public_key'] = v
+            elif k == 'presharedkey':
+                peer['preshared_key'] = v
+            elif k == 'allowedips':
+                peer['allowed_ips'] = [x.strip() for x in v.split(',') if x.strip()]
+            elif k == 'endpoint':
+                host, _, port = v.rpartition(':')
+                peer['endpoint_host'] = host or v
+                if port:
+                    peer['endpoint_port'] = port
+            elif k == 'persistentkeepalive':
+                peer['persistent_keepalive'] = v
+    if awg:
+        iface_opts['awg'] = awg
+    iface_opts['route_allowed_ips'] = '0'
+    if peer:
+        iface_opts['peers'] = [peer]
+    return {'wg': {iface: iface_opts}}
+
+
+# ---- request handlers ------------------------------------------------------
+class Base(BaseHTTPRequestHandler):
+    server_version = 'splify-control/1'
+
+    def log_message(self, fmt, *args):
+        if CFG['verbose']:
+            super().log_message(fmt, *args)
+
+    def _body(self):
+        try:
+            n = int(self.headers.get('Content-Length', 0))
+        except ValueError:
+            n = 0
+        if n <= 0 or n > MAX_BODY:
+            return b''
+        return self.rfile.read(n)
+
+    def _json(self, code, obj):
+        data = json.dumps(obj, ensure_ascii=False).encode('utf-8')
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _html(self, code, text):
+        data = text.encode('utf-8')
+        self.send_response(code)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+# Public node-facing API: /enroll (access-key gated registration) and /poll.
+class NodeHandler(Base):
+    def do_POST(self):
+        path = self.path.split('?', 1)[0].rstrip('/')
+        if path in ('/enroll', '/api/v1/enroll'):
+            return self._enroll()
+        if path in ('/poll', '/api/v1/poll'):
+            return self._poll()
+        return self._json(404, {'error': 'not found'})
+
+    # Register a node's SELF-GENERATED token, authenticated by the one-time
+    # access_key from the connection JSON. This is the ONLY way a node enters the
+    # fleet — /poll never auto-registers (the listener is public).
+    def _enroll(self):
+        if not CFG['access_key']:
+            return self._json(503, {'error': 'enrollment disabled (no access_key configured)'})
+        if not tok_eq(bearer(self.headers), CFG['access_key']):
+            return self._json(401, {'error': 'bad access_key'})
+        try:
+            body = json.loads(self._body() or b'{}')
+        except ValueError:
+            return self._json(400, {'error': 'bad json'})
+        node = str(body.get('node_id') or '').strip()
+        token = str(body.get('node_token') or '').strip()
+        if not NODE_RE.match(node):
+            return self._json(400, {'error': 'bad node id'})
+        if not token:
+            return self._json(400, {'error': 'missing node_token'})
+        with LOCK:
+            rec = load_node(node) or {'node': node, 'generation': 0, 'desired': None,
+                                      'last_report': None, 'last_seen': 0, 'history': []}
+            rec['token'] = token            # node owns its key; we just record it
+            rec['hostname'] = body.get('hostname', '')
+            rec['enrolled_at'] = int(time.time())
+            save_node(rec)
+        return self._json(200, {'ok': True, 'node_id': node})
+
+    def _poll(self):
+        try:
+            report = json.loads(self._body() or b'{}')
+        except ValueError:
+            return self._json(400, {'error': 'bad json'})
+        node = str(report.get('node') or self.headers.get('X-Splify-Node') or '').strip()
+        token = bearer(self.headers)
+        if not NODE_RE.match(node):
+            return self._json(400, {'error': 'bad node id'})
+        with LOCK:
+            rec = load_node(node)
+            if rec is None:
+                return self._json(403, {'error': 'not enrolled'})
+            if not tok_eq(token, rec.get('token')):
+                return self._json(401, {'error': 'bad token'})
+            rec['last_seen'] = int(time.time())
+            rec['last_report'] = report
+            st = (report.get('status') or {})
+            summ = st.get('summary') or {}
+            hist = rec.get('history') or []
+            hist.append({'ts': rec['last_seen'], 'overall': st.get('overall', '?'),
+                         'state': summ.get('state', '?')})
+            rec['history'] = hist[-200:]
+            generation = int(rec.get('generation', 0))
+            applied = int(report.get('applied_gen', 0) or 0)
+            desired = rec.get('desired')
+            save_node(rec)
+        if desired and applied < generation:
+            resp = dict(desired)
+            resp['generation'] = generation
+            return self._json(200, resp)
+        return self._json(200, {'noop': True, 'generation': generation})
+
+    def do_GET(self):
+        # a tiny health probe so you can curl the public endpoint
+        if self.path.split('?', 1)[0].rstrip('/') in ('/health', '/api/v1/health'):
+            return self._json(200, {'ok': True})
+        return self._json(404, {'error': 'not found'})
+
+
+# Admin console + admin API. Bind to the WG address so it is WG-only.
+class AdminHandler(Base):
+    def _auth_ok(self):
+        if not CFG['admin_token']:
+            return True
+        return tok_eq(bearer(self.headers), CFG['admin_token'])
+
+    def do_GET(self):
+        if not self._auth_ok():
+            return self._json(401, {'error': 'admin auth required'})
+        path = self.path.split('?', 1)[0]
+        if path == '/' or path == '/index.html':
+            return self._html(200, ADMIN_HTML)
+        if path == '/admin/api/nodes':
+            return self._json(200, {'nodes': list_nodes()})
+        if path == '/admin/api/connect':
+            return self._json(200, connect_json())
+        m = re.match(r'^/admin/api/nodes/([^/]+)$', path)
+        if m:
+            rec = load_node(m.group(1))
+            if not rec:
+                return self._json(404, {'error': 'no such node'})
+            return self._json(200, rec)
+        return self._json(404, {'error': 'not found'})
+
+    def do_POST(self):
+        if not self._auth_ok():
+            return self._json(401, {'error': 'admin auth required'})
+        path = self.path.split('?', 1)[0]
+        m = re.match(r'^/admin/api/nodes/([^/]+)/import-conf$', path)
+        if m:
+            node = m.group(1)
+            try:
+                payload = json.loads(self._body() or b'{}')
+            except ValueError:
+                return self._json(400, {'error': 'bad json'})
+            iface = (payload.get('iface') or '').strip()
+            conf = payload.get('conf') or ''
+            if not NODE_RE.match(iface or ''):
+                return self._json(400, {'error': 'bad iface'})
+            snap = parse_conf(conf, iface)
+            return self._set_desired(node, snap)
+        m = re.match(r'^/admin/api/nodes/([^/]+)/token/regen$', path)
+        if m:
+            with LOCK:
+                rec = load_node(m.group(1))
+                if not rec:
+                    return self._json(404, {'error': 'no such node'})
+                rec['token'] = gen_token()
+                save_node(rec)
+            return self._json(200, {'token': rec['token']})
+        return self._json(404, {'error': 'not found'})
+
+    def do_PUT(self):
+        if not self._auth_ok():
+            return self._json(401, {'error': 'admin auth required'})
+        m = re.match(r'^/admin/api/nodes/([^/]+)/desired$', self.path.split('?', 1)[0])
+        if m:
+            try:
+                desired = json.loads(self._body() or b'null')
+            except ValueError:
+                return self._json(400, {'error': 'bad json'})
+            return self._set_desired(m.group(1), desired)
+        return self._json(404, {'error': 'not found'})
+
+    def do_DELETE(self):
+        if not self._auth_ok():
+            return self._json(401, {'error': 'admin auth required'})
+        m = re.match(r'^/admin/api/nodes/([^/]+)$', self.path.split('?', 1)[0])
+        if m:
+            p = node_path(m.group(1))
+            if p and os.path.exists(p):
+                os.remove(p)
+                return self._json(200, {'ok': True})
+            return self._json(404, {'error': 'no such node'})
+        return self._json(404, {'error': 'not found'})
+
+    def _set_desired(self, node, desired):
+        with LOCK:
+            rec = load_node(node)
+            if rec is None:
+                # allow pre-creating a node from the console (operator sets token
+                # later via regen, or the node self-registers on first poll)
+                rec = {'node': node, 'token': gen_token(), 'generation': 0,
+                       'desired': None, 'last_report': None, 'last_seen': 0,
+                       'history': []}
+            # a desired of null/empty clears the pending push
+            if desired in (None, {}, ''):
+                rec['desired'] = None
+            else:
+                rec['desired'] = desired
+                rec['generation'] = int(rec.get('generation', 0)) + 1
+            save_node(rec)
+        return self._json(200, {'ok': True, 'generation': rec['generation'],
+                                'token': rec['token']})
+
+
+# ---- admin single-page console (vanilla JS, no build step) -----------------
+ADMIN_HTML = r"""<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>splify-control</title>
+<style>
+ :root{--bg:#0f1115;--card:#181b22;--bd:#2a2f3a;--fg:#e6e9ef;--mut:#9aa3b2;--acc:#3b82f6;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444}
+ *{box-sizing:border-box} body{margin:0;font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+ header{padding:14px 20px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:12px}
+ header h1{font-size:18px;margin:0;font-weight:700} .mut{color:var(--mut)}
+ .wrap{display:grid;grid-template-columns:340px 1fr;gap:0;height:calc(100vh - 53px)}
+ .list{border-right:1px solid var(--bd);overflow:auto} .detail{overflow:auto;padding:18px 22px}
+ .node{padding:12px 16px;border-bottom:1px solid var(--bd);cursor:pointer} .node:hover{background:#1d2129}
+ .node.sel{background:#222838} .node b{font-weight:600}
+ .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600}
+ .ok{background:rgba(34,197,94,.15);color:var(--ok)} .warn{background:rgba(245,158,11,.15);color:var(--warn)}
+ .bad{background:rgba(239,68,68,.15);color:var(--bad)} .dim{background:#252a34;color:var(--mut)}
+ .card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:16px;margin-bottom:16px}
+ .card h3{margin:0 0 12px;font-size:15px} h2{font-size:18px;margin:0 0 6px}
+ label{display:block;font-size:12px;color:var(--mut);margin:8px 0 3px}
+ input,textarea,select{width:100%;background:#0d0f13;border:1px solid var(--bd);color:var(--fg);border-radius:7px;padding:8px 10px;font:inherit}
+ textarea{min-height:150px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+ button{background:var(--acc);color:#fff;border:0;border-radius:7px;padding:8px 14px;font:inherit;font-weight:600;cursor:pointer}
+ button.ghost{background:#222838;color:var(--fg);border:1px solid var(--bd)} button.danger{background:var(--bad)}
+ button:disabled{opacity:.5;cursor:default} .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+ .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
+ table{width:100%;border-collapse:collapse;font-size:13px} td,th{text-align:left;padding:5px 8px;border-bottom:1px solid var(--bd)}
+ code{background:#0d0f13;padding:1px 6px;border-radius:5px;font-size:12px} .sp{flex:1} .small{font-size:12px}
+ .toast{position:fixed;right:16px;bottom:16px;background:#222838;border:1px solid var(--bd);padding:10px 14px;border-radius:8px;opacity:0;transition:.2s}
+ .toast.show{opacity:1}
+</style></head><body>
+<header><h1>splify-control</h1><span class="mut" id="sub">панель управления нодами</span><span class="sp"></span>
+ <button class="ghost" onclick="showConnect()">Подключить роутер</button>
+ <button class="ghost" onclick="loadNodes()">Обновить</button></header>
+<div class="wrap"><div class="list" id="list"></div><div class="detail" id="detail"><p class="mut">Выберите ноду слева.</p></div></div>
+<div class="toast" id="toast"></div>
+<script>
+const $=s=>document.querySelector(s); let cur=null, nodes=[];
+function ago(ts){if(!ts)return 'никогда';const d=Math.floor(Date.now()/1000)-ts;if(d<60)return d+' с назад';if(d<3600)return Math.floor(d/60)+' мин назад';if(d<86400)return Math.floor(d/3600)+' ч назад';return Math.floor(d/86400)+' дн назад';}
+function sev(o){return o==='OK'?'ok':o==='WARN'?'warn':o==='?'?'dim':'bad';}
+function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200);}
+async function api(m,u,b){const r=await fetch(u,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j;}
+async function loadNodes(){const j=await api('GET','/admin/api/nodes');nodes=j.nodes;const L=$('#list');L.innerHTML='';if(!nodes.length)L.innerHTML='<p class="mut" style="padding:16px">Нод пока нет. Настройте на роутере control_url и токен — нода появится после первого опроса.</p>';
+ for(const n of nodes){const d=document.createElement('div');d.className='node'+(cur===n.node?' sel':'');d.onclick=()=>openNode(n.node);
+  d.innerHTML=`<div class="row"><b>${n.node}</b><span class="sp"></span><span class="pill ${sev(n.overall)}">${n.overall}</span></div>
+   <div class="small mut">${n.state} · ${n.mode} · ${ago(n.last_seen)}</div>
+   ${n.pending?'<div class="small" style="color:var(--warn)">● ожидает применения (gen '+n.generation+')</div>':''}`;L.appendChild(d);} }
+async function openNode(node){cur=node;loadNodes();const rec=await api('GET','/admin/api/nodes/'+node);const rep=rec.last_report||{};const st=rep.status||{};const summ=st.summary||{};const eps=(st.endpoints||[]);
+ const wg=(rep.config&&rep.config.wg)||{};const ifaces=Object.keys(wg);const prim=ifaces[0]||'';const pa=(wg[prim]&&wg[prim].awg)||{};const pe=((wg[prim]&&wg[prim].peers)||[{}])[0]||{};
+ $('#detail').innerHTML=`
+ <h2>${node} <span class="pill ${sev(st.overall||'?')}">${st.overall||'?'}</span></h2>
+ <p class="mut small">Токен ноды: <code>${rec.token}</code> · generation <b>${rec.generation}</b> · применено <b>${rep.applied_gen||0}</b> · ${ago(rec.last_seen)}</p>
+ <div class="card"><h3>Состояние</h3>
+  <table><tr><td class="mut">Режим</td><td>${summ.mode||'?'}</td><td class="mut">Путь</td><td>${summ.state||'?'}</td></tr>
+  <tr><td class="mut">Kill switch</td><td>${summ.killswitch?'вкл':'выкл'}</td><td class="mut">Сбои</td><td>${summ.fail_count??'?'}</td></tr>
+  <tr><td class="mut">LAN</td><td colspan=3>${summ.lan_iface||'?'} → ${summ.lan_cidr||'?'}</td></tr></table>
+  ${eps.length?'<table style="margin-top:8px"><tr><th>Туннель</th><th>Прио</th><th>Live</th><th>Health</th></tr>'+eps.map(e=>`<tr><td>${e.iface}</td><td>${e.priority}</td><td>${e.present?'✓':'✗'}</td><td>${e.health||'-'}</td></tr>`).join('')+'</table>':''}
+ </div>
+ <div class="card"><h3>AmneziaWG: быстрые параметры${prim?' ('+prim+')':''}</h3>
+  ${prim?`<div class="row"><div style="flex:2"><label>Endpoint host</label><input id="f_eh" value="${pe.endpoint_host||''}"></div><div style="flex:1"><label>Port</label><input id="f_ep" value="${pe.endpoint_port||''}"></div></div>
+  <label>Обфускация (Jc/Jmin/Jmax/S1/S2/H1-H4)</label><div class="grid">
+   ${['jc','jmin','jmax','s1','s2','h1','h2','h3','h4'].map(k=>`<div><label>${k}</label><input id="f_${k}" value="${pa[k]||''}"></div>`).join('')}
+  </div>
+  <div class="row" style="margin-top:12px"><button onclick="publishQuick('${prim}')">Опубликовать изменения</button>
+   <span class="mut small">роутер применит на следующем опросе и переподключит туннель</span></div>`
+  :'<p class="mut">Нода ещё не прислала конфиг wg/awg.</p>'}
+ </div>
+ <div class="card"><h3>Импорт .conf (AmneziaWG / WireGuard)</h3>
+  <div class="row"><div style="flex:1"><label>Интерфейс</label><input id="imp_if" value="${prim||'awg0'}"></div></div>
+  <label>Вставьте содержимое .conf</label><textarea id="imp_conf" placeholder="[Interface]\nPrivateKey = ...\n[Peer]\n..."></textarea>
+  <div class="row" style="margin-top:8px"><button onclick="importConf()">Импортировать и опубликовать</button></div>
+ </div>
+ <div class="card"><h3>Полный desired-снапшот (JSON)</h3>
+  <p class="mut small">Что роутер применит целиком. Можно отредактировать вручную (splify + wg). Пусто = снять задание.</p>
+  <textarea id="desired">${rec.desired?JSON.stringify(rec.desired,null,2):''}</textarea>
+  <div class="row" style="margin-top:8px"><button onclick="publishRaw()">Опубликовать снапшот</button>
+   <button class="ghost" onclick="fillFromReport()">Взять из отчёта ноды</button>
+   <button class="danger" onclick="clearDesired()">Снять задание</button></div>
+ </div>
+ <div class="card"><h3>Опасное</h3><div class="row"><button class="ghost" onclick="regen('${node}')">Сменить токен</button>
+  <button class="danger" onclick="delNode('${node}')">Удалить ноду</button></div></div>`;
+ window._rec=rec;
+}
+function num(v){return v===''||v==null?undefined:v;}
+async function publishQuick(iface){const awg={};for(const k of ['jc','jmin','jmax','s1','s2','h1','h2','h3','h4']){const v=$('#f_'+k).value.trim();if(v!=='')awg[k]=v;}
+ const peer={};const eh=$('#f_eh').value.trim(),ep=$('#f_ep').value.trim();if(eh)peer.endpoint_host=eh;if(ep)peer.endpoint_port=ep;
+ const ifo={};if(Object.keys(awg).length)ifo.awg=awg;if(Object.keys(peer).length)ifo.peers=[peer];
+ if(!Object.keys(ifo).length)return toast('нет изменений');
+ try{const j=await api('PUT','/admin/api/nodes/'+cur+'/desired',{wg:{[iface]:ifo}});toast('опубликовано, gen '+j.generation);openNode(cur);}catch(e){toast('ошибка: '+e.message);} }
+async function importConf(){const iface=$('#imp_if').value.trim();const conf=$('#imp_conf').value;if(!conf.trim())return toast('пусто');
+ try{const j=await api('POST','/admin/api/nodes/'+cur+'/import-conf',{iface,conf});toast('импорт опубликован, gen '+j.generation);openNode(cur);}catch(e){toast('ошибка: '+e.message);} }
+async function publishRaw(){let d;const t=$('#desired').value.trim();if(!t)return clearDesired();try{d=JSON.parse(t);}catch(e){return toast('некорректный JSON');}
+ try{const j=await api('PUT','/admin/api/nodes/'+cur+'/desired',d);toast('опубликовано, gen '+j.generation);openNode(cur);}catch(e){toast('ошибка: '+e.message);} }
+async function clearDesired(){try{await api('PUT','/admin/api/nodes/'+cur+'/desired',null);toast('задание снято');openNode(cur);}catch(e){toast('ошибка: '+e.message);} }
+function fillFromReport(){const r=window._rec.last_report||{};if(!r.config)return toast('отчёта ещё нет');$('#desired').value=JSON.stringify({splify:r.config.splify,wg:r.config.wg},null,2);}
+async function regen(node){if(!confirm('Сменить токен ноды? Старый перестанет работать, обнови на роутере.'))return;try{const j=await api('POST','/admin/api/nodes/'+node+'/token/regen');toast('новый токен: '+j.token);openNode(node);}catch(e){toast('ошибка: '+e.message);} }
+async function delNode(node){if(!confirm('Удалить ноду '+node+'?'))return;try{await api('DELETE','/admin/api/nodes/'+node);cur=null;$('#detail').innerHTML='<p class="mut">Удалено.</p>';loadNodes();}catch(e){toast('ошибка: '+e.message);} }
+async function showConnect(){const j=await api('GET','/admin/api/connect');const s=JSON.stringify(j);try{await navigator.clipboard.writeText(s);toast('JSON подключения скопирован');}catch(e){}
+ window.prompt('Connection JSON — вставьте на роутере (LuCI → Дополнительно → API → Подключить, либо: splify-ctl connect):',s);}
+loadNodes();setInterval(loadNodes,15000);
+</script></body></html>"""
+
+
+# ---- bootstrap -------------------------------------------------------------
+def serve(handler, host, port, name):
+    httpd = ThreadingHTTPServer((host, port), handler)
+    if CFG['tls_cert'] and CFG['tls_key']:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(CFG['tls_cert'], CFG['tls_key'])
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+    scheme = 'https' if (CFG['tls_cert'] and CFG['tls_key']) else 'http'
+    print('[splify-control] %s on %s://%s:%d' % (name, scheme, host, port), flush=True)
+    httpd.serve_forever()
+
+
+def main():
+    ap = argparse.ArgumentParser(description='splify control plane (reference)')
+    ap.add_argument('--node-host', default='0.0.0.0', help='public node-API bind (routers poll this over WAN)')
+    ap.add_argument('--node-port', type=int, default=8080)
+    ap.add_argument('--admin-host', default='127.0.0.1', help='admin console bind — set to the WG address (e.g. 10.8.0.1) so it is WG-only')
+    ap.add_argument('--admin-port', type=int, default=8088)
+    ap.add_argument('--data-dir', default=os.environ.get('SPLIFY_CONTROL_DATA', '/var/lib/splify-control'))
+    ap.add_argument('--admin-token', default=os.environ.get('SPLIFY_ADMIN_TOKEN', ''), help='optional bearer token for the admin API (defense in depth on top of the WG-only bind)')
+    ap.add_argument('--access-key', default=os.environ.get('SPLIFY_ACCESS_KEY', ''), help='one-time enrollment key routers present to /enroll (auto-generated + persisted if omitted)')
+    ap.add_argument('--internal-url', default=os.environ.get('SPLIFY_INTERNAL_URL', ''), help='dashboard URL reachable over the tunnel/WG, e.g. http://10.8.0.1:8080')
+    ap.add_argument('--external-url', default=os.environ.get('SPLIFY_EXTERNAL_URL', ''), help='dashboard URL reachable over the public internet, e.g. https://vpn.example.net:8443')
+    ap.add_argument('--tls-cert', default='')
+    ap.add_argument('--tls-key', default='')
+    ap.add_argument('--print-connect', action='store_true', help='print the connection JSON and exit')
+    ap.add_argument('--verbose', action='store_true')
+    args = ap.parse_args()
+    CFG.update(vars(args))
+    CFG['data_dir'] = args.data_dir
+    os.makedirs(CFG['data_dir'], exist_ok=True)
+
+    # Enrollment key: reuse a persisted one so it survives restarts (a router
+    # already holds it); otherwise generate, store, and surface it.
+    keyfile = os.path.join(CFG['data_dir'], 'access_key')
+    if not CFG['access_key']:
+        if os.path.exists(keyfile):
+            with open(keyfile, encoding='utf-8') as f:
+                CFG['access_key'] = f.read().strip()
+        else:
+            CFG['access_key'] = gen_token()
+            with open(keyfile, 'w', encoding='utf-8') as f:
+                f.write(CFG['access_key'])
+            os.chmod(keyfile, 0o600)
+
+    if args.print_connect:
+        print(json.dumps(connect_json(), ensure_ascii=False, indent=2))
+        return
+
+    print('[splify-control] connection JSON for routers (paste into LuCI → API → Подключить):', flush=True)
+    print(json.dumps(connect_json(), ensure_ascii=False), flush=True)
+
+    t = threading.Thread(target=serve, args=(NodeHandler, args.node_host, args.node_port, 'NODE API'), daemon=True)
+    t.start()
+    serve(AdminHandler, args.admin_host, args.admin_port, 'ADMIN UI')
+
+
+if __name__ == '__main__':
+    main()

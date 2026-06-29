@@ -25,5 +25,25 @@ while [ -n "$(uci -q get "splify.@endpoint[$i]" 2>/dev/null)" ]; do
     i=$((i + 1))
 done
 
+# Remote management API (2.x): ensure the section exists and seed a strong token
+# + a stable node_id on first boot. Both stay closed (enabled=0) until opted in;
+# we only need the secrets ready so enabling is a one-click action, never a
+# "generate a token by hand" chore. Purely additive — never overwrites a value
+# an operator already set.
+[ -n "$(uci -q get splify.api)" ] || { uci set splify.api=api; changed=1; }
+if [ -z "$(uci -q get splify.api.token)" ]; then
+    if [ -r /dev/urandom ]; then
+        tok="$(head -c 24 /dev/urandom | base64 2>/dev/null | tr '+/' '-_' | tr -d '=\n')"
+    fi
+    [ -n "$tok" ] || tok="$(printf '%s%s' "$(date +%s%N)" "$$" | md5sum | cut -c1-32)"
+    uci set "splify.api.token=$tok"; changed=1
+fi
+if [ -z "$(uci -q get splify.api.node_id)" ]; then
+    host="$(uci -q get system.@system[0].hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || echo splify)"
+    rnd="$(head -c 4 /dev/urandom 2>/dev/null | hexdump -e '4/1 "%02x"' 2>/dev/null)"
+    [ -n "$rnd" ] || rnd="$(date +%s | tail -c 6)"
+    uci set "splify.api.node_id=${host}-${rnd}"; changed=1
+fi
+
 [ "$changed" = 1 ] && uci commit splify
 exit 0

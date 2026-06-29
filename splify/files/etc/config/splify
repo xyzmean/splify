@@ -48,3 +48,43 @@ config endpoint
 #config device
 #	option ip '192.168.1.50'
 #	option mode 'vpn'
+
+# Remote management API (design §5). Two channels share one backend (splify-ctl):
+#   - inbound token REST (/cgi-bin/splify-api): direct mgmt when the router is
+#     reachable (LAN / live tunnel). Keep it OFF the public internet.
+#   - outbound agent (splify-agent): the router polls the dashboard, so it keeps
+#     working behind CGNAT and when every tunnel is down.
+#
+# ENROLLMENT (the dashboard is an EXTERNAL tool — see splify-control/PROTOCOL.md):
+# the dashboard hands you a "connection JSON" { internal, external, access_key }.
+# You paste it once (LuCI → API, or: splify-ctl connect < blob.json). The router
+# then generates its OWN per-node key (`token`, seeded on first boot below) and
+# registers it with the dashboard using the one-time access_key; afterwards every
+# poll authenticates with that self-owned token and the access_key is cleared.
+#
+# node_id + token are auto-generated on first boot (see uci-defaults). Both
+# channels stay closed (enabled=0 / agent_enabled=0) until you opt in.
+config api 'api'
+	# inbound REST CGI on/off
+	option enabled '0'
+	# outbound poll agent on/off
+	option agent_enabled '0'
+	# this node's OWN communication key (auto-seeded on first boot; registered
+	# with the dashboard at enrollment). Also the bearer for the inbound CGI.
+	option token ''
+	# stable per-node id (auto-seeded on first boot; the dashboard may suggest one)
+	option node_id ''
+	# one-time enrollment key from the dashboard's connection JSON (cleared after
+	# a successful enroll)
+	option access_key ''
+	# dashboard URL reachable over the tunnel / WG side (tried first, kept private)
+	option control_internal ''
+	# dashboard URL reachable over the public internet / WAN (CGNAT + tunnel-down
+	# fallback)
+	option control_external ''
+	# 1 once the node has registered its token with the dashboard
+	option enrolled '0'
+	# agent poll cadence, seconds
+	option interval '60'
+	# optional source-prefix allow-list for the inbound CGI, e.g. '10.8.0.'
+	option allow_subnet ''
