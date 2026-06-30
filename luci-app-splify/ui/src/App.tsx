@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { rpc, type Status, type EventRow } from '@/lib/rpc'
 import StatusDashboard from '@/components/StatusDashboard'
 import WgPanel from '@/components/WgPanel'
 import ApiPanel from '@/components/ApiPanel'
 
 type Tab = 'status' | 'wg' | 'api'
-const POLL_MS = 8000
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('status')
@@ -14,9 +13,11 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState('')
-  const [live, setLive] = useState(true)
-  const timer = useRef<number | null>(null)
 
+  // Data loads once on mount and on demand via the "Обновить" button (and after
+  // any action). There is deliberately NO background polling interval: a timer
+  // firing every few seconds for the lifetime of the tab was both an annoyance
+  // and a steady source of work that kept the long-lived view busy.
   const refresh = useCallback(async () => {
     try {
       const [st, ev] = await Promise.all([
@@ -37,13 +38,6 @@ export default function App() {
     refresh()
   }, [refresh])
 
-  useEffect(() => {
-    if (live && tab === 'status') {
-      timer.current = window.setInterval(refresh, POLL_MS)
-      return () => { if (timer.current) window.clearInterval(timer.current) }
-    }
-  }, [live, tab, refresh])
-
   const wgIfaces = status ? (status.endpoints || []).map((e) => e.iface) : []
 
   return (
@@ -63,7 +57,6 @@ export default function App() {
           <StatusDashboard
             status={status} events={events} wgIfaces={wgIfaces}
             busy={busy} setBusy={setBusy} refresh={refresh}
-            live={live} toggleLive={() => setLive((v) => !v)}
           />
         )
       )}

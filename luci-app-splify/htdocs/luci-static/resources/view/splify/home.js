@@ -10,45 +10,35 @@ return view.extend({
 		window.luci_rpc = rpc;
 		window.ui = ui;
 
-		// 1. Inject React App CSS
+		// Stylesheet: inject once with a STABLE href (LuCI already appends its own
+		// cache-busting token to L.resource()). A per-visit ?v=Date.now() forced
+		// the browser to re-parse the sheet on every navigation for no benefit.
 		if (!document.getElementById('splify-app-css')) {
 			var link = document.createElement('link');
 			link.id = 'splify-app-css';
 			link.rel = 'stylesheet';
-			link.href = L.resource('splify/splify-index.css') + '?v=' + Date.now();
+			link.href = L.resource('splify/splify-index.css');
 			document.head.appendChild(link);
-		} else {
-            var oldLink = document.getElementById('splify-app-css');
-			oldLink.parentNode.removeChild(oldLink);
-			var newLink = document.createElement('link');
-			newLink.id = 'splify-app-css';
-			newLink.rel = 'stylesheet';
-			newLink.href = L.resource('splify/splify-index.css') + '?v=' + Date.now();
-			document.head.appendChild(newLink);
-        }
+		}
 
-		// 2. Create Root Div
+		// Root the React app mounts into.
 		var container = E('div', { id: 'splify-root', 'class': 'splify-react-root' });
 
-		// 3. Inject React App JS
-		if (!document.getElementById('splify-app-js')) {
+		// Load the React module ONCE, with a stable URL. The previous code appended
+		// ?v=Date.now() and re-injected the <script> on every visit; each unique URL
+		// is a fresh ES module that the browser's module registry keeps for the
+		// document's lifetime, so revisiting the dashboard leaked a whole React
+		// bundle each time until the tab froze. Now the module self-registers
+		// window.__splifyMount on first load; later visits just re-mount into the
+		// new container without re-evaluating the module.
+		if (window.__splifyMount) {
+			window.__splifyMount(container);
+		} else if (!document.getElementById('splify-app-js')) {
 			var script = document.createElement('script');
 			script.id = 'splify-app-js';
-			script.src = L.resource('splify/splify-index.js') + '?v=' + Date.now();
+			script.src = L.resource('splify/splify-index.js');
 			script.type = 'module';
 			document.head.appendChild(script);
-		} else {
-			// If already loaded, we might need to trigger a re-mount event
-			// But for now, we just rely on Vite's module execution.
-			// Actually, LuCI re-renders the whole view when navigating back, 
-			// so the script might not re-execute. Let's force re-evaluation:
-			var oldScript = document.getElementById('splify-app-js');
-			oldScript.parentNode.removeChild(oldScript);
-			var newScript = document.createElement('script');
-			newScript.id = 'splify-app-js';
-			newScript.src = L.resource('splify/splify-index.js') + '?v=' + Date.now();
-			newScript.type = 'module';
-			document.head.appendChild(newScript);
 		}
 
 		return container;

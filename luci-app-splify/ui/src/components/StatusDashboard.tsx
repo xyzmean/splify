@@ -10,7 +10,7 @@ import {
 import { cn } from '@/lib/utils'
 import {
   ShieldCheck, AlertTriangle, Ban, Globe, RefreshCw, Play, RotateCw, Power,
-  Download, Wrench, ArrowRight, Check as CheckIcon, X as XIcon, Pause,
+  Download, Wrench, ArrowRight, Check as CheckIcon, X as XIcon,
   Activity, ListChecks, Network, History, Stethoscope, ExternalLink,
 } from 'lucide-react'
 import {
@@ -61,8 +61,6 @@ interface Props {
   busy: string
   setBusy: (s: string) => void
   refresh: () => void
-  live: boolean
-  toggleLive: () => void
 }
 
 export default function StatusDashboard(p: Props) {
@@ -210,11 +208,6 @@ export default function StatusDashboard(p: Props) {
         <ActBtn a="disable" label="Аварийно отключить" icon={Power} variant="destructive"
           confirm="Отключить split-маршрутизацию сейчас? Весь трафик LAN выйдет через WAN, пока служба не включит её снова."
           toast="Split-маршрутизация отключена" />
-        <Button size="sm" variant="ghost" onClick={p.toggleLive} className="text-muted-foreground">
-          {p.live
-            ? <><span className="size-2 rounded-full bg-emerald-500" />Авто</>
-            : <><Pause className="size-4" />Пауза</>}
-        </Button>
       </div>
 
       {/* ── First-run helper ─────────────────────────────────── */}
