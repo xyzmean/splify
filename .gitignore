@@ -1,7 +1,12 @@
 # Tooling / local agent state
 .serena/
+.claude/
 
 # Build output
 out/
 bin/
 *.apk
+
+# Python caches (reference control server)
+__pycache__/
+*.pyc

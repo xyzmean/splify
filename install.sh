@@ -28,7 +28,10 @@ URLS="$(sed -n 's/.*"browser_download_url": *"\([^"]*\.apk\)".*/\1/p' "$META")"
 say "Скачиваю пакеты…"
 for u in $URLS; do
   case "$u" in
-    *splify*) wget -qP "$TMP" "$u" || err "не удалось скачать $u" ;;
+    # Force the output name with -O (not -P): GitHub redirects release assets to
+    # objects.githubusercontent.com/...?X-Amz-… and busybox wget would otherwise
+    # save the file under that query-laden name, so `ls *.apk` finds nothing.
+    *splify*) wget -qO "$TMP/${u##*/}" "$u" || err "не удалось скачать $u" ;;
   esac
 done
 ls "$TMP"/*.apk >/dev/null 2>&1 || err "пакеты не скачались."
