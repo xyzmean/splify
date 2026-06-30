@@ -1,14 +1,11 @@
 'use strict';
 'require view';
 'require rpc';
-'require ui';
 
 return view.extend({
 	render: function () {
-		// Expose LuCI modules to React (rpc bridge + ui for toast notifications;
-		// L is already a global). The React bundle reads window.luci_rpc / window.ui.
+		// Expose LuCI modules to React
 		window.luci_rpc = rpc;
-		window.ui = ui;
 
 		// 1. Inject React App CSS
 		if (!document.getElementById('splify-app-css')) {

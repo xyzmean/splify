@@ -1,0 +1,156 @@
+#!/bin/sh
+# splify-api — inbound token-authenticated REST API (served by uhttpd as a CGI
+# at /cgi-bin/splify-api). The DIRECT management channel: use it when you can
+# reach the router (LAN, or over a live tunnel). For routers behind CGNAT with
+# the tunnel down, use the outbound agent instead (splify-agent) — this endpoint
+# is unreachable from outside in that case, by design.
+#
+# Every route is a thin wrapper over `splify-ctl`, so the inbound API, the
+# outbound agent and the LuCI ubus object all do EXACTLY the same thing.
+#
+# Auth: bearer token (Authorization: Bearer <t>, or X-Splify-Token: <t>, or
+# ?token=<t>) compared against splify.api.token via SHA-256 so the compare can't
+# leak the token's length/prefix through timing. Gated by splify.api.enabled=1.
+# Optionally restricted to a source subnet (splify.api.allow_subnet) — keep this
+# endpoint off the public internet; it is meant for the LAN / WG side.
+#
+# Routes (PATH_INFO under /cgi-bin/splify-api):
+#   GET  /status            -> doctor diagnostics (JSON)
+#   GET  /export[?reveal=1] -> full node snapshot
+#   POST /import            -> apply a desired snapshot (JSON body)
+#   GET  /wg                -> list wg/awg interfaces
+#   GET  /wg/<iface>[?reveal=1] -> one interface
+#   POST /wg/<iface>        -> set one interface (JSON body)
+#   POST /wg/<iface>/import -> import a wg/awg .conf (text body)
+#   GET  /api               -> api/agent config + runtime
+#   POST /api               -> set api/agent config (JSON body)
+#   POST /action            -> run an action (JSON body {"name":..,"iface":..})
+#   POST /token/regen       -> rotate the API token
+
+CTL=/usr/local/sbin/splify-ctl
+
+# ---- response helpers ------------------------------------------------------
+# uhttpd only honours a CGI `Status:` header that carries a reason phrase — a
+# bare "Status: 401" is silently treated as 200. So always emit "<code> <text>".
+emit() {  # status-code json-body
+    case "$1" in
+        200) _reason='200 OK' ;;
+        400) _reason='400 Bad Request' ;;
+        401) _reason='401 Unauthorized' ;;
+        403) _reason='403 Forbidden' ;;
+        404) _reason='404 Not Found' ;;
+        405) _reason='405 Method Not Allowed' ;;
+        500) _reason='500 Internal Server Error' ;;
+        503) _reason='503 Service Unavailable' ;;
+        *)   _reason="$1" ;;
+    esac
+    printf 'Status: %s\r\n' "$_reason"
+    printf 'Content-Type: application/json\r\n'
+    printf 'Cache-Control: no-store\r\n\r\n'
+    printf '%s\n' "$2"
+}
+err() { emit "$1" "$(printf '{"error":"%s"}' "$2")"; exit 0; }
+
+# ---- read request ----------------------------------------------------------
+METHOD="${REQUEST_METHOD:-GET}"
+PI="${PATH_INFO:-/}"
+
+read_body() {
+    _cl="${CONTENT_LENGTH:-0}"
+    case "$_cl" in ''|*[!0-9]*) _cl=0 ;; esac
+    [ "$_cl" -gt 0 ] 2>/dev/null && head -c "$_cl" || true
+}
+
+# ---- query-string param (tiny parser; values are tokens/0-1, no urldecode) --
+qs_get() {  # key
+    case "&${QUERY_STRING}&" in
+        *"&$1="*) _t="${QUERY_STRING#*"$1="}"; printf '%s' "${_t%%&*}" ;;
+    esac
+}
+
+# ---- auth ------------------------------------------------------------------
+STORED="$(uci -q get splify.api.token 2>/dev/null)"
+ENABLED="$(uci -q get splify.api.enabled 2>/dev/null)"
+ALLOW="$(uci -q get splify.api.allow_subnet 2>/dev/null)"
+
+[ "$ENABLED" = "1" ] || err 503 "api disabled"
+[ -n "$STORED" ] || err 503 "api token not set"
+
+# optional source-subnet allow-list (prefix match on REMOTE_ADDR; meant for the
+# common /24-style cases — a prefix string like "10.8.0." or "192.168.1.").
+if [ -n "$ALLOW" ]; then
+    case "${REMOTE_ADDR:-}" in
+        "$ALLOW"*) : ;;
+        *) err 403 "forbidden (subnet)" ;;
+    esac
+fi
+
+# extract presented token (header preferred, query as fallback)
+PRESENTED=""
+case "${HTTP_AUTHORIZATION:-}" in
+    [Bb]earer\ *) PRESENTED="${HTTP_AUTHORIZATION#* }" ;;
+esac
+[ -n "$PRESENTED" ] || PRESENTED="${HTTP_X_SPLIFY_TOKEN:-}"
+[ -n "$PRESENTED" ] || PRESENTED="$(qs_get token)"
+[ -n "$PRESENTED" ] || err 401 "missing token"
+
+# constant-shape compare via SHA-256 (no early-exit on first differing byte)
+h_stored="$(printf '%s' "$STORED"    | sha256sum | cut -d' ' -f1)"
+h_given="$(printf '%s' "$PRESENTED" | sha256sum | cut -d' ' -f1)"
+[ "$h_stored" = "$h_given" ] || err 401 "bad token"
+
+# ---- routing ---------------------------------------------------------------
+# normalise PATH_INFO: strip leading slash
+route="${PI#/}"
+
+case "$METHOD/$route" in
+    GET/|GET/status)
+        emit 200 "$("$CTL" status)" ;;
+
+    GET/export)
+        if [ "$(qs_get reveal)" = "1" ]; then emit 200 "$("$CTL" export --reveal)"
+        else emit 200 "$("$CTL" export)"; fi ;;
+
+    POST/import)
+        emit 200 "$(read_body | "$CTL" import)" ;;
+
+    GET/wg)
+        # full snapshot (its "wg" object lists every interface, keys masked)
+        emit 200 "$("$CTL" export)" ;;
+
+    GET/wg/*)
+        iface="${route#wg/}"
+        case "$iface" in
+            */import) err 405 "use POST for import" ;;
+        esac
+        if [ "$(qs_get reveal)" = "1" ]; then emit 200 "$("$CTL" wg-get "$iface" --reveal)"
+        else emit 200 "$("$CTL" wg-get "$iface")"; fi ;;
+
+    POST/wg/*/import)
+        mid="${route#wg/}"; iface="${mid%/import}"
+        emit 200 "$(read_body | "$CTL" wg-import "$iface")" ;;
+
+    POST/wg/*)
+        iface="${route#wg/}"
+        emit 200 "$(read_body | "$CTL" wg-set "$iface")" ;;
+
+    GET/api)
+        emit 200 "$("$CTL" api-get)" ;;
+
+    POST/api)
+        emit 200 "$(read_body | "$CTL" api-set)" ;;
+
+    POST/action)
+        body="$(read_body)"
+        . /usr/share/libubox/jshn.sh
+        json_init; json_load "$body" 2>/dev/null
+        json_get_var aname name ''
+        json_get_var aiface iface ''
+        emit 200 "$("$CTL" action "$aname" "$aiface")" ;;
+
+    POST/token/regen)
+        emit 200 "$("$CTL" token-regen)" ;;
+
+    *)
+        err 404 "no such route: $METHOD /$route" ;;
+esac

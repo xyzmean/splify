@@ -1,0 +1,118 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 222.2 47.4% 11.2%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 222.2 84% 4.9%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: transparent;
+    --foreground: 210 40% 98%;
+    --card: 220 10% 15%;
+    --card-foreground: 210 40% 98%;
+    --popover: 220 10% 15%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 210 40% 98%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 25%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 25%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 25%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 25%;
+    --input: 217.2 32.6% 25%;
+    --ring: 212.7 26.8% 83.9%;
+  }
+}
+
+/* Scoped preflight: global preflight is disabled (tailwind.config corePlugins),
+   so these resets — the ones Tailwind utilities rely on (border defaults,
+   box-sizing) plus the element normalisations — apply ONLY inside the React
+   root and never leak into the surrounding LuCI page. */
+@layer base {
+  .splify-react-root {
+    color: hsl(var(--foreground));
+    line-height: 1.5;
+    -webkit-text-size-adjust: 100%;
+  }
+  .splify-react-root *,
+  .splify-react-root ::before,
+  .splify-react-root ::after {
+    box-sizing: border-box;
+    border-width: 0;
+    border-style: solid;
+    border-color: hsl(var(--border));
+  }
+  .splify-react-root h1,
+  .splify-react-root h2,
+  .splify-react-root h3,
+  .splify-react-root h4,
+  .splify-react-root p,
+  .splify-react-root figure,
+  .splify-react-root ol,
+  .splify-react-root ul {
+    margin: 0;
+  }
+  .splify-react-root h1,
+  .splify-react-root h2,
+  .splify-react-root h3,
+  .splify-react-root h4 {
+    font-size: inherit;
+    font-weight: inherit;
+  }
+  .splify-react-root ol,
+  .splify-react-root ul {
+    list-style: none;
+    padding: 0;
+  }
+  .splify-react-root a {
+    color: inherit;
+    text-decoration: inherit;
+  }
+  .splify-react-root button,
+  .splify-react-root input,
+  .splify-react-root select,
+  .splify-react-root textarea {
+    font: inherit;
+    color: inherit;
+    margin: 0;
+  }
+  .splify-react-root button {
+    background: none;
+    cursor: pointer;
+  }
+  .splify-react-root :disabled {
+    cursor: default;
+  }
+  .splify-react-root table {
+    border-collapse: collapse;
+  }
+  .splify-react-root svg {
+    display: block;
+    vertical-align: middle;
+  }
+}
