@@ -1,120 +1,68 @@
 'use strict';
 'require view';
-'require form';
+'require rpc';
+'require ui';
+'require uci';
 'require network';
-function ipHints(hints) {
-    var out = [];
-    if (!hints || typeof hints !== 'object')
-        return out;
-    var obj = (hints.hosts && typeof hints.hosts === 'object') ? hints.hosts : hints;
-    Object.keys(obj).forEach(function (mac) {
-        var h = obj[mac] || {}, ips = [];
-        if (typeof h.ipv4 === 'string')
-            ips.push(h.ipv4);
-        if (Array.isArray(h.ipaddrs))
-            ips = ips.concat(h.ipaddrs);
-        if (Array.isArray(h.ipv4addrs))
-            ips = ips.concat(h.ipv4addrs);
-        ips.forEach(function (ip) {
-            if (typeof ip === 'string' && /^\d+\.\d+\.\d+\.\d+/.test(ip)) {
-                var bare = ip.split('/')[0];
-                out.push([bare, h.name ? (h.name + ' (' + bare + ')') : bare]);
-            }
-        });
-    });
-    return out;
-}
+
 return view.extend({
-    load: function () {
-        return Promise.all([
-            network.getNetworks(),
-            L.resolveDefault(network.getHostHints(), {})
-        ]);
-    },
-    render: function (data) {
-        var networks = data[0] || [];
-        var hostHints = data[1] || {};
-        var wgIfaces = networks.filter(function (n) {
-            var p = n.getProtocol();
-            return p === 'amneziawg' || p === 'wireguard';
-        }).map(function (n) { return n.getName(); });
-        var m, s, o;
-        m = new form.Map('splify', _('Дополнительные настройки'), _('Тонкая настройка splify: режим маршрутизации, туннели с приоритетом, ' +
-            'списки, обход DPI (zapret), ручные подсети/домены и правила для устройств. ' +
-            'Туннели создаются обычным образом в Сеть → Интерфейсы, затем добавляются ниже ' +
-            'по приоритету. Простое управление и состояние — на вкладке «Главная».'));
-        s = m.section(form.NamedSection, 'global', 'splify');
-        s.addremove = false;
-        s.tab('general', _('Основное'));
-        s.tab('lists', _('Списки'));
-        s.tab('manual', _('Ручные записи'));
-        o = s.taboption('general', form.ListValue, 'mode', _('Режим маршрутизации'));
-        o.value('blocklist', _('Через VPN только заблокированное (рекомендуется)'));
-        o.value('full', _('Всё через VPN, исключения — напрямую'));
-        o.value('split', _('Через VPN только выбранные списки/домены'));
-        o.default = 'blocklist';
-        o = s.taboption('general', form.Value, 'interval', _('Интервал проверки (сек)'), _('Секунды между проверками туннелей и переключением при сбое.'));
-        o.datatype = 'uinteger';
-        o.placeholder = '180';
-        o = s.taboption('general', form.Flag, 'killswitch', _('Блокировать трафик, если туннель недоступен'), _('Когда все туннели недоступны — блокировать VPN-трафик, а не выпускать его в WAN.'));
-        o = s.taboption('general', form.Value, 'lan_iface', _('LAN-интерфейс'));
-        o.placeholder = 'br-lan';
-        o = s.taboption('general', form.Value, 'lan_cidr', _('Подсеть LAN (CIDR)'));
-        o.datatype = 'cidr4';
-        o.placeholder = '192.168.1.0/24';
-        o = s.taboption('general', form.DynamicList, 'health_target', _('Адреса для проверки туннеля (ping)'), _('Пингуются через каждый туннель для проверки (любой ответ = туннель жив).'));
-        o.datatype = 'ipaddr';
-        o = s.taboption('general', form.Value, 'health_url', _('URL проверки WAN'), _('Запрашивается через WAN, чтобы выбрать между обходом DPI и прямым WAN.'));
-        o.placeholder = 'https://1.1.1.1/cdn-cgi/trace';
-        o = s.taboption('lists', form.Flag, 'ipsum_enabled', _('Включить ipsum (список IP для VPN)'));
-        o.default = '1';
-        o = s.taboption('lists', form.Value, 'ipsum_url', _('URL списка ipsum'));
-        o.depends('ipsum_enabled', '1');
-        o = s.taboption('lists', form.Flag, 'ru_enabled', _('Включить список ru/cn (напрямую)'));
-        o.default = '1';
-        o = s.taboption('lists', form.Value, 'ru_url', _('URL списка ru/cn'));
-        o.depends('ru_enabled', '1');
-        o = s.taboption('lists', form.Value, 'vpn_domains_url', _('URL списка доменов для VPN'), _('Скачиваемые домены направляются в VPN на этапе DNS-разрешения (dnsmasq).'));
-        o = s.taboption('lists', form.Value, 'ignore_domains_url', _('URL списка доменов напрямую'));
-        o = s.taboption('lists', form.Flag, 'zapret_enabled', _('Использовать обход DPI (zapret)'), _('Пропускается автоматически, если zapret не установлен.'));
-        o.default = '1';
-        o = s.taboption('manual', form.DynamicList, 'vpn_cidr', _('Подсети для VPN'), _('Удалённые подсети, которые должны идти через туннель — обычно LAN ' +
-            'соседнего роутера для site-to-site (например 10.8.2.0/24). На «Главной» ' +
-            '(подробное состояние) отмечаются те, что фактически не заведены в туннель.'));
-        o.datatype = 'cidr4';
-        o = s.taboption('manual', form.DynamicList, 'direct_cidr', _('Подсети напрямую'), _('Подсети, которые держатся вне туннеля (всегда через WAN).'));
-        o.datatype = 'cidr4';
-        o = s.taboption('manual', form.DynamicList, 'vpn_domain', _('Домены для VPN'));
-        o = s.taboption('manual', form.DynamicList, 'direct_domain', _('Домены напрямую'));
-        s = m.section(form.GridSection, 'endpoint', _('Туннели (с приоритетом)'), _('Меньший номер приоритета — выше. Выбирайте интерфейсы, созданные в ' +
-            'Сеть → Интерфейсы.'));
-        s.addremove = true;
-        s.anonymous = true;
-        s.sortable = true;
-        o = s.option(form.ListValue, 'iface', _('Интерфейс'));
-        if (wgIfaces.length) {
-            wgIfaces.forEach(function (i) { o.value(i); });
-        }
-        else {
-            o.value('', _('(интерфейсы WireGuard/AmneziaWG не найдены)'));
-        }
-        o = s.option(form.Value, 'priority', _('Приоритет'));
-        o.datatype = 'uinteger';
-        o.placeholder = '1';
-        o = s.option(form.ListValue, 'type', _('Тип'));
-        o.value('wg', _('WireGuard / AmneziaWG'));
-        o.value('singbox', _('sing-box (скоро)'));
-        o.default = 'wg';
-        o.modalonly = true;
-        s = m.section(form.GridSection, 'device', _('Правила для отдельных устройств'), _('Привяжите устройство LAN к VPN или к прямому каналу по его IP.'));
-        s.addremove = true;
-        s.anonymous = true;
-        o = s.option(form.Value, 'ip', _('IP устройства'));
-        o.datatype = 'ip4addr';
-        ipHints(hostHints).forEach(function (p) { o.value(p[0], p[1]); });
-        o = s.option(form.ListValue, 'mode', _('Маршрут'));
-        o.value('vpn', _('Через VPN'));
-        o.value('direct', _('Напрямую'));
-        return m.render();
-    }
+	load: function () {
+		return Promise.all([
+			uci.load('splify'),
+			L.resolveDefault(rpc.declare({ object: 'luci-rpc', method: 'getHostHints' })(), {})
+		]);
+	},
+	render: function (data) {
+		// Expose LuCI modules to React the same way home.js does for the
+		// dashboard bundle, plus uci/network for reading & writing config and
+		// the host-hints snapshot for the device-rules IP suggestions.
+		window.luci_rpc = rpc;
+		window.luci_uci = uci;
+		window.luci_network = network;
+		window.ui = ui;
+		window.__splifyHostHints = data[1] || {};
+
+		// 1. Inject React App CSS
+		if (!document.getElementById('splify-settings-css')) {
+			var link = document.createElement('link');
+			link.id = 'splify-settings-css';
+			link.rel = 'stylesheet';
+			link.href = L.resource('splify/splify-index.css') + '?v=' + Date.now();
+			document.head.appendChild(link);
+		} else {
+			var oldLink = document.getElementById('splify-settings-css');
+			oldLink.parentNode.removeChild(oldLink);
+			var newLink = document.createElement('link');
+			newLink.id = 'splify-settings-css';
+			newLink.rel = 'stylesheet';
+			newLink.href = L.resource('splify/splify-index.css') + '?v=' + Date.now();
+			document.head.appendChild(newLink);
+		}
+
+		// 2. Create Root Div
+		var container = E('div', { id: 'splify-root', 'class': 'splify-react-root' });
+
+		// 3. Inject React App JS
+		if (!document.getElementById('splify-settings-js')) {
+			var script = document.createElement('script');
+			script.id = 'splify-settings-js';
+			script.src = L.resource('splify/splify-settings.js') + '?v=' + Date.now();
+			script.type = 'module';
+			document.head.appendChild(script);
+		} else {
+			// LuCI re-renders the whole view when navigating back without
+			// re-fetching the module, so force re-evaluation (same approach
+			// as home.js).
+			var oldScript = document.getElementById('splify-settings-js');
+			oldScript.parentNode.removeChild(oldScript);
+			var newScript = document.createElement('script');
+			newScript.id = 'splify-settings-js';
+			newScript.src = L.resource('splify/splify-settings.js') + '?v=' + Date.now();
+			newScript.type = 'module';
+			document.head.appendChild(newScript);
+		}
+
+		return container;
+	},
+	handleSave: null, handleSaveApply: null, handleReset: null
 });

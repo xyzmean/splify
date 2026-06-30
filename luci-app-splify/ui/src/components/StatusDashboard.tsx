@@ -12,7 +12,6 @@ import {
   ShieldCheck, AlertTriangle, Ban, Globe, RefreshCw, Play, RotateCw, Power,
   Download, Wrench, ArrowRight, Check as CheckIcon, X as XIcon, Pause,
   Activity, ListChecks, Network, History, Stethoscope, ExternalLink,
-  ArrowDownToLine, ArrowUpFromLine, Gauge,
 } from 'lucide-react'
 import {
   fmtAge, fmtRate, fmtWhen, pathLabel, EVENT_META, ratesFor, type RateSample,
@@ -99,7 +98,6 @@ export default function StatusDashboard(p: Props) {
   const lists = status.lists || []
   const enabledLists = lists.filter((l) => l.enabled)
   const okLists = enabledLists.filter((l) => l.ok).length
-  const protLabel = /^vpn:/.test(s.state) ? 'через VPN' : s.state === 'zapret' ? 'обход DPI' : s.state === 'killswitch' ? 'заблокировано' : s.state === 'wan' ? 'напрямую' : '—'
 
   async function run(action: string, confirmMsg?: string, toast?: string) {
     if (confirmMsg && !window.confirm(confirmMsg)) return
@@ -152,19 +150,31 @@ export default function StatusDashboard(p: Props) {
 
   return (
     <div className="space-y-4">
-      {/* ── Hero ─────────────────────────────────────────────── */}
+      {/* ── Hero + KPI (compact single-row header) ─────────────── */}
       <Card className={cn('border-l-4', SEV[overall].ring)}>
-        <CardContent className="flex items-center gap-4 p-5">
-          <div className={cn('flex size-12 shrink-0 items-center justify-center rounded-xl bg-muted', SEV[overall].text)}>
-            <HeroIcon className="size-7" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-base font-semibold tracking-tight">{path.title}</div>
-            <div className="mt-1 text-sm text-muted-foreground">
-              Режим <b className="text-foreground">{s.mode || '?'}</b> · Kill switch <b className="text-foreground">{String(s.killswitch) === '1' ? 'вкл' : 'выкл'}</b>
+        <CardContent className="flex flex-wrap items-center gap-4 p-4">
+          <div className="flex min-w-[240px] flex-1 items-center gap-3">
+            <div className={cn('flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted', SEV[overall].text)}>
+              <HeroIcon className="size-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold tracking-tight">{path.title}</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                Режим <b className="text-foreground">{s.mode || '?'}</b> · Kill switch <b className="text-foreground">{String(s.killswitch) === '1' ? 'вкл' : 'выкл'}</b>
+              </div>
             </div>
           </div>
-          <div className="flex flex-col items-end gap-2">
+
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
+            <MiniStat label="Туннель" value={activeEp ? activeEp.iface : '—'}
+              sub={activeEp ? 'handshake ' + fmtAge(activeEp.handshake_age) : undefined} />
+            <MiniStat label="Приём" value={fmtRate(totRx)} />
+            <MiniStat label="Передача" value={fmtRate(totTx)} />
+            <MiniStat label="Сбоев" value={String(s.fail_count ?? '?')} tone={(s.fail_count ?? 0) > 0 ? SEV.WARN.text : undefined} />
+            <MiniStat label="Списки OK" value={`${okLists}/${enabledLists.length}`} tone={okLists < enabledLists.length ? SEV.WARN.text : undefined} />
+          </div>
+
+          <div className="flex items-center gap-2">
             <SevBadge sev={overall} />
             <Button size="sm" disabled={!!p.busy}
               variant={isOn ? 'outline' : 'default'}
@@ -179,19 +189,6 @@ export default function StatusDashboard(p: Props) {
           </div>
         </CardContent>
       </Card>
-
-      {/* ── KPI stat blocks ──────────────────────────────────── */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-        <StatTile icon={ShieldCheck} label="Защита" value={protLabel} tone={SEV[overall].text} />
-        <StatTile icon={Network} label="Активный туннель" value={activeEp ? activeEp.iface : '—'}
-          sub={activeEp ? 'handshake ' + fmtAge(activeEp.handshake_age) : 'нет активного'} />
-        <StatTile icon={ArrowDownToLine} label="Приём" value={fmtRate(totRx)} />
-        <StatTile icon={ArrowUpFromLine} label="Передача" value={fmtRate(totTx)} />
-        <StatTile icon={Gauge} label="Сбоев подряд" value={String(s.fail_count ?? '?')}
-          tone={(s.fail_count ?? 0) > 0 ? SEV.WARN.text : undefined} />
-        <StatTile icon={ListChecks} label="Списки OK" value={`${okLists}/${enabledLists.length}`}
-          tone={okLists < enabledLists.length ? SEV.WARN.text : undefined} />
-      </div>
 
       {/* ── Toolbar ──────────────────────────────────────────── */}
       <div className="flex flex-wrap items-center gap-2">
@@ -352,18 +349,13 @@ export default function StatusDashboard(p: Props) {
   )
 }
 
-function StatTile({ icon: Icon, label, value, sub, tone }: {
-  icon: React.ComponentType<{ className?: string }>; label: string
-  value: React.ReactNode; sub?: React.ReactNode; tone?: string
-}) {
+function MiniStat({ label, value, sub, tone }: { label: string; value: React.ReactNode; sub?: React.ReactNode; tone?: string }) {
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-1 p-4">
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground"><Icon className="size-4" />{label}</div>
-        <div className={cn('truncate text-xl font-semibold tracking-tight', tone)}>{value}</div>
-        {sub != null && sub !== '' && <div className="truncate text-xs text-muted-foreground">{sub}</div>}
-      </CardContent>
-    </Card>
+    <div className="flex flex-col items-start">
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className={cn('text-sm font-semibold leading-tight', tone)}>{value}</div>
+      {sub != null && sub !== '' && <div className="text-[11px] text-muted-foreground">{sub}</div>}
+    </div>
   )
 }
 
