@@ -77,8 +77,12 @@ poll_once() {
     _gen="$(cat "$GEN_FILE" 2>/dev/null)"; case "$_gen" in ''|*[!0-9]*) _gen=0 ;; esac
 
     # Build the report: last applied generation + current health + masked config.
-    _status="$(/usr/local/sbin/splify-doctor --json 2>/dev/null || echo '{}')"
-    _config="$(/usr/local/sbin/splify-ctl export 2>/dev/null || echo '{}')"
+    # NOTE: splify-doctor prints valid JSON but exits non-zero on WARN/FIXABLE/FAIL
+    # BY DESIGN. Capture its output and IGNORE the exit code — a `|| echo '{}'`
+    # would append a second object to the already-printed JSON and corrupt the
+    # report exactly when the node is degraded (the very state worth reporting).
+    _status="$(/usr/local/sbin/splify-doctor --json 2>/dev/null)"; [ -n "$_status" ] || _status='{}'
+    _config="$(/usr/local/sbin/splify-ctl export 2>/dev/null)"; [ -n "$_config" ] || _config='{}'
     _body="$(printf '{"node":"%s","ts":%s,"agent":"splify-agent/1","applied_gen":%s,"status":%s,"config":%s}' \
         "$_node" "$(date +%s)" "$_gen" "$_status" "$_config")"
 

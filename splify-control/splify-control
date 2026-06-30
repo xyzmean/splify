@@ -70,9 +70,16 @@ def save_node(rec):
     if not p:
         return
     tmp = p + '.tmp'
-    with open(tmp, 'w', encoding='utf-8') as f:
+    # 0600 BEFORE writing: the record holds the node's bearer token, so it must
+    # never be world-readable (mirrors the access_key file).
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
         json.dump(rec, f, ensure_ascii=False, indent=2)
     os.replace(tmp, p)
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
 
 
 def list_nodes():
@@ -216,7 +223,7 @@ def connect_json():
 
 # Parse a WireGuard/AmneziaWG .conf into a wg snapshot fragment for one iface.
 def parse_conf(text, iface):
-    iface_opts, awg, peer = {}, {}, {}
+    iface_opts, awg, peers, peer = {}, {}, [], None
     section = None
     awg_keys = {'jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4',
                 'h1', 'h2', 'h3', 'h4', 'i1', 'i2', 'i3', 'i4', 'i5',
@@ -228,7 +235,7 @@ def parse_conf(text, iface):
         if line.lower() == '[interface]':
             section = 'i'; continue
         if line.lower() == '[peer]':
-            section = 'p'; continue
+            section = 'p'; peer = {}; peers.append(peer); continue
         if '=' not in line:
             continue
         k, v = line.split('=', 1)
@@ -246,7 +253,7 @@ def parse_conf(text, iface):
                 iface_opts['mtu'] = v
             elif k in awg_keys:
                 awg[k] = v
-        elif section == 'p':
+        elif section == 'p' and peer is not None:
             if k == 'publickey':
                 peer['public_key'] = v
             elif k == 'presharedkey':
@@ -263,8 +270,9 @@ def parse_conf(text, iface):
     if awg:
         iface_opts['awg'] = awg
     iface_opts['route_allowed_ips'] = '0'
-    if peer:
-        iface_opts['peers'] = [peer]
+    peers = [p for p in peers if p]
+    if peers:
+        iface_opts['peers'] = peers
     return {'wg': {iface: iface_opts}}
 
 

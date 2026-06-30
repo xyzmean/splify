@@ -296,7 +296,7 @@ cmd_import() {
     json_init
     json_load "$_doc" 2>/dev/null || die_json "invalid JSON" 2
 
-    _net_changed=0; _splify_changed=0; _wg_skipped=""
+    _net_changed=0; _splify_changed=0; _wg_skipped=""; _sites_failed=""
 
     json_get_type _t splify 2>/dev/null
     if [ "$_t" = object ]; then
@@ -350,7 +350,7 @@ cmd_import() {
         for _sk in $_sks; do json_get_var _sv "$_sk" 2>/dev/null; [ -n "$_sv" ] && _slist="$_slist $_sv"; done
         json_select ..
         # shellcheck disable=SC2086
-        _sites_reconcile $_slist || true
+        _sites_reconcile $_slist || _sites_failed=1
     fi
 
     [ "$_splify_changed" = 1 ] && uci commit splify
@@ -381,8 +381,9 @@ cmd_import() {
     # silent skip: report ok:false so the agent does NOT record the generation as
     # applied and the controller keeps retrying.
     json_init
-    json_add_boolean ok "$([ -z "$_wg_skipped" ] && echo 1 || echo 0)"
+    json_add_boolean ok "$([ -z "$_wg_skipped$_sites_failed" ] && echo 1 || echo 0)"
     [ -n "$_wg_skipped" ] && json_add_string skipped "$(printf '%s' "$_wg_skipped" | sed 's/^ //')"
+    [ -n "$_sites_failed" ] && json_add_string sites_error "no tunnel interface for site routes"
     json_add_boolean splify_changed "$_splify_changed"
     json_add_boolean network_changed "$_net_changed"
     json_add_boolean applied "$_apply"
@@ -642,7 +643,20 @@ cmd_enroll() {
             -H 'Content-Type: application/json' -H "Authorization: Bearer $_ak" \
             --data-binary @- "${_external%/}/enroll" 2>/dev/null)" && { _ok=1; _via=external; }
     fi
-    [ "$_ok" = 1 ] || die_json "enroll failed — dashboard unreachable or access_key rejected" 1
+    if [ "$_ok" != 1 ]; then
+        # The dashboard is unreachable right now — DON'T give up. The token and
+        # access_key are already stored; enable the agent so its poll loop keeps
+        # re-attempting enrollment until it registers (default config leaves the
+        # agent off, so without this a failed first connect would never retry).
+        uci set splify.api.agent_enabled=1
+        uci commit splify
+        rm -f /etc/splify/agent.gen 2>/dev/null
+        /etc/init.d/splify-agent enable >/dev/null 2>&1
+        /etc/init.d/splify-agent restart >/dev/null 2>&1
+        json_init; json_add_boolean ok 0; json_add_boolean retrying 1
+        json_add_string error "dashboard unreachable — agent enabled, will keep retrying enrollment"
+        json_dump; return
+    fi
 
     # dashboard may confirm or reassign the node id
     json_init; json_load "$_resp" 2>/dev/null; json_get_var _nid node_id 2>/dev/null

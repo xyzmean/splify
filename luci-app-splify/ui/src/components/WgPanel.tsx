@@ -203,8 +203,10 @@ export default function WgPanel() {
             <span className={lbl}><KeyRound className="mr-1 inline size-3.5" />Приватный ключ интерфейса</span>
             <div className="flex gap-2">
               <input className={cn(field, 'font-mono text-xs')} type={revealed ? 'text' : 'password'}
-                value={revealed ? (form.private_key || '') : (cur.has_private_key ? '••••••••••••••••' : '')}
-                onChange={(e) => set('private_key', e.target.value)} placeholder={cur.has_private_key ? '(не менять)' : 'не задан'} />
+                value={revealed ? (form.private_key || '') : (cur.has_private_key ? '••••••••••••••••' : (form.private_key || ''))}
+                onChange={(e) => set('private_key', e.target.value)}
+                readOnly={!revealed && cur.has_private_key}
+                placeholder={cur.has_private_key ? '(не менять)' : 'не задан'} />
               {!revealed && cur.has_private_key && <Button size="sm" variant="outline" onClick={reveal}><Eye className="size-4" />Показать</Button>}
             </div>
             <p className="mt-1 text-xs text-muted-foreground">Оставьте поле пустым, чтобы не менять текущий ключ.</p>
