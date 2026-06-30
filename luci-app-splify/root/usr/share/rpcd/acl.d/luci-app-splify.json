@@ -13,7 +13,7 @@
 		"write": {
 			"uci": [ "splify", "network" ],
 			"ubus": {
-				"splify": [ "action", "config_import", "wg_set", "wg_import", "api_set", "token_regen", "connect", "enroll" ]
+				"splify": [ "action", "config_import", "wg_set", "wg_import", "api_set", "api_token", "token_regen", "connect", "enroll" ]
 			}
 		}
 	}

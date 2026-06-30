@@ -59,6 +59,7 @@ export const rpc = {
   wgSet: (iface: string, data: any): Promise<any> => decl('wg_set', ['iface', 'data'])(iface, JSON.stringify(data)),
   wgImport: (iface: string, conf: string): Promise<any> => decl('wg_import', ['iface', 'conf'])(iface, conf),
   apiGet: (): Promise<ApiInfo> => decl('api_get')(),
+  apiToken: (): Promise<{ token: string }> => decl('api_token')(),
   apiSet: (data: any): Promise<any> => decl('api_set', ['data'])(JSON.stringify(data)),
   tokenRegen: (): Promise<{ token: string }> => decl('token_regen')(),
   connect: (data: any): Promise<any> =>

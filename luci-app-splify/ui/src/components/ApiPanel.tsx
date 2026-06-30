@@ -21,6 +21,7 @@ export default function ApiPanel() {
   const [connJson, setConnJson] = useState('')
   const [busy, setBusy] = useState('')
   const [showToken, setShowToken] = useState(false)
+  const [revealedToken, setRevealedToken] = useState('')
   const [ci, setCi] = useState('')
   const [ce, setCe] = useState('')
   const [interval, setIntervalV] = useState('')
@@ -78,9 +79,19 @@ export default function ApiPanel() {
   async function regen() {
     if (!window.confirm('Перевыпустить токен? Старый перестанет работать — обновите его на панели управления.')) return
     setBusy('regen')
-    try { const r = await rpc.tokenRegen(); notify('Новый токен: ' + r.token); setShowToken(true); load() }
+    try { const r = await rpc.tokenRegen(); notify('Новый токен: ' + r.token); setRevealedToken(r.token); setShowToken(true); load() }
     catch (e: any) { notify('Ошибка: ' + (e?.message || e), 'error') }
     finally { setBusy('') }
+  }
+
+  // The token is masked in api_get (read ACL); fetch it on demand via the
+  // write-gated api_token only when the operator chooses to reveal it.
+  async function toggleToken() {
+    if (showToken) { setShowToken(false); return }
+    try {
+      if (!revealedToken) { const r = await rpc.apiToken(); setRevealedToken(r.token || '') }
+      setShowToken(true)
+    } catch (e: any) { notify('Не удалось показать токен: ' + (e?.message || e), 'error') }
   }
 
   async function enroll() {
@@ -164,8 +175,8 @@ export default function ApiPanel() {
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <div><span className={lbl}>Токен доступа</span>
               <div className="flex gap-2">
-                <input className={cn(field, 'font-mono text-xs')} type={showToken ? 'text' : 'password'} value={showToken ? (info.token || '') : '••••••••••••••••'} readOnly />
-                <Button size="sm" variant="outline" onClick={() => setShowToken((v) => !v)}>{showToken ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</Button>
+                <input className={cn(field, 'font-mono text-xs')} type={showToken ? 'text' : 'password'} value={showToken ? revealedToken : (info.has_token ? '••••••••••••••••' : '')} readOnly />
+                <Button size="sm" variant="outline" onClick={toggleToken}>{showToken ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</Button>
                 <Button size="sm" variant="outline" disabled={!!busy} onClick={regen}><RefreshCw className="size-4" />Сменить</Button>
               </div></div>
             <div><span className={lbl}>Ограничение по подсети (префикс, опц.)</span>

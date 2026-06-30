@@ -296,7 +296,7 @@ cmd_import() {
     json_init
     json_load "$_doc" 2>/dev/null || die_json "invalid JSON" 2
 
-    _net_changed=0; _splify_changed=0
+    _net_changed=0; _splify_changed=0; _wg_skipped=""
 
     json_get_type _t splify 2>/dev/null
     if [ "$_t" = object ]; then
@@ -336,7 +336,7 @@ cmd_import() {
         json_get_keys _wks
         for _wif in $_wks; do
             json_select "$_wif"
-            import_wg_iface "$_wif" && _net_changed=1
+            if import_wg_iface "$_wif"; then _net_changed=1; else _wg_skipped="$_wg_skipped $_wif"; fi
             json_select ..
         done
         json_select ..
@@ -350,7 +350,7 @@ cmd_import() {
         for _sk in $_sks; do json_get_var _sv "$_sk" 2>/dev/null; [ -n "$_sv" ] && _slist="$_slist $_sv"; done
         json_select ..
         # shellcheck disable=SC2086
-        apply_sites $_slist
+        _sites_reconcile $_slist || true
     fi
 
     [ "$_splify_changed" = 1 ] && uci commit splify
@@ -377,8 +377,12 @@ cmd_import() {
         fi
     fi
 
+    # A requested interface that was missing/non-wg is a FAILED import, not a
+    # silent skip: report ok:false so the agent does NOT record the generation as
+    # applied and the controller keeps retrying.
     json_init
-    json_add_boolean ok 1
+    json_add_boolean ok "$([ -z "$_wg_skipped" ] && echo 1 || echo 0)"
+    [ -n "$_wg_skipped" ] && json_add_string skipped "$(printf '%s' "$_wg_skipped" | sed 's/^ //')"
     json_add_boolean splify_changed "$_splify_changed"
     json_add_boolean network_changed "$_net_changed"
     json_add_boolean applied "$_apply"
@@ -417,6 +421,15 @@ cmd_wg_import() {
     iface_is_wg "$1" || die_json "not a wg/awg interface" 2
     _apply=1; [ "$2" = "--no-apply" ] && _apply=0
     _if="$1"; _proto="$(g "network.$_if.proto")"; _pt="${_proto}_$_if"
+
+    # Read the whole .conf and validate it HAS a [Peer] BEFORE touching UCI — the
+    # peer-wipe below stages a delete that a later `uci commit network` could
+    # persist even if we reject the import. (Use a temp file, not a pipe, so the
+    # parse loop runs in THIS shell and its uci writes survive.)
+    _doc="$(cat)"
+    case "$_doc" in *'[Peer]'*) : ;; *) die_json "no [Peer] section in config" 2 ;; esac
+    _tmp="$(mktemp 2>/dev/null || printf '/tmp/splify-wgimport.%s' "$$")"
+    printf '%s\n' "$_doc" > "$_tmp"
 
     # wipe existing peers; rebuild interface secret/addresses/dns/awg + peers
     while [ -n "$(g "network.@${_pt}[0]")" ]; do uci -q delete "network.@${_pt}[0]"; done
@@ -464,9 +477,12 @@ cmd_wg_import() {
                 persistentkeepalive) uci set "network.@${_pt}[-1].persistent_keepalive=$_val" ;;
             esac
         fi
-    done
+    done < "$_tmp"
+    rm -f "$_tmp"
 
-    [ "$_have_peer" = 1 ] || die_json "no [Peer] section in config" 2
+    # Safety net (the pre-scan already guaranteed a [Peer]); revert the staged
+    # peer-wipe so a rejected import can never be persisted by a later commit.
+    [ "$_have_peer" = 1 ] || { uci -q revert network; die_json "no [Peer] section in config" 2; }
     # AmneziaWG endpoints must NOT pull AllowedIPs into the main table (splify
     # owns routing via marks+table 200); match the import default the UI uses.
     uci set "network.$_if.route_allowed_ips=0"
@@ -510,7 +526,9 @@ cmd_api_get() {
     json_add_string  enabled          "$(g splify.api.enabled)"
     json_add_string  agent_enabled    "$(g splify.api.agent_enabled)"
     json_add_boolean has_token        "$([ -n "$(g splify.api.token)" ] && echo 1 || echo 0)"
-    json_add_string  token            "$(g splify.api.token)"
+    # Token is a WRITE-capable REST credential — never return it through this
+    # read-ACL method. Reveal it only via the write-gated `api-token`.
+    json_add_string  token            ""
     json_add_string  control_internal "$(g splify.api.control_internal)"
     json_add_string  control_external "$(g splify.api.control_external)"
     json_add_boolean has_access_key   "$([ -n "$(g splify.api.access_key)" ] && echo 1 || echo 0)"
@@ -524,6 +542,13 @@ cmd_api_get() {
     json_add_string  last_poll        "$(cat /var/run/splify-agent.last 2>/dev/null)"
     json_add_string  last_result      "$(cat /var/run/splify-agent.status 2>/dev/null)"
     json_dump
+}
+
+# Reveal the live REST token. Write-gated (allow-listed on the WRITE ACL only),
+# so a read-only LuCI session cannot lift a write-capable credential.
+cmd_api_token() {
+    ensure_api_section
+    json_init; json_add_string token "$(g splify.api.token)"; json_dump
 }
 
 cmd_api_set() {
@@ -671,24 +696,26 @@ _lan_subnet() {
     printf '%s' "$_cidr"
 }
 
-# Primary splify tunnel iface (the path to the WG hub): first endpoint that is a
-# real wg/awg tunnel, else the first wg iface present.
+# Tunnel iface that carries mesh routes: the highest-PRIORITY wg/awg endpoint
+# (matches splify's own primary-tunnel preference), else the first wg iface.
 _tunnel_iface() {
-    _i=0
-    while [ -n "$(g "splify.@endpoint[$_i].iface")" ]; do
-        _ti="$(g "splify.@endpoint[$_i].iface")"
+    for _ti in $(endpoints_by_priority 2>/dev/null | awk '{print $1}'); do
         iface_is_wg "$_ti" 2>/dev/null && { printf '%s' "$_ti"; return; }
-        _i=$((_i + 1))
     done
     for _ti in $(wg_ifaces); do printf '%s' "$_ti"; return; done
 }
 
-# Firewall zone section (e.g. @zone[2]) whose network list contains $1.
+# Firewall zone section (e.g. @zone[2]) that binds iface $1 — via its `network`
+# OR `device` list (also matching the iface's resolved L3 device), the same way
+# fw4 resolves a zone. Returns nothing if no zone owns the tunnel.
 _fw_zone_for() {
+    _zdev="$(uci -q get "network.$1.device" 2>/dev/null)"
     _i=0
     while [ -n "$(g "firewall.@zone[$_i]")" ]; do
-        for _n in $(g "firewall.@zone[$_i].network"); do
-            [ "$_n" = "$1" ] && { printf '@zone[%s]' "$_i"; return; }
+        for _n in $(g "firewall.@zone[$_i].network") $(g "firewall.@zone[$_i].device"); do
+            if [ "$_n" = "$1" ] || { [ -n "$_zdev" ] && [ "$_n" = "$_zdev" ]; }; then
+                printf '@zone[%s]' "$_i"; return
+            fi
         done
         _i=$((_i + 1))
     done
@@ -697,50 +724,59 @@ _fw_zone_for() {
 # Deterministic named uci route section for a subnet (idempotent add/remove).
 _route_sec() { printf 'splify_site_%s' "$(printf '%s' "$1" | tr './' '__')"; }
 
-# Reconcile the set of remote LAN subnets routed over the tunnel. Diff against
-# the previously-applied set (splify.api.sites): add/remove persistent routes
-# (main table, via the tunnel) and no-masq exclusions, and mirror live with
-# `ip route` so it takes effect without bouncing the tunnel.
-apply_sites() {  # subnet...
-    _tun="$(_tunnel_iface)"
-    [ -n "$_tun" ] || { warn "site routes: no tunnel interface"; return 1; }
-    _zone="$(_fw_zone_for "$_tun")"
+# Reconcile the set of remote LAN subnets routed over the tunnel (NO output —
+# callers print their own response). Diffs against the previously-applied set
+# (splify.api.sites): add/remove persistent routes (main table, via the tunnel)
+# and no-masq exclusions, mirror live with `ip route` (no tunnel bounce). Result
+# is exposed via SITES_TUN / SITES_NEW for the CLI wrapper.
+_sites_reconcile() {  # subnet...
+    SITES_TUN="$(_tunnel_iface)"; SITES_NEW=""
+    [ -n "$SITES_TUN" ] || { warn "site routes: no tunnel interface"; return 1; }
+    _zone="$(_fw_zone_for "$SITES_TUN")"
     _old="$(g splify.api.sites)"
-    _new=""
-    for _s in "$@"; do case "$_s" in */*) _new="$_new $_s" ;; esac; done
+    for _s in "$@"; do case "$_s" in */*) SITES_NEW="$SITES_NEW $_s" ;; esac; done
     _changed=0
 
     for _s in $_old; do
-        case " $_new " in
+        case " $SITES_NEW " in
             *" $_s "*) : ;;
-            *)  ip route del "$_s" dev "$_tun" 2>/dev/null
+            *)  ip route del "$_s" dev "$SITES_TUN" 2>/dev/null
                 [ -n "$_zone" ] && uci -q del_list "firewall.$_zone.masq_dest=!$_s"
                 uci -q delete "network.$(_route_sec "$_s")" 2>/dev/null
                 _changed=1 ;;
         esac
     done
-    for _s in $_new; do
+    for _s in $SITES_NEW; do
         case " $_old " in
             *" $_s "*) : ;;
             *)  _sec="$(_route_sec "$_s")"
                 uci set "network.$_sec=route"
-                uci set "network.$_sec.interface=$_tun"
+                uci set "network.$_sec.interface=$SITES_TUN"
                 uci set "network.$_sec.target=$_s"
                 [ -n "$_zone" ] && uci add_list "firewall.$_zone.masq_dest=!$_s"
                 _changed=1 ;;
         esac
-        ip route replace "$_s" dev "$_tun" 2>/dev/null
+        ip route replace "$_s" dev "$SITES_TUN" 2>/dev/null
     done
 
     uci -q delete splify.api.sites 2>/dev/null
-    for _s in $_new; do uci add_list "splify.api.sites=$_s"; done
+    for _s in $SITES_NEW; do uci add_list "splify.api.sites=$_s"; done
     uci commit splify
     if [ "$_changed" = 1 ]; then
         uci commit network; uci commit firewall
+        # A bare `firewall reload` regenerates table inet fw4 and wipes splify's
+        # live nft sets (ipsum/ru) + dnsmasq domain sets. Reload first (so the
+        # masq_dest exclusions take effect), then splify-apply to repopulate them.
         /etc/init.d/firewall reload >/dev/null 2>&1
+        /usr/local/sbin/splify-apply >/dev/null 2>&1
     fi
-    json_init; json_add_boolean ok 1; json_add_string tunnel "$_tun"
-    json_add_string sites "$(printf '%s' "$_new" | sed 's/^ //')"; json_dump
+}
+
+# CLI/ubus entry: reconcile, then emit exactly ONE JSON object.
+apply_sites() {  # subnet...
+    _sites_reconcile "$@" || die_json "site routes: no tunnel interface" 1
+    json_init; json_add_boolean ok 1; json_add_string tunnel "$SITES_TUN"
+    json_add_string sites "$(printf '%s' "$SITES_NEW" | sed 's/^ //')"; json_dump
 }
 
 # ---- dispatch --------------------------------------------------------------
@@ -758,8 +794,9 @@ case "$1" in
     status)     /usr/local/sbin/splify-doctor --json || true ;;
     api-get)    cmd_api_get ;;
     api-set)    cmd_api_set ;;
+    api-token)  cmd_api_token ;;
     token-regen) cmd_token_regen ;;
     connect)    cmd_connect ;;
     enroll)     cmd_enroll ;;
-    *) die_json "usage: splify-ctl {export|import|wg-get|wg-set|wg-import|action|status|api-get|api-set|token-regen|connect|enroll|sites-apply|sites-clear|sites-get|lan}" 2 ;;
+    *) die_json "usage: splify-ctl {export|import|wg-get|wg-set|wg-import|action|status|api-get|api-set|api-token|token-regen|connect|enroll|sites-apply|sites-clear|sites-get|lan}" 2 ;;
 esac

@@ -528,43 +528,53 @@ ADMIN_HTML = r"""<!doctype html>
 <div class="toast" id="toast"></div>
 <script>
 const $=s=>document.querySelector(s); let cur=null, nodes=[];
+// Escape node-reported values before injecting into innerHTML — a compromised or
+// hostile node must not be able to run script in the (WG-only) admin origin.
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+// Human-friendly path label for the raw doctor state (vpn:<if>|zapret|killswitch|wan).
+function pathLabel(s){s=s||'';
+ if(/^vpn:/.test(s))return '🛡 Защищено · VPN ('+esc(s.replace(/^vpn:/,''))+')';
+ if(s==='zapret')return '⚠ Обход DPI · zapret';
+ if(s==='killswitch')return '⛔ Заблокировано · kill switch';
+ if(s==='wan')return '🌐 Напрямую · WAN';
+ return s?esc(s):'—';}
 function ago(ts){if(!ts)return 'никогда';const d=Math.floor(Date.now()/1000)-ts;if(d<60)return d+' с назад';if(d<3600)return Math.floor(d/60)+' мин назад';if(d<86400)return Math.floor(d/3600)+' ч назад';return Math.floor(d/86400)+' дн назад';}
 function sev(o){return o==='OK'?'ok':o==='WARN'?'warn':o==='?'?'dim':'bad';}
 function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200);}
 async function api(m,u,b){const r=await fetch(u,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j;}
 async function loadNodes(){const j=await api('GET','/admin/api/nodes');nodes=j.nodes;const L=$('#list');L.innerHTML='';if(!nodes.length)L.innerHTML='<p class="mut" style="padding:16px">Нод пока нет. Настройте на роутере control_url и токен — нода появится после первого опроса.</p>';
  for(const n of nodes){const d=document.createElement('div');d.className='node'+(cur===n.node?' sel':'');d.onclick=()=>openNode(n.node);
-  d.innerHTML=`<div class="row"><b>${n.node}</b><span class="sp"></span><span class="pill ${sev(n.overall)}">${n.overall}</span></div>
-   <div class="small mut">${n.state} · ${n.mode} · ${ago(n.last_seen)}</div>
+  d.innerHTML=`<div class="row"><b>${esc(n.node)}</b><span class="sp"></span><span class="pill ${sev(n.overall)}">${esc(n.overall)}</span></div>
+   <div class="small mut">${pathLabel(n.state)} · ${esc(n.mode)} · ${ago(n.last_seen)}</div>
    ${n.pending?'<div class="small" style="color:var(--warn)">● ожидает применения (gen '+n.generation+')</div>':''}`;L.appendChild(d);} }
 async function openNode(node){cur=node;loadNodes();const rec=await api('GET','/admin/api/nodes/'+node);const rep=rec.last_report||{};const st=rep.status||{};const summ=st.summary||{};const eps=(st.endpoints||[]);
  const wg=(rep.config&&rep.config.wg)||{};const ifaces=Object.keys(wg);const prim=ifaces[0]||'';const pa=(wg[prim]&&wg[prim].awg)||{};const pe=((wg[prim]&&wg[prim].peers)||[{}])[0]||{};
  $('#detail').innerHTML=`
- <h2>${node} <span class="pill ${sev(st.overall||'?')}">${st.overall||'?'}</span></h2>
- <p class="mut small">Токен ноды: <code>${rec.token}</code> · generation <b>${rec.generation}</b> · применено <b>${rep.applied_gen||0}</b> · ${ago(rec.last_seen)}</p>
+ <h2>${esc(node)} <span class="pill ${sev(st.overall||'?')}">${esc(st.overall||'?')}</span></h2>
+ <p class="mut small">Токен ноды: <code>${esc(rec.token)}</code> · generation <b>${esc(rec.generation)}</b> · применено <b>${esc(rep.applied_gen||0)}</b> · ${ago(rec.last_seen)}</p>
  <div class="card"><h3>Состояние</h3>
-  <table><tr><td class="mut">Режим</td><td>${summ.mode||'?'}</td><td class="mut">Путь</td><td>${summ.state||'?'}</td></tr>
-  <tr><td class="mut">Kill switch</td><td>${summ.killswitch?'вкл':'выкл'}</td><td class="mut">Сбои</td><td>${summ.fail_count??'?'}</td></tr>
-  <tr><td class="mut">LAN</td><td colspan=3>${summ.lan_iface||'?'} → ${summ.lan_cidr||'?'}</td></tr></table>
-  ${eps.length?'<table style="margin-top:8px"><tr><th>Туннель</th><th>Прио</th><th>Live</th><th>Health</th></tr>'+eps.map(e=>`<tr><td>${e.iface}</td><td>${e.priority}</td><td>${e.present?'✓':'✗'}</td><td>${e.health||'-'}</td></tr>`).join('')+'</table>':''}
+  <table><tr><td class="mut">Режим</td><td>${esc(summ.mode||'?')}</td><td class="mut">Путь</td><td>${pathLabel(summ.state)}</td></tr>
+  <tr><td class="mut">Kill switch</td><td>${summ.killswitch?'вкл':'выкл'}</td><td class="mut">Сбои</td><td>${esc(summ.fail_count??'?')}</td></tr>
+  <tr><td class="mut">LAN</td><td colspan=3>${esc(summ.lan_iface||'?')} → ${esc(summ.lan_cidr||'?')}</td></tr></table>
+  ${eps.length?'<table style="margin-top:8px"><tr><th>Туннель</th><th>Прио</th><th>Live</th><th>Health</th></tr>'+eps.map(e=>`<tr><td>${esc(e.iface)}</td><td>${esc(e.priority)}</td><td>${e.present?'✓':'✗'}</td><td>${esc(e.health||'-')}</td></tr>`).join('')+'</table>':''}
  </div>
  <div class="card"><h3>AmneziaWG: быстрые параметры${prim?' ('+prim+')':''}</h3>
-  ${prim?`<div class="row"><div style="flex:2"><label>Endpoint host</label><input id="f_eh" value="${pe.endpoint_host||''}"></div><div style="flex:1"><label>Port</label><input id="f_ep" value="${pe.endpoint_port||''}"></div></div>
+  ${prim?`<div class="row"><div style="flex:2"><label>Endpoint host</label><input id="f_eh" value="${esc(pe.endpoint_host||'')}"></div><div style="flex:1"><label>Port</label><input id="f_ep" value="${esc(pe.endpoint_port||'')}"></div></div>
   <label>Обфускация (Jc/Jmin/Jmax/S1/S2/H1-H4)</label><div class="grid">
-   ${['jc','jmin','jmax','s1','s2','h1','h2','h3','h4'].map(k=>`<div><label>${k}</label><input id="f_${k}" value="${pa[k]||''}"></div>`).join('')}
+   ${['jc','jmin','jmax','s1','s2','h1','h2','h3','h4'].map(k=>`<div><label>${k}</label><input id="f_${k}" value="${esc(pa[k]||'')}"></div>`).join('')}
   </div>
   <div class="row" style="margin-top:12px"><button onclick="publishQuick('${prim}')">Опубликовать изменения</button>
    <span class="mut small">роутер применит на следующем опросе и переподключит туннель</span></div>`
   :'<p class="mut">Нода ещё не прислала конфиг wg/awg.</p>'}
  </div>
  <div class="card"><h3>Импорт .conf (AmneziaWG / WireGuard)</h3>
-  <div class="row"><div style="flex:1"><label>Интерфейс</label><input id="imp_if" value="${prim||'awg0'}"></div></div>
+  <div class="row"><div style="flex:1"><label>Интерфейс</label><input id="imp_if" value="${esc(prim||'awg0')}"></div></div>
   <label>Вставьте содержимое .conf</label><textarea id="imp_conf" placeholder="[Interface]\nPrivateKey = ...\n[Peer]\n..."></textarea>
   <div class="row" style="margin-top:8px"><button onclick="importConf()">Импортировать и опубликовать</button></div>
  </div>
  <div class="card"><h3>Полный desired-снапшот (JSON)</h3>
   <p class="mut small">Что роутер применит целиком. Можно отредактировать вручную (splify + wg). Пусто = снять задание.</p>
-  <textarea id="desired">${rec.desired?JSON.stringify(rec.desired,null,2):''}</textarea>
+  <textarea id="desired">${rec.desired?esc(JSON.stringify(rec.desired,null,2)):''}</textarea>
   <div class="row" style="margin-top:8px"><button onclick="publishRaw()">Опубликовать снапшот</button>
    <button class="ghost" onclick="fillFromReport()">Взять из отчёта ноды</button>
    <button class="danger" onclick="clearDesired()">Снять задание</button></div>
@@ -575,8 +585,12 @@ async function openNode(node){cur=node;loadNodes();const rec=await api('GET','/a
 }
 function num(v){return v===''||v==null?undefined:v;}
 async function publishQuick(iface){const awg={};for(const k of ['jc','jmin','jmax','s1','s2','h1','h2','h3','h4']){const v=$('#f_'+k).value.trim();if(v!=='')awg[k]=v;}
- const peer={};const eh=$('#f_eh').value.trim(),ep=$('#f_ep').value.trim();if(eh)peer.endpoint_host=eh;if(ep)peer.endpoint_port=ep;
- const ifo={};if(Object.keys(awg).length)ifo.awg=awg;if(Object.keys(peer).length)ifo.peers=[peer];
+ // Carry the EXISTING peer identity: import replaces peers wholesale, so a peer
+ // sent without public_key/allowed_ips would recreate a broken, keyless peer.
+ const rec=window._rec||{};const base=(((((rec.last_report||{}).config||{}).wg||{})[iface]||{}).peers||[{}])[0]||{};
+ const peer=Object.assign({},base);delete peer.has_preshared_key;delete peer.preshared_key;
+ const eh=$('#f_eh').value.trim(),ep=$('#f_ep').value.trim();if(eh)peer.endpoint_host=eh;if(ep)peer.endpoint_port=ep;
+ const ifo={};if(Object.keys(awg).length)ifo.awg=awg;if(peer.public_key)ifo.peers=[peer];
  if(!Object.keys(ifo).length)return toast('нет изменений');
  try{const j=await api('PUT','/admin/api/nodes/'+cur+'/desired',{wg:{[iface]:ifo}});toast('опубликовано, gen '+j.generation);openNode(cur);}catch(e){toast('ошибка: '+e.message);} }
 async function importConf(){const iface=$('#imp_if').value.trim();const conf=$('#imp_conf').value;if(!conf.trim())return toast('пусто');
@@ -590,8 +604,8 @@ async function delNode(node){if(!confirm('Удалить ноду '+node+'?'))re
 async function showConnect(){const j=await api('GET','/admin/api/connect');const s=JSON.stringify(j);try{await navigator.clipboard.writeText(s);toast('JSON подключения скопирован');}catch(e){}
  window.prompt('Connection JSON — вставьте на роутере (LuCI → Дополнительно → API → Подключить, либо: splify-ctl connect):',s);}
 async function openMesh(){cur=null;loadNodes();const j=await api('GET','/admin/api/mesh');
- const rows=j.nodes.map(n=>`<tr><td><b>${n.node}</b></td><td><code>${n.lan||'—'}</code></td>
-  <td>${(n.want&&n.want.length)?n.want.map(s=>'<code>'+s+'</code>').join(' '):'<span class="mut">—</span>'}</td>
+ const rows=j.nodes.map(n=>`<tr><td><b>${esc(n.node)}</b></td><td><code>${esc(n.lan||'—')}</code></td>
+  <td>${(n.want&&n.want.length)?n.want.map(s=>'<code>'+esc(s)+'</code>').join(' '):'<span class="mut">—</span>'}</td>
   <td>${n.pending?'<span class="pill warn">ожидает</span>':'<span class="pill ok">применено</span>'}</td></tr>`).join('');
  $('#detail').innerHTML=`<h2>Site-to-site меш</h2>
   <p class="mut">Полный авто-меш: каждая LAN видит все остальные. Дашборд собирает подсети с нод и рассылает маршруты (без masquerade, реальные адреса). Добавил роутер — он автоматически в меше.</p>

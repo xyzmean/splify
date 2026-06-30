@@ -55,6 +55,7 @@ case "$1" in
             json_add_string "conf" ""
         json_close_object
         json_add_object "api_get";  json_close_object
+        json_add_object "api_token"; json_close_object
         json_add_object "api_set"
             json_add_string "data" ""
         json_close_object
@@ -109,6 +110,9 @@ case "$1" in
                 ;;
             api_get)
                 "$CTL" api-get
+                ;;
+            api_token)
+                "$CTL" api-token
                 ;;
             api_set)
                 input="$(cat)"; json_load "$input" 2>/dev/null
