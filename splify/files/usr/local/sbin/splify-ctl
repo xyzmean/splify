@@ -432,8 +432,13 @@ cmd_wg_import() {
     _tmp="$(mktemp 2>/dev/null || printf '/tmp/splify-wgimport.%s' "$$")"
     printf '%s\n' "$_doc" > "$_tmp"
 
-    # wipe existing peers; rebuild interface secret/addresses/dns/awg + peers
+    # wipe existing peers AND obfuscation knobs; the new .conf re-adds whatever it
+    # carries, so a leftover awg_* from a previous config can't linger and corrupt
+    # the handshake.
     while [ -n "$(g "network.@${_pt}[0]")" ]; do uci -q delete "network.@${_pt}[0]"; done
+    for _ao in $(uci show network 2>/dev/null | sed -n "s/^network\.$_if\.\(awg_[a-z0-9_]*\)=.*/\1/p"); do
+        uci -q delete "network.$_if.$_ao"
+    done
 
     _section=""; _have_peer=0
     # Read line by line; tolerate CRLF and inline spaces around '='.
@@ -772,6 +777,15 @@ _sites_reconcile() {  # subnet...
         esac
         ip route replace "$_s" dev "$SITES_TUN" 2>/dev/null
     done
+
+    # Backfill no-masq exclusions for sites that are unchanged but whose zone was
+    # empty when first applied (e.g. the tunnel got its firewall zone afterwards).
+    if [ -n "$_zone" ]; then
+        _md=" $(uci -q get "firewall.$_zone.masq_dest") "
+        for _s in $SITES_NEW; do
+            case "$_md" in *" !$_s "*) : ;; *) uci add_list "firewall.$_zone.masq_dest=!$_s"; _changed=1 ;; esac
+        done
+    fi
 
     uci -q delete splify.api.sites 2>/dev/null
     for _s in $SITES_NEW; do uci add_list "splify.api.sites=$_s"; done

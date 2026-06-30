@@ -461,6 +461,8 @@ class AdminHandler(Base):
             if not NODE_RE.match(iface or ''):
                 return self._json(400, {'error': 'bad iface'})
             snap = parse_conf(conf, iface)
+            if not ((snap.get('wg') or {}).get(iface, {}).get('peers')):
+                return self._json(400, {'error': 'no [Peer] section in config'})
             return self._set_desired(node, snap)
         m = re.match(r'^/admin/api/nodes/([^/]+)/token/regen$', path)
         if m:

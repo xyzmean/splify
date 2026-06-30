@@ -139,7 +139,7 @@ export default function ApiPanel() {
             placeholder={'{"internal":"http://10.8.0.1:8080","external":"https://vpn.example.net:8443","access_key":"…"}'} />
           <div className="mt-2 flex gap-2">
             <Button size="sm" disabled={!!busy} onClick={connect}>{busy === 'connect' ? 'Подключаю…' : 'Подключить'}</Button>
-            {enrolled && <Button size="sm" variant="outline" disabled={!!busy} onClick={enroll}>Перерегистрировать</Button>}
+            {enrolled && info.has_access_key && <Button size="sm" variant="outline" disabled={!!busy} onClick={enroll}>Перерегистрировать</Button>}
           </div>
         </CardContent>
       </Card>

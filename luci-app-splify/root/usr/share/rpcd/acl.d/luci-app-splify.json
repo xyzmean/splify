@@ -11,7 +11,7 @@
 			}
 		},
 		"write": {
-			"uci": [ "splify", "network" ],
+			"uci": [ "splify" ],
 			"ubus": {
 				"splify": [ "action", "config_import", "config_reveal", "wg_set", "wg_import", "wg_reveal", "api_set", "api_token", "token_regen", "connect", "enroll" ]
 			}
