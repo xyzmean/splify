@@ -217,8 +217,10 @@ config_get() { eval "$1=\"\${cfg_${2}_${3}:-$4}\""; }
     run fw_zone_glob_covering eth0; [ "$status" -ne 0 ]   # exact device, not a glob
 }
 
-# The simple Главная toggle relies on two allow-listed rpcd actions, on/off.
-@test "rpcd action handles on/off" {
-    run grep -nE '^[[:space:]]*(on|off)\)' splify/files/usr/libexec/rpcd/splify
+# The simple Главная toggle relies on two allow-listed actions, on/off. The rpcd
+# plugin is now a thin wrapper that funnels `action` into splify-ctl's cmd_action,
+# so the on)/off) branches live there (mirrored by the inbound REST API + agent).
+@test "action handler covers on/off" {
+    run grep -nE '^[[:space:]]*(on|off)\)' splify/files/usr/local/sbin/splify-ctl
     [ "$status" -eq 0 ]
 }

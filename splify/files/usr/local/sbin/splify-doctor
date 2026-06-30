@@ -253,15 +253,35 @@ if [ "$RU_ENABLED" = 1 ]; then
 else list_row ru false 0 "$RU_MIN_COUNT" "$RU_FILE" -1 true 0; fi
 
 # ---- zapret + nozapret -----------------------------------------------------
+# nozapret = the set zapret must NOT touch, and its membership is path-dependent:
+#   - VPN/wg path: the VPN(ipsum) prefixes STAY in the bypass (they are tunneled),
+#     so nozapret = privates + ru + ipsum — report that whole bypass;
+#   - zapret/wan fallback: those VPN prefixes MIGRATE OUT into zapret's own bypass,
+#     so the meaningful number is exactly the migrated set = the ipsum prefixes.
+# Like ru/cn (N3), derive the count from the SOURCE lists, not the raw live set —
+# the live set is empty before zapret ever starts (wg path, no failover yet) and
+# deliberately shrunk in the fallback, which made a working bypass read as 0.
+_nz_rfc=0; [ -s "$RU_FILE" ]    && _nz_rfc="$(grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' "$RU_FILE" 2>/dev/null)"
+_nz_ifc=0; [ -s "$IPSUM_FILE" ] && _nz_ifc="$(grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' "$IPSUM_FILE" 2>/dev/null)"
+_nz_full=$(( _nz_rfc + _nz_ifc ))
 if [ "$ZAPRET_ENABLED" = 1 ]; then
     if zapret_available; then
+        _live="$(set_count "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET" 2>/dev/null)"
+        case "$PATH_KIND" in
+            zapret|wan) _c="${_nz_ifc:-0}" ;;                                  # migrated VPN prefixes
+            *)          _c="${_live:-0}"; [ "${_c:-0}" -gt 0 ] 2>/dev/null || _c="$_nz_full" ;;  # full bypass
+        esac
         if zapret_running; then
-            _c="$(set_count "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET")"; _ok=true
-            [ "${_c:-0}" -ge "$ZAPRET_NOZAPRET_MIN" ] || { _ok=false; add FIXABLE zapret "nozapret bypass set has $_c entries (<$ZAPRET_NOZAPRET_MIN)" "splify-failover rebuilds it; or check the ru/cn list"; }
-            list_row nozapret true "${_c:-0}" "$ZAPRET_NOZAPRET_MIN" "" -1 "$_ok"
+            _ok=true
+            # Floor-check the LIVE set only on the VPN path, where it must be fully
+            # populated; in the zapret/wan fallback it is meant to be smaller.
+            case "$PATH_KIND" in zapret|wan) : ;; *)
+                [ "${_live:-0}" -ge "$ZAPRET_NOZAPRET_MIN" ] || { _ok=false; add FIXABLE zapret "nozapret bypass set has ${_live:-0} entries (<$ZAPRET_NOZAPRET_MIN)" "splify-failover rebuilds it; or check the ru/cn list"; } ;;
+            esac
+            list_row nozapret true "${_c:-0}" "$ZAPRET_NOZAPRET_MIN" "" -1 "$_ok" "$_nz_full"
         else
             add FIXABLE zapret "zapret is installed but not running" "the failover loop starts it; or: $ZAPRET_INIT start"
-            list_row nozapret true 0 "$ZAPRET_NOZAPRET_MIN" "" -1 false
+            list_row nozapret true "${_c:-0}" "$ZAPRET_NOZAPRET_MIN" "" -1 false "$_nz_full"
         fi
     else
         add WARN zapret "zapret is enabled in splify but not installed (auto-skipped)" "install zapret, or disable it in Services -> splify"
