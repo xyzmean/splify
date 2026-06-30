@@ -47,7 +47,7 @@ export default function App() {
   const wgIfaces = status ? (status.endpoints || []).map((e) => e.iface) : []
 
   return (
-    <div className="max-w-5xl mx-auto p-1 font-sans antialiased text-slate-900 dark:text-slate-100">
+    <div className="splify-react-root max-w-5xl mx-auto p-1 font-sans antialiased text-slate-900 dark:text-slate-100">
       <div className="flex items-center gap-1 border-b border-slate-200 dark:border-slate-800 mb-5">
         <TabBtn id="status" cur={tab} set={setTab}>Состояние</TabBtn>
         <TabBtn id="wg" cur={tab} set={setTab}>AmneziaWG</TabBtn>

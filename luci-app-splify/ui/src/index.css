@@ -49,11 +49,70 @@
   }
 }
 
+/* Scoped preflight: global preflight is disabled (tailwind.config corePlugins),
+   so these resets — the ones Tailwind utilities rely on (border defaults,
+   box-sizing) plus the element normalisations — apply ONLY inside the React
+   root and never leak into the surrounding LuCI page. */
 @layer base {
-  * {
-    @apply border-border;
+  .splify-react-root {
+    color: hsl(var(--foreground));
+    line-height: 1.5;
+    -webkit-text-size-adjust: 100%;
   }
-  body {
-    @apply text-foreground;
+  .splify-react-root *,
+  .splify-react-root ::before,
+  .splify-react-root ::after {
+    box-sizing: border-box;
+    border-width: 0;
+    border-style: solid;
+    border-color: hsl(var(--border));
+  }
+  .splify-react-root h1,
+  .splify-react-root h2,
+  .splify-react-root h3,
+  .splify-react-root h4,
+  .splify-react-root p,
+  .splify-react-root figure,
+  .splify-react-root ol,
+  .splify-react-root ul {
+    margin: 0;
+  }
+  .splify-react-root h1,
+  .splify-react-root h2,
+  .splify-react-root h3,
+  .splify-react-root h4 {
+    font-size: inherit;
+    font-weight: inherit;
+  }
+  .splify-react-root ol,
+  .splify-react-root ul {
+    list-style: none;
+    padding: 0;
+  }
+  .splify-react-root a {
+    color: inherit;
+    text-decoration: inherit;
+  }
+  .splify-react-root button,
+  .splify-react-root input,
+  .splify-react-root select,
+  .splify-react-root textarea {
+    font: inherit;
+    color: inherit;
+    margin: 0;
+  }
+  .splify-react-root button {
+    background: none;
+    cursor: pointer;
+  }
+  .splify-react-root :disabled {
+    cursor: default;
+  }
+  .splify-react-root table {
+    border-collapse: collapse;
+  }
+  .splify-react-root svg {
+    display: block;
+    vertical-align: middle;
   }
 }

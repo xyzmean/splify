@@ -53,9 +53,10 @@ export const rpc = {
   events: (): Promise<{ events: EventRow[] }> => decl('events')(),
   action: (name: string, iface = ''): Promise<{ code: number; stdout: string }> =>
     decl('action', ['name', 'iface'])(name, iface),
-  exportCfg: (reveal = 0): Promise<any> => decl('config_export', ['reveal'])(reveal),
+  // reveal=1 returns private keys → write-gated method (kept out of the read ACL).
+  exportCfg: (reveal = 0): Promise<any> => reveal ? decl('config_reveal')() : decl('config_export')(),
   importCfg: (data: any): Promise<any> => decl('config_import', ['data'])(JSON.stringify(data)),
-  wgGet: (iface: string, reveal = 0): Promise<any> => decl('wg_get', ['iface', 'reveal'])(iface, reveal),
+  wgGet: (iface: string, reveal = 0): Promise<any> => reveal ? decl('wg_reveal', ['iface'])(iface) : decl('wg_get', ['iface'])(iface),
   wgSet: (iface: string, data: any): Promise<any> => decl('wg_set', ['iface', 'data'])(iface, JSON.stringify(data)),
   wgImport: (iface: string, conf: string): Promise<any> => decl('wg_import', ['iface', 'conf'])(iface, conf),
   apiGet: (): Promise<ApiInfo> => decl('api_get')(),

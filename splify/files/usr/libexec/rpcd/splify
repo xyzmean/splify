@@ -36,15 +36,16 @@ case "$1" in
             json_add_string "name" ""
             json_add_string "iface" ""
         json_close_object
-        json_add_object "config_export"
-            json_add_int "reveal" 0
-        json_close_object
+        json_add_object "config_export"; json_close_object
+        json_add_object "config_reveal"; json_close_object
         json_add_object "config_import"
             json_add_string "data" ""
         json_close_object
         json_add_object "wg_get"
             json_add_string "iface" ""
-            json_add_int "reveal" 0
+        json_close_object
+        json_add_object "wg_reveal"
+            json_add_string "iface" ""
         json_close_object
         json_add_object "wg_set"
             json_add_string "iface" ""
@@ -84,9 +85,11 @@ case "$1" in
                 "$CTL" action "$name" "$iface"
                 ;;
             config_export)
-                input="$(cat)"; json_load "$input" 2>/dev/null
-                json_get_var reveal reveal
-                if [ "$reveal" = "1" ]; then "$CTL" export --reveal; else "$CTL" export; fi
+                # read-ACL: ALWAYS masked. Secrets only via config_reveal (write).
+                "$CTL" export
+                ;;
+            config_reveal)
+                "$CTL" export --reveal
                 ;;
             config_import)
                 input="$(cat)"; json_load "$input" 2>/dev/null
@@ -94,9 +97,15 @@ case "$1" in
                 printf '%s' "$data" | "$CTL" import
                 ;;
             wg_get)
+                # read-ACL: ALWAYS masked. Private key only via wg_reveal (write).
                 input="$(cat)"; json_load "$input" 2>/dev/null
-                json_get_var iface iface; json_get_var reveal reveal
-                if [ "$reveal" = "1" ]; then "$CTL" wg-get "$iface" --reveal; else "$CTL" wg-get "$iface"; fi
+                json_get_var iface iface
+                "$CTL" wg-get "$iface"
+                ;;
+            wg_reveal)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var iface iface
+                "$CTL" wg-get "$iface" --reveal
                 ;;
             wg_set)
                 input="$(cat)"; json_load "$input" 2>/dev/null

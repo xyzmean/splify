@@ -1,6 +1,10 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
   darkMode: ["class"],
+  // The bundle's CSS is injected into LuCI's <head>, so Tailwind's global
+  // preflight would restyle the whole host UI (body/headings/buttons/tables).
+  // Disable it and re-apply the resets scoped to #splify-root in index.css.
+  corePlugins: { preflight: false },
   content: [
     './pages/**/*.{ts,tsx}',
     './components/**/*.{ts,tsx}',
