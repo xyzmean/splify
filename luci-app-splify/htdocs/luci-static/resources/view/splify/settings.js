@@ -5,6 +5,10 @@
 'require uci';
 'require network';
 
+// Cache-buster for the bundled assets — see the note in home.js. Bump together
+// with the VERSION file.
+var ASSET_V = '?v=0.2.0';
+
 return view.extend({
 	load: function () {
 		return Promise.all([
@@ -28,7 +32,7 @@ return view.extend({
 			var link = document.createElement('link');
 			link.id = 'splify-settings-css';
 			link.rel = 'stylesheet';
-			link.href = L.resource('splify/splify-index.css');
+			link.href = L.resource('splify/splify-index.css') + ASSET_V;
 			document.head.appendChild(link);
 		}
 
@@ -43,7 +47,7 @@ return view.extend({
 		} else if (!document.getElementById('splify-settings-js')) {
 			var script = document.createElement('script');
 			script.id = 'splify-settings-js';
-			script.src = L.resource('splify/splify-settings.js');
+			script.src = L.resource('splify/splify-settings.js') + ASSET_V;
 			script.type = 'module';
 			document.head.appendChild(script);
 		}
