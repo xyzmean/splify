@@ -518,6 +518,20 @@ cmd_action() {
                 ''|*[!A-Za-z0-9_.-]*) _out="invalid or missing iface"; _code=2 ;;
                 *) _out="$(/usr/local/sbin/splify-firewall fix "$_iface" 2>&1)"; _code=$? ;;
             esac ;;
+        bounce)
+            # Restart ONE wg/awg interface (dashboard "перезапустить туннель").
+            # Confined to real tunnels the same way wg-set is — a caller can never
+            # bounce wan/lan. The failover daemon re-probes it on its next tick.
+            case "$_iface" in
+                ''|*[!A-Za-z0-9_]*) _out="invalid or missing iface"; _code=2 ;;
+                *)  if iface_is_wg "$_iface"; then
+                        ifdown "$_iface" >/dev/null 2>&1
+                        ifup   "$_iface" >/dev/null 2>&1
+                        _out="bounced $_iface"; _code=0
+                    else
+                        _out="$_iface is not a wg/awg interface"; _code=2
+                    fi ;;
+            esac ;;
         *) _out="unknown action: ${_name:-(none)}"; _code=2 ;;
     esac
     json_init; json_add_int code "$_code"; json_add_string stdout "$_out"; json_dump

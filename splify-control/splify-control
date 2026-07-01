@@ -46,6 +46,14 @@ LOCK = threading.Lock()        # serialise node-file read/modify/write
 NODE_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 MAX_BODY = 2 * 1024 * 1024     # 2 MiB cap on any request body
 
+# One-shot maintenance ops the dashboard may queue for a node. Mirrors (a subset
+# of) splify-ctl's own allow-list — the agent funnels every action through
+# `splify-ctl action`, which re-validates, so this is defence in depth, not the
+# only gate. `bounce` restarts one wg/awg interface (ifdown/ifup).
+ACTION_ALLOW = {'apply', 'restart', 'disable', 'on', 'off', 'bounce', 'fw_fix',
+                'update_ipsum', 'update_ru', 'update_domains'}
+IFACE_RE = re.compile(r'^[A-Za-z0-9_]{1,15}$')
+
 
 # ---- storage ---------------------------------------------------------------
 def node_path(node):
@@ -103,6 +111,7 @@ def list_nodes():
             'applied_gen': rep.get('applied_gen', 0),
             'has_desired': bool(rec.get('desired')),
             'pending': bool(rec.get('desired')) and rep.get('applied_gen', 0) < rec.get('generation', 0),
+            'actions_pending': len(rec.get('actions') or []),
             'last_seen': rec.get('last_seen', 0),
             'overall': (rep.get('status') or {}).get('overall', '?'),
             'state': summ.get('state', '?'),
@@ -372,6 +381,12 @@ class NodeHandler(Base):
                          'state': summ.get('state', '?')})
             rec['history'] = hist[-200:]
             applied = int(report.get('applied_gen', 0) or 0)
+            # Actions channel: the node reports the last action generation it ran;
+            # once it has caught up, the queued one-shots are done — drop them so
+            # they are never re-sent (and re-run) on a later poll.
+            applied_act = int(report.get('applied_action_gen', 0) or 0)
+            if applied_act >= int(rec.get('action_gen', 0) or 0):
+                rec['actions'] = []
             save_node(rec)
         # Propagate this node's freshly-reported LAN into the mesh, then re-read
         # so a newly-computed sites push reaches the node on this same poll.
@@ -380,11 +395,20 @@ class NodeHandler(Base):
             rec = load_node(node) or {}
             generation = int(rec.get('generation', 0))
             desired = rec.get('desired')
+            actions = rec.get('actions') or []
+            action_gen = int(rec.get('action_gen', 0) or 0)
+        resp = {}
         if desired and applied < generation:
             resp = dict(desired)
             resp['generation'] = generation
+        if actions and applied_act < action_gen:
+            resp['actions'] = actions
+            resp['action_gen'] = action_gen
+            resp.setdefault('generation', generation)
+        if resp:
             return self._json(200, resp)
-        return self._json(200, {'noop': True, 'generation': generation})
+        return self._json(200, {'noop': True, 'generation': generation,
+                                'action_gen': action_gen})
 
     def do_GET(self):
         # a tiny health probe so you can curl the public endpoint
@@ -463,7 +487,38 @@ class AdminHandler(Base):
             snap = parse_conf(conf, iface)
             if not ((snap.get('wg') or {}).get(iface, {}).get('peers')):
                 return self._json(400, {'error': 'no [Peer] section in config'})
-            return self._set_desired(node, snap)
+            # MERGE into the pending desired doc (don't clobber e.g. queued
+            # splify-settings the node hasn't applied yet).
+            with LOCK:
+                rec = load_node(node)
+                base = dict((rec or {}).get('desired') or {})
+            base_wg = dict(base.get('wg') or {})
+            base_wg.update(snap['wg'])
+            base['wg'] = base_wg
+            return self._set_desired(node, base)
+        m = re.match(r'^/admin/api/nodes/([^/]+)/action$', path)
+        if m:
+            try:
+                body = json.loads(self._body() or b'{}')
+            except ValueError:
+                return self._json(400, {'error': 'bad json'})
+            name = str(body.get('name') or '').strip()
+            iface = str(body.get('iface') or '').strip()
+            if name not in ACTION_ALLOW:
+                return self._json(400, {'error': 'unknown action'})
+            if name in ('bounce', 'fw_fix') and not IFACE_RE.match(iface):
+                return self._json(400, {'error': 'bad iface'})
+            with LOCK:
+                rec = load_node(m.group(1))
+                if not rec:
+                    return self._json(404, {'error': 'no such node'})
+                acts = rec.get('actions') or []
+                acts.append({'name': name, 'iface': iface})
+                rec['actions'] = acts[-10:]          # sanity cap on the queue
+                rec['action_gen'] = int(rec.get('action_gen', 0) or 0) + 1
+                save_node(rec)
+            return self._json(200, {'ok': True, 'action_gen': rec['action_gen'],
+                                    'actions': rec['actions']})
         m = re.match(r'^/admin/api/nodes/([^/]+)/token/regen$', path)
         if m:
             with LOCK:
@@ -547,6 +602,13 @@ ADMIN_HTML = r"""<!doctype html>
  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
  table{width:100%;border-collapse:collapse;font-size:13px} td,th{text-align:left;padding:5px 8px;border-bottom:1px solid var(--bd)}
  code{background:#0d0f13;padding:1px 6px;border-radius:5px;font-size:12px} .sp{flex:1} .small{font-size:12px}
+ .g2{display:grid;grid-template-columns:1fr 1fr;gap:10px} .g3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+ details{border:1px solid var(--bd);border-radius:10px;padding:10px 16px;margin-bottom:16px;background:var(--card)}
+ details summary{cursor:pointer;font-weight:600;font-size:15px;padding:4px 0}
+ .btns{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+ .etbl input,.etbl select{padding:5px 8px} .etbl td{border-bottom:none;padding:3px 4px}
+ .chip{display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;user-select:none}
+ .chip input{width:auto}
  .toast{position:fixed;right:16px;bottom:16px;background:#222838;border:1px solid var(--bd);padding:10px 14px;border-radius:8px;opacity:0;transition:.2s}
  .toast.show{opacity:1}
 </style></head><body>
@@ -579,25 +641,89 @@ async function loadNodes(){const j=await api('GET','/admin/api/nodes');nodes=j.n
  for(const n of nodes){const d=document.createElement('div');d.className='node'+(cur===n.node?' sel':'');d.onclick=()=>openNode(n.node);
   d.innerHTML=`<div class="row"><b>${esc(n.node)}</b><span class="sp"></span><span class="pill ${sev(n.overall)}">${esc(n.overall)}</span></div>
    <div class="small mut">${pathLabel(n.state)} · ${esc(n.mode)} · ${ago(n.last_seen)}</div>
-   ${n.pending?'<div class="small" style="color:var(--warn)">● ожидает применения (gen '+n.generation+')</div>':''}`;L.appendChild(d);} }
+   ${n.pending?'<div class="small" style="color:var(--warn)">● ожидает применения (gen '+n.generation+')</div>':''}
+   ${n.actions_pending?'<div class="small" style="color:var(--warn)">● действий в очереди: '+n.actions_pending+'</div>':''}`;L.appendChild(d);} }
+// ---- form helpers -----------------------------------------------------------
+function fld(id,label,val,ph){return `<div><label>${label}</label><input id="${id}" value="${esc(val==null?'':val)}"${ph?` placeholder="${esc(ph)}"`:''}></div>`;}
+function selfld(id,label,val,opts){return `<div><label>${label}</label><select id="${id}">${opts.map(o=>`<option value="${o[0]}"${String(val)===o[0]?' selected':''}>${o[1]}</option>`).join('')}</select></div>`;}
+function lst(v){return Array.isArray(v)?v.join(', '):(v||'');}
+function unlst(s){return s.split(/[\s,]+/).filter(Boolean);}
 async function openNode(node){cur=node;loadNodes();const rec=await api('GET','/admin/api/nodes/'+node);const rep=rec.last_report||{};const st=rep.status||{};const summ=st.summary||{};const eps=(st.endpoints||[]);
- const wg=(rep.config&&rep.config.wg)||{};const ifaces=Object.keys(wg);const prim=ifaces[0]||'';const pa=(wg[prim]&&wg[prim].awg)||{};const pe=((wg[prim]&&wg[prim].peers)||[{}])[0]||{};
+ const cfg=rep.config||{};const spl=cfg.splify||{};const g=spl.global||{};
+ const wg=cfg.wg||{};const ifaces=Object.keys(wg);const prim=ifaces[0]||'';
+ const pendA=rec.actions||[];
+ window._rec=rec;
+ const onoff=[['1','вкл'],['0','выкл']];
  $('#detail').innerHTML=`
  <h2>${esc(node)} <span class="pill ${sev(st.overall||'?')}">${esc(st.overall||'?')}</span></h2>
- <p class="mut small">Токен ноды: <code>${esc(rec.token)}</code> · generation <b>${esc(rec.generation)}</b> · применено <b>${esc(rep.applied_gen||0)}</b> · ${ago(rec.last_seen)}</p>
+ <p class="mut small">Токен ноды: <code>${esc(rec.token)}</code> · конфиг gen <b>${esc(rec.generation)}</b> / применено <b>${esc(rep.applied_gen||0)}</b> · действия gen <b>${esc(rec.action_gen||0)}</b> · ${ago(rec.last_seen)}</p>
  <div class="card"><h3>Состояние</h3>
   <table><tr><td class="mut">Режим</td><td>${esc(summ.mode||'?')}</td><td class="mut">Путь</td><td>${pathLabel(summ.state)}</td></tr>
   <tr><td class="mut">Kill switch</td><td>${summ.killswitch?'вкл':'выкл'}</td><td class="mut">Сбои</td><td>${esc(summ.fail_count??'?')}</td></tr>
   <tr><td class="mut">LAN</td><td colspan=3>${esc(summ.lan_iface||'?')} → ${esc(summ.lan_cidr||'?')}</td></tr></table>
-  ${eps.length?'<table style="margin-top:8px"><tr><th>Туннель</th><th>Прио</th><th>Live</th><th>Health</th></tr>'+eps.map(e=>`<tr><td>${esc(e.iface)}</td><td>${esc(e.priority)}</td><td>${e.present?'✓':'✗'}</td><td>${esc(e.health||'-')}</td></tr>`).join('')+'</table>':''}
+  ${eps.length?'<table style="margin-top:8px"><tr><th>Туннель</th><th>Прио</th><th>Live</th><th>Health</th><th></th></tr>'+eps.map(e=>`<tr><td>${esc(e.iface)}</td><td>${esc(e.priority)}</td><td>${e.present?'✓':'✗'}</td><td>${esc(e.health||'-')}</td><td><button class="ghost small" onclick="runAction('bounce','${esc(e.iface)}')">Перезапустить</button></td></tr>`).join('')+'</table>':''}
  </div>
- <div class="card"><h3>AmneziaWG: быстрые параметры${prim?' ('+prim+')':''}</h3>
-  ${prim?`<div class="row"><div style="flex:2"><label>Endpoint host</label><input id="f_eh" value="${esc(pe.endpoint_host||'')}"></div><div style="flex:1"><label>Port</label><input id="f_ep" value="${esc(pe.endpoint_port||'')}"></div></div>
-  <label>Обфускация (Jc/Jmin/Jmax/S1/S2/H1-H4)</label><div class="grid">
-   ${['jc','jmin','jmax','s1','s2','h1','h2','h3','h4'].map(k=>`<div><label>${k}</label><input id="f_${k}" value="${esc(pa[k]||'')}"></div>`).join('')}
+ <div class="card"><h3>Действия</h3>
+  <p class="mut small">Выполняются на роутере при следующем опросе агента (≤ интервала опроса), ровно один раз.</p>
+  <div class="btns">
+   <button class="ghost" onclick="runAction('apply')">Применить конфиг</button>
+   <button class="ghost" onclick="runAction('restart')">Перезапустить сервис</button>
+   <button class="ghost" onclick="runAction('update_ipsum')">Обновить ipsum</button>
+   <button class="ghost" onclick="runAction('update_ru')">Обновить ru/cn</button>
+   <button class="ghost" onclick="runAction('update_domains')">Обновить домены</button>
+   <button class="ghost" onclick="runAction('on')">Включить splify</button>
+   <button class="danger" onclick="runAction('off')">Выключить splify</button>
   </div>
-  <div class="row" style="margin-top:12px"><button onclick="publishQuick('${prim}')">Опубликовать изменения</button>
-   <span class="mut small">роутер применит на следующем опросе и переподключит туннель</span></div>`
+  ${pendA.length?'<p class="small" style="color:var(--warn);margin:10px 0 0">В очереди: '+pendA.map(a=>esc(a.name+(a.iface?' '+a.iface:''))).join(', ')+'</p>':''}
+ </div>
+ <div class="card"><h3>Настройки splify</h3>
+  <div class="g3">
+   ${selfld('s_mode','Режим',g.mode||'blocklist',[['blocklist','blocklist (по спискам)'],['full','full (всё в VPN)'],['split','split (только свои списки)']])}
+   ${selfld('s_killswitch','Kill switch',g.killswitch||'0',onoff)}
+   ${fld('s_interval','Интервал failover, с',g.interval||'','180')}
+  </div>
+  <div class="g3" style="margin-top:6px">
+   ${fld('s_lan_iface','LAN-интерфейс',g.lan_iface||'','br-lan')}
+   ${fld('s_lan_cidr','LAN CIDR (доп.)',g.lan_cidr||'','пусто = авто')}
+   ${selfld('s_zapret_enabled','zapret',g.zapret_enabled==null?'1':g.zapret_enabled,onoff)}
+  </div>
+  <div class="g2" style="margin-top:6px">
+   ${selfld('s_ipsum_enabled','Список ipsum (VPN)',g.ipsum_enabled==null?'1':g.ipsum_enabled,onoff)}
+   ${fld('s_ipsum_url','URL ipsum',g.ipsum_url||'')}
+   ${selfld('s_ru_enabled','Список ru/cn (напрямую)',g.ru_enabled==null?'1':g.ru_enabled,onoff)}
+   ${fld('s_ru_url','URL ru/cn',g.ru_url||'')}
+   ${fld('s_vpn_domains_url','URL VPN-доменов',g.vpn_domains_url||'')}
+   ${fld('s_ignore_domains_url','URL ignore-доменов',g.ignore_domains_url||'')}
+  </div>
+  <div class="g2" style="margin-top:6px">
+   ${fld('s_vpn_cidr','VPN-подсети (через запятую)',lst(g.vpn_cidr))}
+   ${fld('s_direct_cidr','Direct-подсети',lst(g.direct_cidr))}
+   ${fld('s_vpn_domain','VPN-домены',lst(g.vpn_domain))}
+   ${fld('s_direct_domain','Direct-домены',lst(g.direct_domain))}
+  </div>
+  <div class="row" style="margin-top:12px"><button onclick="pubGlobal()">Опубликовать настройки</button>
+   <span class="mut small">роутер применит на следующем опросе</span></div>
+ </div>
+ <div class="card"><h3>Failover-туннели (endpoints)</h3>
+  <table class="etbl" id="eps"><tr><th>Интерфейс</th><th>Приоритет</th><th>Тип</th><th></th></tr>
+   ${(spl.endpoints||[]).map(e=>epRow(e.iface,e.priority,e.type)).join('')}
+  </table>
+  <div class="row" style="margin-top:8px"><button class="ghost" onclick="addEp()">+ туннель</button><span class="sp"></span><button onclick="pubEps()">Опубликовать туннели</button></div>
+ </div>
+ <div class="card"><h3>Правила устройств LAN</h3>
+  <table class="etbl" id="devs"><tr><th>IP/CIDR</th><th>Режим</th><th></th></tr>
+   ${(spl.devices||[]).map(d=>devRow(d.ip,d.mode)).join('')}
+  </table>
+  <div class="row" style="margin-top:8px"><button class="ghost" onclick="addDev()">+ правило</button><span class="sp"></span><button onclick="pubDevs()">Опубликовать правила</button></div>
+ </div>
+ <div class="card"><h3>Туннель: параметры AmneziaWG/WG</h3>
+  ${prim?`<div class="row"><div style="flex:1"><label>Интерфейс</label><select id="w_if" onchange="fillWg()">${ifaces.map(i=>`<option${i===prim?' selected':''}>${esc(i)}</option>`).join('')}</select></div>
+   <div style="flex:2"><label>Endpoint host</label><input id="f_eh"></div><div style="flex:1"><label>Port</label><input id="f_ep"></div></div>
+  <label>Обфускация (Jc/Jmin/Jmax/S1/S2/H1-H4)</label><div class="grid">
+   ${['jc','jmin','jmax','s1','s2','h1','h2','h3','h4'].map(k=>`<div><label>${k}</label><input id="f_${k}"></div>`).join('')}
+  </div>
+  <div class="row" style="margin-top:12px"><button onclick="publishQuick($('#w_if').value)">Опубликовать изменения</button>
+   <span class="mut small">роутер применит и переподключит туннель</span></div>`
   :'<p class="mut">Нода ещё не прислала конфиг wg/awg.</p>'}
  </div>
  <div class="card"><h3>Импорт .conf (AmneziaWG / WireGuard)</h3>
@@ -605,18 +731,48 @@ async function openNode(node){cur=node;loadNodes();const rec=await api('GET','/a
   <label>Вставьте содержимое .conf</label><textarea id="imp_conf" placeholder="[Interface]\nPrivateKey = ...\n[Peer]\n..."></textarea>
   <div class="row" style="margin-top:8px"><button onclick="importConf()">Импортировать и опубликовать</button></div>
  </div>
- <div class="card"><h3>Полный desired-снапшот (JSON)</h3>
-  <p class="mut small">Что роутер применит целиком. Можно отредактировать вручную (splify + wg). Пусто = снять задание.</p>
+ <details><summary>Продвинутое: desired-снапшот (JSON)</summary>
+  <p class="mut small">Что роутер применит целиком. Формы выше редактируют этот же документ по частям. Пусто = снять задание.</p>
   <textarea id="desired">${rec.desired?esc(JSON.stringify(rec.desired,null,2)):''}</textarea>
-  <div class="row" style="margin-top:8px"><button onclick="publishRaw()">Опубликовать снапшот</button>
+  <div class="row" style="margin:8px 0"><button onclick="publishRaw()">Опубликовать снапшот</button>
    <button class="ghost" onclick="fillFromReport()">Взять из отчёта ноды</button>
    <button class="danger" onclick="clearDesired()">Снять задание</button></div>
- </div>
+ </details>
  <div class="card"><h3>Опасное</h3><div class="row"><button class="ghost" onclick="regen('${node}')">Сменить токен</button>
   <button class="danger" onclick="delNode('${node}')">Удалить ноду</button></div></div>`;
- window._rec=rec;
+ if(prim)fillWg();
 }
-function num(v){return v===''||v==null?undefined:v;}
+// wg quick-params: (re)fill the inputs for the selected iface
+function fillWg(){const rec=window._rec||{};const iface=$('#w_if')?$('#w_if').value:'';const w=((((rec.last_report||{}).config||{}).wg||{})[iface])||{};
+ const pa=w.awg||{};const pe=(w.peers||[{}])[0]||{};
+ $('#f_eh').value=pe.endpoint_host||'';$('#f_ep').value=pe.endpoint_port||'';
+ for(const k of ['jc','jmin','jmax','s1','s2','h1','h2','h3','h4'])$('#f_'+k).value=pa[k]||'';}
+// ---- publish: merge a fragment into the CURRENT desired doc, never clobber it —
+// two form publishes in a row (settings, then endpoints) must both survive until
+// the node applies them.
+function mergeDesired(frag){const d=JSON.parse(JSON.stringify((window._rec&&window._rec.desired)||{}));
+ for(const k of Object.keys(frag)){
+  if(k==='splify'){d.splify=d.splify||{};for(const s of Object.keys(frag.splify))d.splify[s]=frag.splify[s];}
+  else if(k==='wg'){d.wg=d.wg||{};Object.assign(d.wg,frag.wg);}
+  else d[k]=frag[k];}
+ return d;}
+async function publish(frag,msg){try{const j=await api('PUT','/admin/api/nodes/'+cur+'/desired',mergeDesired(frag));toast((msg||'опубликовано')+', gen '+j.generation);openNode(cur);}catch(e){toast('ошибка: '+e.message);}}
+async function runAction(name,iface){try{const j=await api('POST','/admin/api/nodes/'+cur+'/action',{name,iface:iface||''});toast('в очереди: '+name+(iface?' '+iface:''));openNode(cur);}catch(e){toast('ошибка: '+e.message);}}
+function pubGlobal(){const g={};
+ for(const k of ['mode','killswitch','interval','lan_iface','lan_cidr','zapret_enabled','ipsum_enabled','ipsum_url','ru_enabled','ru_url','vpn_domains_url','ignore_domains_url']){const el=$('#s_'+k);if(el)g[k]=el.value.trim();}
+ for(const k of ['vpn_cidr','direct_cidr','vpn_domain','direct_domain']){const el=$('#s_'+k);if(el)g[k]=unlst(el.value);}
+ publish({splify:{global:g}},'настройки опубликованы');}
+// ---- endpoints / devices editors -------------------------------------------
+function epRow(i,p,t){return `<tr><td><input value="${esc(i||'')}" placeholder="awg0"></td><td><input value="${esc(p||'')}" placeholder="10"></td><td><select><option value="wg"${t!=='singbox'?' selected':''}>wg/awg</option><option value="singbox"${t==='singbox'?' selected':''}>singbox (3.0)</option></select></td><td><button class="ghost" onclick="this.closest('tr').remove()">✕</button></td></tr>`;}
+function devRow(ip,m){return `<tr><td><input value="${esc(ip||'')}" placeholder="192.168.1.10"></td><td><select><option value="vpn"${m!=='direct'?' selected':''}>через VPN</option><option value="direct"${m==='direct'?' selected':''}>напрямую</option></select></td><td><button class="ghost" onclick="this.closest('tr').remove()">✕</button></td></tr>`;}
+function addEp(){$('#eps').insertAdjacentHTML('beforeend',epRow('','',''));}
+function addDev(){$('#devs').insertAdjacentHTML('beforeend',devRow('',''));}
+function pubEps(){const rows=[...document.querySelectorAll('#eps tr')].slice(1);const eps=[];
+ for(const r of rows){const[i,p]=r.querySelectorAll('input');const t=r.querySelector('select');if(i.value.trim())eps.push({iface:i.value.trim(),priority:p.value.trim()||'99',type:t.value});}
+ publish({splify:{endpoints:eps}},'туннели опубликованы');}
+function pubDevs(){const rows=[...document.querySelectorAll('#devs tr')].slice(1);const devs=[];
+ for(const r of rows){const ip=r.querySelector('input');const m=r.querySelector('select');if(ip.value.trim())devs.push({ip:ip.value.trim(),mode:m.value});}
+ publish({splify:{devices:devs}},'правила опубликованы');}
 async function publishQuick(iface){const awg={};for(const k of ['jc','jmin','jmax','s1','s2','h1','h2','h3','h4']){const v=$('#f_'+k).value.trim();if(v!=='')awg[k]=v;}
  // Carry the EXISTING peer identity: import replaces peers wholesale, so a peer
  // sent without public_key/allowed_ips would recreate a broken, keyless peer.
@@ -625,7 +781,7 @@ async function publishQuick(iface){const awg={};for(const k of ['jc','jmin','jma
  const eh=$('#f_eh').value.trim(),ep=$('#f_ep').value.trim();if(eh)peer.endpoint_host=eh;if(ep)peer.endpoint_port=ep;
  const ifo={};if(Object.keys(awg).length)ifo.awg=awg;if(peer.public_key)ifo.peers=[peer];
  if(!Object.keys(ifo).length)return toast('нет изменений');
- try{const j=await api('PUT','/admin/api/nodes/'+cur+'/desired',{wg:{[iface]:ifo}});toast('опубликовано, gen '+j.generation);openNode(cur);}catch(e){toast('ошибка: '+e.message);} }
+ publish({wg:{[iface]:ifo}},'туннель опубликован');}
 async function importConf(){const iface=$('#imp_if').value.trim();const conf=$('#imp_conf').value;if(!conf.trim())return toast('пусто');
  try{const j=await api('POST','/admin/api/nodes/'+cur+'/import-conf',{iface,conf});toast('импорт опубликован, gen '+j.generation);openNode(cur);}catch(e){toast('ошибка: '+e.message);} }
 async function publishRaw(){let d;const t=$('#desired').value.trim();if(!t)return clearDesired();try{d=JSON.parse(t);}catch(e){return toast('некорректный JSON');}

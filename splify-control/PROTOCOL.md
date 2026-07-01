@@ -89,12 +89,15 @@ Content-Type: application/json
   "ts": 1782742149,
   "agent": "splify-agent/1",
   "applied_gen": 3,
+  "applied_action_gen": 2,
   "status": { ...splify-doctor --json... },
   "config": { ...masked snapshot, see §5... }
 }
 ```
 
 - `applied_gen` — the generation the router has already converged to.
+- `applied_action_gen` — the one-shot **action** generation the router has
+  already executed (see «Actions» below).
 - `status` — the full `splify-doctor --json` (overall, summary, endpoints, lists,
   checks). The dashboard renders this.
 - `config` — the current node snapshot with **secrets masked** (no private keys).
@@ -102,7 +105,7 @@ Content-Type: application/json
 Response — **no pending change** (the common case):
 
 ```json
-{ "noop": true, "generation": 3 }
+{ "noop": true, "generation": 3, "action_gen": 2 }
 ```
 
 Response — **a change is pending** (`applied_gen < generation`): the **desired
@@ -117,6 +120,23 @@ The router applies it, persists `generation`, and reports the new `applied_gen`
 on the next poll — so the dashboard then returns `noop` and the router does **not
 re-apply** (this is what prevents a tunnel-bounce loop). Errors: `401` bad token,
 `403` not enrolled, `400` bad body.
+
+### Actions (one-shot ops)
+
+Besides the *declarative* desired snapshot, the dashboard can queue **one-shot
+actions** (`POST /admin/api/nodes/<id>/action` with `{"name": .., "iface": ..}`).
+They ride the same poll reply, alone or alongside a desired snapshot:
+
+```json
+{ "generation": 4, "actions": [ {"name": "bounce", "iface": "awg0"} ], "action_gen": 3 }
+```
+
+The router runs each through `splify-ctl action <name> [iface]` (allow-listed,
+iface-validated on BOTH sides), persists `action_gen`, and reports it back as
+`applied_action_gen` — once caught up, the server drops the queue, so an action
+executes **exactly once** (a reboot never replays it). Allowed names: `apply`,
+`restart`, `disable`, `on`, `off`, `bounce` (restart one wg/awg iface),
+`fw_fix`, `update_ipsum`, `update_ru`, `update_domains`.
 
 ### Site-to-site mesh (`sites`)
 

@@ -32,6 +32,9 @@ STAT_FILE=/var/run/splify-agent.status
 # look like "never applied" and re-bounce the tunnel on the first poll. It only
 # changes when a real config push is applied, so flash wear is negligible.
 GEN_FILE=/etc/splify/agent.gen
+# Same for the one-shot ACTIONS generation: tmpfs would re-run every queued
+# action (e.g. a tunnel bounce) after each reboot.
+ACT_FILE=/etc/splify/agent.act
 AGENT_TAG=splify-agent
 
 alog() { logger -t "$AGENT_TAG" "$*"; }
@@ -75,6 +78,7 @@ poll_once() {
     [ -n "$_token" ] || { note "no token"; return 0; }
 
     _gen="$(cat "$GEN_FILE" 2>/dev/null)"; case "$_gen" in ''|*[!0-9]*) _gen=0 ;; esac
+    _agen="$(cat "$ACT_FILE" 2>/dev/null)"; case "$_agen" in ''|*[!0-9]*) _agen=0 ;; esac
 
     # Build the report: last applied generation + current health + masked config.
     # NOTE: splify-doctor prints valid JSON but exits non-zero on WARN/FIXABLE/FAIL
@@ -83,15 +87,19 @@ poll_once() {
     # report exactly when the node is degraded (the very state worth reporting).
     _status="$(/usr/local/sbin/splify-doctor --json 2>/dev/null)"; [ -n "$_status" ] || _status='{}'
     _config="$(/usr/local/sbin/splify-ctl export 2>/dev/null)"; [ -n "$_config" ] || _config='{}'
-    _body="$(printf '{"node":"%s","ts":%s,"agent":"splify-agent/1","applied_gen":%s,"status":%s,"config":%s}' \
-        "$_node" "$(date +%s)" "$_gen" "$_status" "$_config")"
+    _body="$(printf '{"node":"%s","ts":%s,"agent":"splify-agent/1","applied_gen":%s,"applied_action_gen":%s,"status":%s,"config":%s}' \
+        "$_node" "$(date +%s)" "$_gen" "$_agen" "$_status" "$_config")"
 
     # Try the internal URL first (over the tunnel, kept private), then the
     # external URL over WAN — pinned to the WAN device so it works with the
     # tunnel down / under CGNAT, bypassing splify's policy routing + kill switch.
+    # A short --connect-timeout on the internal try matters: with the tunnel down
+    # the connect just hangs, and every poll would burn the full --max-time (25s)
+    # before even attempting the external URL — exactly when the dashboard is the
+    # only way to fix the node.
     _resp=""; _rc=1; _via=""
     if [ -n "$_internal" ]; then
-        _resp="$(printf '%s' "$_body" | curl -fsS --max-time 25 \
+        _resp="$(printf '%s' "$_body" | curl -fsS --connect-timeout 5 --max-time 25 \
             -H 'Content-Type: application/json' -H "Authorization: Bearer $_token" \
             -H "X-Splify-Node: $_node" --data-binary @- "${_internal%/}/poll" 2>/dev/null)"
         _rc=$?; [ "$_rc" = 0 ] && _via=internal
@@ -112,6 +120,33 @@ poll_once() {
         return 0
     fi
 
+    # One-shot actions queued from the dashboard (restart a tunnel, refresh a
+    # list, …). They may ride alongside a desired config or arrive alone. Every
+    # action funnels through `splify-ctl action`, which allow-lists the name and
+    # validates the iface — the agent itself never interprets them. The applied
+    # action generation is persisted so a reboot (or the next poll) never
+    # re-runs an already-executed one-shot.
+    case "$_resp" in *'"actions"'*)
+        json_init; json_load "$_resp" 2>/dev/null
+        json_get_var _ragen action_gen 2>/dev/null
+        case "$_ragen" in ''|*[!0-9]*) _ragen=0 ;; esac
+        if [ "$_ragen" -gt "$_agen" ] 2>/dev/null && json_select actions 2>/dev/null; then
+            json_get_keys _aks
+            for _ak in $_aks; do
+                json_select "$_ak"
+                json_get_var _an name 2>/dev/null
+                json_get_var _ai iface 2>/dev/null
+                alog "dashboard action: ${_an:-?} ${_ai:-}"
+                /usr/local/sbin/splify-ctl action "${_an:-}" "${_ai:-}" >/dev/null 2>&1
+                json_select ..
+            done
+            json_select ..
+            mkdir -p "$(dirname "$ACT_FILE")" 2>/dev/null
+            printf '%s\n' "$_ragen" > "$ACT_FILE" 2>/dev/null || true
+            note "actions gen=$_ragen applied @ $(date '+%H:%M:%S')"
+        fi
+    ;; esac
+
     # Empty / explicit no-op -> nothing to do. A desired snapshot carries wg,
     # splify or sites; the server only sends one when our applied_gen is behind,
     # so we do NOT re-apply (and re-bounce the tunnel) on every poll.
@@ -120,7 +155,7 @@ poll_once() {
     esac
     case "$_resp" in
         *'"wg"'*|*'"splify"'*|*'"sites"'*) : ;;
-        *) note "ok, unrecognised reply @ $(date '+%H:%M:%S')"; return 0 ;;
+        *) return 0 ;;
     esac
 
     # Apply the desired snapshot. import commits + bounces touched tunnels + runs
