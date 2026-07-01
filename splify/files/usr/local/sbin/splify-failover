@@ -217,22 +217,53 @@ tick() {
     fi
 }
 
+# ---- lost-list self-heal ------------------------------------------------------
+# A list that was never downloaded (file missing) is fetched in the background
+# instead of waiting for the daily cron. This must NOT run only at daemon start:
+# at boot the WAN is often not up yet, that first fetch fails, and blocklist mode
+# then routes nothing into the VPN until 04:30 — so retry on the daemon loop too,
+# rate-limited by a tmpfs stamp. Only lists whose feature is enabled AND whose URL
+# is configured count as "missing" (otherwise the retry would spin forever on a
+# list that can never appear).
+# WAIT_LOCK: a missing list must actually be fetched, not skipped behind a
+# concurrent cron/apply run — wait out the holder rather than dropping it.
+LIST_HEAL_STAMP="/var/run/splify-list-heal.stamp"
+LIST_HEAL_EVERY=600
+lists_missing() {
+    [ "$IPSUM_ENABLED" = "1" ] && [ -n "$IPSUM_URL" ] && [ ! -s "$IPSUM_NFT_FILE" ] && return 0
+    [ "$RU_ENABLED" = "1" ] && [ -n "$RU_URL" ] && [ ! -s "$RU_FILE" ] && return 0
+    [ -n "$VPN_DOMAINS_URL" ] && [ ! -s "$DOMAINS_VPN_FILE" ] && return 0
+    [ -n "$IGNORE_DOMAINS_URL" ] && [ ! -s "$DOMAINS_IGNORE_FILE" ] && return 0
+    return 1
+}
+heal_lists() {
+    lists_missing || return 0
+    _now="$(date +%s)"; _last="$(cat "$LIST_HEAL_STAMP" 2>/dev/null)"
+    case "$_last" in ''|*[!0-9]*) _last=0 ;; esac
+    [ $((_now - _last)) -ge "$LIST_HEAL_EVERY" ] || return 0
+    echo "$_now" > "$LIST_HEAL_STAMP" 2>/dev/null || true
+    log "self-heal: fetching missing list(s) in background"
+    ( export SPLIFY_WAIT_LOCK=1
+      [ "$IPSUM_ENABLED" = "1" ] && [ -n "$IPSUM_URL" ] && [ ! -s "$IPSUM_NFT_FILE" ] \
+          && /usr/local/sbin/splify-update-ipsum
+      [ "$RU_ENABLED" = "1" ] && [ -n "$RU_URL" ] && [ ! -s "$RU_FILE" ] \
+          && /usr/local/sbin/splify-update-ru
+      if { [ -n "$VPN_DOMAINS_URL" ] && [ ! -s "$DOMAINS_VPN_FILE" ]; } \
+         || { [ -n "$IGNORE_DOMAINS_URL" ] && [ ! -s "$DOMAINS_IGNORE_FILE" ]; }; then
+          /usr/local/sbin/splify-update-domains
+      fi
+    ) >/dev/null 2>&1 &
+}
+
 # ---- entry ------------------------------------------------------------------
 if [ "${1:-}" = "--daemon" ]; then
     [ -x /usr/local/sbin/splify-apply ] && /usr/local/sbin/splify-apply >/dev/null 2>&1 || true
-    # First-run / lost-list self-heal: a list that was never downloaded (file
-    # missing) gets fetched now in the background instead of waiting for the
-    # daily cron. The updaters check enabled/URL themselves and re-apply on
-    # success, so this only does work when a file is actually absent.
-    # WAIT_LOCK: a missing list must actually be fetched, not skipped behind a
-    # concurrent cron/apply run — wait out the holder rather than dropping it.
-    ( export SPLIFY_WAIT_LOCK=1
-      [ -s "$IPSUM_NFT_FILE" ]   || /usr/local/sbin/splify-update-ipsum
-      [ -s "$RU_FILE" ]          || /usr/local/sbin/splify-update-ru
-      [ -s "$DOMAINS_VPN_FILE" ] || /usr/local/sbin/splify-update-domains
-    ) >/dev/null 2>&1 &
+    # first-run fetch happens immediately (drop a stale stamp from a prior daemon)
+    rm -f "$LIST_HEAL_STAMP" 2>/dev/null || true
+    heal_lists
     while :; do
         tick
+        heal_lists
         _iv="$(uci -q get splify.global.interval 2>/dev/null)"
         [ "$_iv" -ge 5 ] 2>/dev/null || _iv=180
         sleep "$_iv"

@@ -34,7 +34,10 @@ log "ru_subnets refresh OK: $count prefixes from $RU_URL"
 if nft list set "$RU_TABLE" "$RU_SET" >/dev/null 2>&1; then
     mkdir -p "$(dirname "$RU_NFT_FILE")"
     emit_nft_set_block "$RU_TABLE" "$RU_SET" < "$TMP/clean.lst" > "$TMP/live.nft"
-    nft -f "$TMP/live.nft" || die "atomic ru nft update failed"
+    nft -f "$TMP/live.nft" || {
+        cp "$TMP/live.nft" /tmp/splify-ru-failed.nft 2>/dev/null || true
+        die "atomic ru nft update failed (kept: /tmp/splify-ru-failed.nft)"
+    }
     cat "$TMP/live.nft" > "$RU_NFT_FILE"
     log "ru nft set refreshed: $count entries"
 fi

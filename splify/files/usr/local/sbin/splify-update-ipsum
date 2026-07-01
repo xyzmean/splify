@@ -32,8 +32,12 @@ count=$(wc -l < "$TMP/clean.lst")
 # Command stream: flush + one comma-block add (no table wrap, no set definition).
 emit_nft_set_block "$IPSUM_TABLE" "$IPSUM_SET" < "$TMP/clean.lst" > "$TMP/live.nft"
 
-# Atomic live reload.
-nft -f "$TMP/live.nft" || die "atomic nft live update failed (kept: $TMP/live.nft)"
+# Atomic live reload. On failure keep the payload OUTSIDE $TMP — the EXIT trap
+# wipes $TMP, so a path inside it would be gone before anyone can inspect it.
+nft -f "$TMP/live.nft" || {
+    cp "$TMP/live.nft" /tmp/splify-ipsum-failed.nft 2>/dev/null || true
+    die "atomic nft live update failed (kept: /tmp/splify-ipsum-failed.nft)"
+}
 
 # Persist. IPSUM_NFT_FILE is itself the replay source (failover reloads it after a
 # fw4 flush); the list is re-downloaded daily and gated by IPSUM_MIN_COUNT above,

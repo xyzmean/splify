@@ -73,6 +73,11 @@ fi
 
 emit_nft_set_block "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET" < "$TMP/all.lst" > "$TMP/sync.nft"
 
-nft -f "$TMP/sync.nft" || die "atomic nft sync failed (kept: $TMP/sync.nft)"
+# On failure keep the payload OUTSIDE $TMP — the EXIT trap wipes $TMP, so a
+# path inside it would be gone before anyone can inspect it.
+nft -f "$TMP/sync.nft" || {
+    cp "$TMP/sync.nft" /tmp/splify-nozapret-failed.nft 2>/dev/null || true
+    die "atomic nft sync failed (kept: /tmp/splify-nozapret-failed.nft)"
+}
 printf '%s\n' "$NEW_SIG" > "$NOZAPRET_SIG"
 log "nozapret synced: $count entries"

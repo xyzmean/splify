@@ -717,8 +717,10 @@ _lan_subnet() {
 
 # Tunnel iface that carries mesh routes: the highest-PRIORITY wg/awg endpoint
 # (matches splify's own primary-tunnel preference), else the first wg iface.
+# endpoints_by_priority emits ONE space-separated line — walk all of it, best
+# first (an `awk '{print $1}'` here would silently drop every fallback).
 _tunnel_iface() {
-    for _ti in $(endpoints_by_priority 2>/dev/null | awk '{print $1}'); do
+    for _ti in $(endpoints_by_priority 2>/dev/null); do
         iface_is_wg "$_ti" 2>/dev/null && { printf '%s' "$_ti"; return; }
     done
     for _ti in $(wg_ifaces); do printf '%s' "$_ti"; return; done
