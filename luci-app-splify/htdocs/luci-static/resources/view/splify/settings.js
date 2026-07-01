@@ -7,7 +7,7 @@
 
 // Cache-buster for the bundled assets — see the note in home.js. Bump together
 // with the VERSION file.
-var ASSET_V = '?v=0.2.0';
+var ASSET_V = '?v=0.2.1';
 
 return view.extend({
 	load: function () {

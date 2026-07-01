@@ -38,7 +38,16 @@ RUN echo "src-link splify /builder/feed" >> feeds.conf.default \
 
 # Stamp the release version and build only our two packages. Deps are already in
 # build_dir/staging_dir from the cached layer, so make skips them.
+# The ?v=<semver> tokens in the LuCI loaders and bundles are cache-busters: the
+# browser re-downloads the assets only when the URL changes, so every release
+# must carry its own version there (a stale token re-serves the old bundle from
+# the browser cache after an upgrade).
 ARG VERSION=0.0.0
 RUN sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=${VERSION}/" \
         feed/splify/Makefile feed/luci-app-splify/Makefile \
+ && sed -i -E "s/\?v=[0-9]+\.[0-9]+\.[0-9]+/?v=${VERSION}/g" \
+        feed/luci-app-splify/htdocs/luci-static/resources/view/splify/home.js \
+        feed/luci-app-splify/htdocs/luci-static/resources/view/splify/settings.js \
+        feed/luci-app-splify/htdocs/luci-static/resources/splify/splify-index.js \
+        feed/luci-app-splify/htdocs/luci-static/resources/splify/splify-settings.js \
  && make V=s package/splify/compile package/luci-app-splify/compile

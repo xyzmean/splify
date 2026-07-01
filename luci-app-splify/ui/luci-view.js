@@ -10,7 +10,7 @@
 // versions only its own require()-loaded views), so without a query string the
 // browser heuristic-caches the bundle and can keep serving a stale copy after
 // an upgrade. Stable within a release — bump together with the VERSION file.
-var ASSET_V = '?v=0.2.0';
+var ASSET_V = '?v=0.2.1';
 
 return view.extend({
 	render: function () {

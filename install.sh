@@ -21,7 +21,10 @@ command -v wget >/dev/null 2>&1 || err "не найден wget."
 say "Ищу последний релиз splify…"
 META="$TMP/meta.json"
 wget -qO "$META" "$API" || err "не удалось получить данные релиза (нет интернета?)."
-URLS="$(sed -n 's/.*"browser_download_url": *"\([^"]*\.apk\)".*/\1/p' "$META")"
+# GitHub prettifies JSON only for curl; for wget the answer is ONE line, and a
+# greedy line-wise sed would then capture only the LAST asset URL. Split on
+# commas first so each URL lands on its own line regardless of formatting.
+URLS="$(tr ',' '\n' <"$META" | sed -n 's/.*"browser_download_url": *"\([^"]*\.apk\)".*/\1/p')"
 [ -n "$URLS" ] || err "в последнем релизе нет .apk. Возможно, релиз ещё не собран."
 
 # 3) скачать пакеты
@@ -34,11 +37,19 @@ for u in $URLS; do
     *splify*) wget -qO "$TMP/${u##*/}" "$u" || err "не удалось скачать $u" ;;
   esac
 done
-ls "$TMP"/*.apk >/dev/null 2>&1 || err "пакеты не скачались."
+# Релиз состоит из трёх пакетов — убедимся, что скачались все, иначе ставится
+# только демон без веб-интерфейса и перевода.
+for pkg in splify- luci-app-splify- luci-i18n-splify-ru-; do
+  ls "$TMP/$pkg"*.apk >/dev/null 2>&1 || err "в релизе не хватает пакета $pkg*.apk"
+done
 
 # 4) установить (зависимости подтянутся из фидов)
 say "Устанавливаю…"
 apk add --allow-untrusted "$TMP"/*.apk || err "apk add не выполнился."
+
+# 5) чтобы меню и страницы splify появились сразу, без ручного рестарта
+rm -f /tmp/luci-indexcache* /tmp/luci-modulecache* 2>/dev/null || true
+/etc/init.d/rpcd reload 2>/dev/null || /etc/init.d/rpcd restart 2>/dev/null || true
 
 say "Готово! Дальше:"
 printf '  1. Создайте VPN-туннель: Сеть → Интерфейсы (WireGuard/AmneziaWG).\n'
