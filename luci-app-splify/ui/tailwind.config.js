@@ -20,40 +20,54 @@ module.exports = {
       },
     },
     extend: {
-      colors: {
-        border: "hsl(var(--border))",
-        input: "hsl(var(--input))",
-        ring: "hsl(var(--ring))",
-        background: "hsl(var(--background))",
-        foreground: "hsl(var(--foreground))",
-        primary: {
-          DEFAULT: "hsl(var(--primary))",
-          foreground: "hsl(var(--primary-foreground))",
-        },
-        secondary: {
-          DEFAULT: "hsl(var(--secondary))",
-          foreground: "hsl(var(--secondary-foreground))",
-        },
-        destructive: {
-          DEFAULT: "hsl(var(--destructive))",
-          foreground: "hsl(var(--destructive-foreground))",
-        },
-        muted: {
-          DEFAULT: "hsl(var(--muted))",
-          foreground: "hsl(var(--muted-foreground))",
-        },
-        accent: {
-          DEFAULT: "hsl(var(--accent))",
-          foreground: "hsl(var(--accent-foreground))",
-        },
-        popover: {
-          DEFAULT: "hsl(var(--popover))",
-          foreground: "hsl(var(--popover-foreground))",
-        },
-        card: {
-          DEFAULT: "hsl(var(--card))",
-          foreground: "hsl(var(--card-foreground))",
-        },
+      // Tokens are full colours inherited from the Argon theme's own CSS
+      // variables (see index.css), NOT HSL triplets — color-mix() re-enables
+      // Tailwind's `/NN` opacity modifiers on top of them.
+      colors: (() => {
+        const mix = (v) =>
+          `color-mix(in srgb, var(${v}) calc(<alpha-value> * 100%), transparent)`
+        return {
+          border: mix("--sp-border"),
+          input: mix("--sp-input"),
+          ring: mix("--sp-ring"),
+          background: "var(--sp-background)",
+          foreground: mix("--sp-foreground"),
+          success: mix("--sp-success"),
+          warning: mix("--sp-warning"),
+          info: mix("--sp-info"),
+          primary: {
+            DEFAULT: mix("--sp-primary"),
+            foreground: mix("--sp-primary-foreground"),
+          },
+          secondary: {
+            DEFAULT: mix("--sp-secondary"),
+            foreground: mix("--sp-secondary-foreground"),
+          },
+          destructive: {
+            DEFAULT: mix("--sp-destructive"),
+            foreground: mix("--sp-destructive-foreground"),
+          },
+          muted: {
+            DEFAULT: mix("--sp-muted"),
+            foreground: mix("--sp-muted-foreground"),
+          },
+          accent: {
+            DEFAULT: mix("--sp-accent"),
+            foreground: mix("--sp-accent-foreground"),
+          },
+          popover: {
+            DEFAULT: mix("--sp-popover"),
+            foreground: mix("--sp-popover-foreground"),
+          },
+          card: {
+            DEFAULT: mix("--sp-card"),
+            foreground: mix("--sp-card-foreground"),
+          },
+        }
+      })(),
+      boxShadow: {
+        // Argon's card shadow (light and dark values live in the CSS vars)
+        card: "var(--sp-card-shadow)",
       },
       borderRadius: {
         lg: "var(--radius)",

@@ -51,7 +51,7 @@ const newId = () => '_new_' + Math.random().toString(36).slice(2)
 function Switch({ on, onClick, disabled }: { on: boolean; onClick: () => void; disabled?: boolean }) {
   return (
     <button type="button" onClick={onClick} disabled={disabled}
-      className={cn('relative h-6 w-11 shrink-0 rounded-full transition disabled:opacity-50', on ? 'bg-emerald-500' : 'bg-muted-foreground/30')}>
+      className={cn('relative h-6 w-11 shrink-0 rounded-full transition disabled:opacity-50', on ? 'bg-success' : 'bg-muted-foreground/30')}>
       <span className={cn('absolute left-0.5 top-0.5 size-5 rounded-full bg-white transition-transform', on && 'translate-x-5')} />
     </button>
   )
@@ -65,7 +65,7 @@ function Section({ title, icon: Icon, desc, children, right }: {
     <Card>
       <CardHeader className="flex-row items-start justify-between gap-3 space-y-0 p-4 pb-2">
         <div>
-          <CardTitle className="flex items-center gap-2 text-sm"><Icon className="size-4" />{title}</CardTitle>
+          <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><Icon className="size-4 text-muted-foreground" />{title}</CardTitle>
           {desc && <p className="mt-1 text-xs text-muted-foreground">{desc}</p>}
         </div>
         {right}
@@ -115,7 +115,7 @@ function ListEditor({ values, onChange, placeholder }: { values: string[]; onCha
                 if (e.key === 'Enter' && isLast) { add((e.target as HTMLInputElement).value); (e.target as HTMLInputElement).value = '' }
               }} />
             {isLast
-              ? <Button type="button" size="icon" variant="secondary" className="bg-emerald-600 text-white hover:bg-emerald-700"
+              ? <Button type="button" size="icon" variant="secondary" className="bg-success text-white hover:bg-success/90"
                   onClick={(e) => { const input = (e.currentTarget.previousSibling as HTMLInputElement); if (input?.value.trim()) { add(input.value); input.value = '' } }}>
                   <Plus className="size-4" />
                 </Button>
@@ -231,7 +231,7 @@ export default function SettingsPage() {
   }
 
   if (loading) return <div className="p-8 text-center text-muted-foreground animate-pulse">Загрузка настроек…</div>
-  if (error) return <Card><CardContent className="p-8 text-center text-rose-500">Ошибка: {error}</CardContent></Card>
+  if (error) return <Card><CardContent className="p-8 text-center text-destructive">Ошибка: {error}</CardContent></Card>
 
   return (
     <div className="space-y-4">
@@ -246,7 +246,7 @@ export default function SettingsPage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {dirty && <Badge variant="outline" className="border-amber-500 text-amber-600 dark:text-amber-400">не сохранено</Badge>}
+            {dirty && <Badge variant="outline" className="border-warning text-warning">не сохранено</Badge>}
             <Button size="sm" variant="outline" disabled={!!busy} onClick={() => save(false)}>
               {busy === 'save' ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}Сохранить
             </Button>
@@ -265,10 +265,11 @@ export default function SettingsPage() {
             const count = id === 'endpoints' ? endpoints.length : id === 'devices' ? devices.length : null
             return (
               <button key={id} onClick={() => setTab(id)}
-                className={cn('flex items-center gap-2 whitespace-nowrap rounded-md px-3 py-2 text-left text-sm transition',
-                  active ? 'bg-accent font-medium text-foreground' : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground')}>
+                className={cn('flex items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-left text-sm transition',
+                  // Argon sidebar: active item = primary fill + white text
+                  active ? 'bg-primary font-medium text-primary-foreground' : 'text-muted-foreground hover:bg-primary/90 hover:text-primary-foreground')}>
                 <Icon className="size-4 shrink-0" />{label}
-                {count != null && <span className="ml-auto text-xs text-muted-foreground">{count}</span>}
+                {count != null && <span className={cn('ml-auto text-xs', active ? 'text-primary-foreground/80' : 'text-muted-foreground')}>{count}</span>}
               </button>
             )
           })}

@@ -51,6 +51,15 @@ apk add --allow-untrusted "$TMP"/*.apk || err "apk add не выполнился
 rm -f /tmp/luci-indexcache* /tmp/luci-modulecache* 2>/dev/null || true
 /etc/init.d/rpcd reload 2>/dev/null || /etc/init.d/rpcd restart 2>/dev/null || true
 
+# 6) перезапустить работающие демоны: при обновлении пакета старые процессы
+# (splify-failover, splify-agent) продолжают крутить КОД ПРЕЖНЕЙ версии до
+# ребута — новые скрипты на диске сами по себе ничего не меняют.
+for s in splify splify-agent; do
+  if [ -x "/etc/init.d/$s" ] && "/etc/init.d/$s" enabled 2>/dev/null; then
+    "/etc/init.d/$s" restart 2>/dev/null || true
+  fi
+done
+
 say "Готово! Дальше:"
 printf '  1. Создайте VPN-туннель: Сеть → Интерфейсы (WireGuard/AmneziaWG).\n'
 printf '  2. Откройте Сервисы → splify → Главная и нажмите «Включить».\n'

@@ -119,7 +119,7 @@ export default function WgPanel() {
     finally { setBusy('') }
   }
 
-  if (err) return <Card><CardContent className="p-6 text-rose-500">Не удалось загрузить конфигурацию: {err}</CardContent></Card>
+  if (err) return <Card><CardContent className="p-6 text-destructive">Не удалось загрузить конфигурацию: {err}</CardContent></Card>
   const names = Object.keys(wg)
   if (!names.length) return <Card><CardContent className="p-6 text-muted-foreground">Интерфейсы WireGuard/AmneziaWG не найдены. Создайте их в Сеть → Интерфейсы.</CardContent></Card>
   const cur = wg[iface] || {}
@@ -129,7 +129,7 @@ export default function WgPanel() {
     <div className="space-y-4">
       <Card>
         <CardHeader className="flex-row flex-wrap items-center gap-3 space-y-0 p-4 pb-2">
-          <CardTitle className="flex items-center gap-2 text-sm"><Settings2 className="size-4" />Параметры AmneziaWG / WireGuard</CardTitle>
+          <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><Settings2 className="size-4" />Параметры AmneziaWG / WireGuard</CardTitle>
           {names.length > 1 && (
             <select className={cn(field, 'w-auto')} value={iface} onChange={(e) => pick(e.target.value)}>
               {names.map((n) => <option key={n} value={n}>{n}</option>)}
@@ -216,7 +216,7 @@ export default function WgPanel() {
 
       <Card>
         <CardHeader className="p-4 pb-2">
-          <CardTitle className="flex items-center gap-2 text-sm"><FileDown className="size-4" />Импорт .conf (AmneziaWG / WireGuard)</CardTitle>
+          <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><FileDown className="size-4" />Импорт .conf (AmneziaWG / WireGuard)</CardTitle>
         </CardHeader>
         <CardContent className="p-4 pt-2">
           <p className="mb-2 text-xs text-muted-foreground">Вставьте файл клиента (как выгружает AmneziaVPN / wg-quick). Секции [Interface] и [Peer] — включая I1–I5 / J1–J3 — будут применены к {iface}.</p>

@@ -31,10 +31,10 @@ function notify(msg: string, kind: 'info' | 'warning' | 'error' = 'info') {
 // Severity → semantic styling. One source of truth so the hero, badges and
 // diagnostics all read identically.
 const SEV: Record<Sev, { text: string; ring: string; badge: string }> = {
-  OK:      { text: 'text-emerald-600 dark:text-emerald-400', ring: 'border-l-emerald-500', badge: 'bg-emerald-500 text-white border-transparent' },
-  WARN:    { text: 'text-amber-600 dark:text-amber-400',     ring: 'border-l-amber-500',   badge: 'bg-amber-500 text-white border-transparent' },
-  FIXABLE: { text: 'text-orange-600 dark:text-orange-400',   ring: 'border-l-orange-500',  badge: 'bg-orange-500 text-white border-transparent' },
-  FAIL:    { text: 'text-rose-600 dark:text-rose-400',       ring: 'border-l-rose-500',    badge: 'bg-rose-500 text-white border-transparent' },
+  OK:      { text: 'text-success',     ring: 'border-l-success',     badge: 'bg-success text-white border-transparent' },
+  WARN:    { text: 'text-warning',     ring: 'border-l-warning',     badge: 'bg-warning text-white border-transparent' },
+  FIXABLE: { text: 'text-warning',     ring: 'border-l-warning',     badge: 'bg-warning/80 text-white border-transparent' },
+  FAIL:    { text: 'text-destructive', ring: 'border-l-destructive', badge: 'bg-destructive text-white border-transparent' },
 }
 
 function stateIcon(state: string) {
@@ -50,8 +50,8 @@ function SevBadge({ sev }: { sev: Sev }) {
 
 function YesNo({ v }: { v: boolean }) {
   return v
-    ? <CheckIcon className="size-4 text-emerald-500" />
-    : <XIcon className="size-4 text-rose-500" />
+    ? <CheckIcon className="size-4 text-success" />
+    : <XIcon className="size-4 text-destructive" />
 }
 
 interface Props {
@@ -70,7 +70,7 @@ export default function StatusDashboard(p: Props) {
   if (!status || !status.summary) {
     return (
       <Card>
-        <CardContent className="p-8 text-center text-rose-500">
+        <CardContent className="p-8 text-center text-destructive">
           Диагностика недоступна — служба splify установлена и запущена?
         </CardContent>
       </Card>
@@ -177,8 +177,8 @@ export default function StatusDashboard(p: Props) {
             <Button size="sm" disabled={!!p.busy}
               variant={isOn ? 'outline' : 'default'}
               className={isOn
-                ? 'border-rose-500 text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/30'
-                : 'bg-emerald-600 text-white hover:bg-emerald-700'}
+                ? 'border-destructive text-destructive hover:bg-destructive/10'
+                : 'bg-success text-white hover:bg-success/90'}
               onClick={() => run(isOn ? 'off' : 'on',
                 isOn ? 'Выключить split-маршрутизацию? Весь трафик LAN пойдёт через WAN, пока служба не включится снова.' : undefined,
                 isOn ? 'Split-маршрутизация выключена' : 'Split-маршрутизация включена')}>
@@ -188,31 +188,33 @@ export default function StatusDashboard(p: Props) {
         </CardContent>
       </Card>
 
-      {/* ── Toolbar ──────────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" variant="outline" disabled={!!p.busy} onClick={p.refresh}>
-          <RefreshCw className="size-4" />Обновить
-        </Button>
-        <ActBtn a="apply" label="Применить" icon={Play} variant="default" toast="Конфигурация применена" />
-        <ActBtn a="restart" label="Перезапустить" icon={RotateCw} variant="secondary" toast="Служба перезапущена" />
+      {/* ── Toolbar (carded, so it reads as one control block) ── */}
+      <Card>
+        <CardContent className="flex flex-wrap items-center gap-2 p-3">
+          <Button size="sm" variant="outline" disabled={!!p.busy} onClick={p.refresh}>
+            <RefreshCw className="size-4" />Обновить
+          </Button>
+          <ActBtn a="apply" label="Применить" icon={Play} variant="default" toast="Конфигурация применена" />
+          <ActBtn a="restart" label="Перезапустить" icon={RotateCw} variant="secondary" toast="Служба перезапущена" />
 
-        <div className="flex items-center gap-1 rounded-lg border bg-muted/40 px-1 py-1">
-          <span className="px-1.5 text-xs text-muted-foreground">Списки</span>
-          <ActBtn a="update_ipsum" label="ipsum" icon={Download} variant="ghost" toast="ipsum обновлён" />
-          <ActBtn a="update_ru" label="ru/cn" icon={Download} variant="ghost" toast="ru/cn обновлён" />
-          <ActBtn a="update_domains" label="домены" icon={Download} variant="ghost" toast="домены обновлены" />
-        </div>
+          <div className="flex items-center gap-1 rounded-lg border bg-muted/40 px-1 py-1">
+            <span className="px-1.5 text-xs text-muted-foreground">Списки</span>
+            <ActBtn a="update_ipsum" label="ipsum" icon={Download} variant="ghost" toast="ipsum обновлён" />
+            <ActBtn a="update_ru" label="ru/cn" icon={Download} variant="ghost" toast="ru/cn обновлён" />
+            <ActBtn a="update_domains" label="домены" icon={Download} variant="ghost" toast="домены обновлены" />
+          </div>
 
-        <div className="flex-1" />
+          <div className="flex-1" />
 
-        <ActBtn a="disable" label="Аварийно отключить" icon={Power} variant="destructive"
-          confirm="Отключить split-маршрутизацию сейчас? Весь трафик LAN выйдет через WAN, пока служба не включит её снова."
-          toast="Split-маршрутизация отключена" />
-      </div>
+          <ActBtn a="disable" label="Аварийно отключить" icon={Power} variant="destructive"
+            confirm="Отключить split-маршрутизацию сейчас? Весь трафик LAN выйдет через WAN, пока служба не включит её снова."
+            toast="Split-маршрутизация отключена" />
+        </CardContent>
+      </Card>
 
       {/* ── First-run helper ─────────────────────────────────── */}
       {firstRun && (
-        <Card className="border-dashed border-amber-400 bg-amber-50/60 dark:bg-amber-950/20">
+        <Card className="border border-dashed border-warning bg-warning/5">
           <CardContent className="p-5">
             <h4 className="mb-2 font-semibold">👋 Подключим первый туннель</h4>
             <p className="mb-2 text-sm text-muted-foreground">Туннелей пока нет, поэтому весь трафик LAN сейчас идёт через обычный WAN.</p>
@@ -246,12 +248,12 @@ export default function StatusDashboard(p: Props) {
                 const r = rates[e.iface] || { rx: 0, tx: 0 }
                 return (
                   <TableRow key={e.iface}>
-                    <TableCell className="font-medium">{e.present ? e.iface : <span className="text-rose-500">{e.iface} (нет)</span>}</TableCell>
+                    <TableCell className="font-medium">{e.present ? e.iface : <span className="text-destructive">{e.iface} (нет)</span>}</TableCell>
                     <TableCell>{e.priority || '—'}</TableCell>
                     <TableCell>{e.present ? fmtAge(e.handshake_age) : '—'}</TableCell>
-                    <TableCell className="whitespace-nowrap">{e.present ? <><span className="text-emerald-500">↓{fmtRate(r.rx)}</span> <span className="text-sky-500">↑{fmtRate(r.tx)}</span></> : '—'}</TableCell>
-                    <TableCell>{e.health === 'ok' || e.health === 'OK' ? <span className="text-emerald-500">ок</span> : e.health === 'idle' ? <span className="text-muted-foreground">простой</span> : e.health === 'FAIL' ? <span className="text-rose-500">FAIL</span> : '—'}</TableCell>
-                    <TableCell>{e.zone || <span className="text-rose-500">нет</span>}</TableCell>
+                    <TableCell className="whitespace-nowrap">{e.present ? <><span className="text-success">↓{fmtRate(r.rx)}</span> <span className="text-info">↑{fmtRate(r.tx)}</span></> : '—'}</TableCell>
+                    <TableCell>{e.health === 'ok' || e.health === 'OK' ? <span className="text-success">ок</span> : e.health === 'idle' ? <span className="text-muted-foreground">простой</span> : e.health === 'FAIL' ? <span className="text-destructive">FAIL</span> : '—'}</TableCell>
+                    <TableCell>{e.zone || <span className="text-destructive">нет</span>}</TableCell>
                     <TableCell><YesNo v={e.masq} /></TableCell>
                     <TableCell><YesNo v={e.forwarding} /></TableCell>
                   </TableRow>
@@ -287,7 +289,7 @@ export default function StatusDashboard(p: Props) {
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <Section title={checks.length ? `Диагностика · ${checks.length}` : 'Диагностика'} icon={Stethoscope}>
           {checks.length === 0 ? (
-            <p className="flex items-center gap-2 font-medium text-emerald-600 dark:text-emerald-400">
+            <p className="flex items-center gap-2 font-medium text-success">
               <CheckIcon className="size-4" />Проблем не обнаружено.
             </p>
           ) : (
@@ -300,7 +302,7 @@ export default function StatusDashboard(p: Props) {
                     {c.fix && <div className="mt-0.5 text-sm text-muted-foreground">→ {c.fix}</div>}
                   </div>
                   {c.category === 'firewall' && !/in the shared |device wildcard|non-tunnel networks/.test(c.message) && /^([A-Za-z0-9_.-]+):/.test(c.message) && (
-                    <Button size="sm" variant="outline" className="border-blue-500 text-blue-600 dark:text-blue-400" disabled={!!p.busy} onClick={() => fixFirewall(c)}>
+                    <Button size="sm" variant="outline" className="border-primary text-primary" disabled={!!p.busy} onClick={() => fixFirewall(c)}>
                       <Wrench className="size-4" />Исправить
                     </Button>
                   )}
@@ -355,12 +357,13 @@ function MiniStat({ label, value, sub, tone }: { label: string; value: React.Rea
 function Section({ title, icon: Icon, children }: { title: string; icon: React.ComponentType<{ className?: string }>; children: React.ReactNode }) {
   return (
     <Card>
-      <CardHeader className="p-4 pb-2">
-        <CardTitle className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Icon className="size-4" />{title}
+      {/* Argon section header: 1.1rem, normal weight, .875rem/1.25rem padding */}
+      <CardHeader className="px-5 pb-2 pt-3.5">
+        <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal">
+          <Icon className="size-4 text-muted-foreground" />{title}
         </CardTitle>
       </CardHeader>
-      <CardContent className="p-4 pt-2">{children}</CardContent>
+      <CardContent className="px-5 pb-4 pt-2">{children}</CardContent>
     </Card>
   )
 }
@@ -371,8 +374,8 @@ function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: 
   const Node = ({ title, sub, active, dead }: { title: string; sub?: React.ReactNode; active?: boolean; dead?: boolean }) => (
     <div className={cn(
       'flex min-w-[84px] flex-col justify-center rounded-lg border px-3 py-2 text-center',
-      active && 'border-emerald-500 bg-emerald-500/10 ring-2 ring-emerald-500/30',
-      dead && 'border-rose-500 text-rose-500',
+      active && 'border-success bg-success/10 ring-2 ring-success/30',
+      dead && 'border-destructive text-destructive',
       !active && !dead && 'bg-muted/40',
     )}>
       <div className="text-sm font-semibold">{title}</div>
@@ -388,13 +391,13 @@ function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: 
       {(status.endpoints || []).map((e) => {
         const active = state === 'vpn:' + e.iface
         const r = rates[e.iface] || { rx: 0, tx: 0 }
-        const sub = !e.present ? 'недоступен' : active ? <span className="whitespace-nowrap"><span className="text-emerald-500">↓{fmtRate(r.rx)}</span> <span className="text-sky-500">↑{fmtRate(r.tx)}</span></span> : e.handshake_age >= 0 && e.handshake_age < 999999 ? '⇄ ' + fmtAge(e.handshake_age) : ''
+        const sub = !e.present ? 'недоступен' : active ? <span className="whitespace-nowrap"><span className="text-success">↓{fmtRate(r.rx)}</span> <span className="text-info">↑{fmtRate(r.tx)}</span></span> : e.handshake_age >= 0 && e.handshake_age < 999999 ? '⇄ ' + fmtAge(e.handshake_age) : ''
         return <span key={e.iface} className="contents"><Arrow /><Node title={`#${e.priority || '?'} ${e.iface}`} sub={sub} active={active} dead={!e.present} /></span>
       })}
       {hasZapret && <><Arrow /><Node title="zapret" sub="обход DPI" active={state === 'zapret'} /></>}
       <Arrow />
       {state === 'killswitch'
-        ? <div className="flex min-w-[84px] flex-col justify-center rounded-lg border border-rose-500 bg-rose-500/10 px-3 py-2 text-center ring-2 ring-rose-500/30"><div className="text-sm font-semibold">заблокировано</div><div className="mt-0.5 text-xs text-muted-foreground">kill switch</div></div>
+        ? <div className="flex min-w-[84px] flex-col justify-center rounded-lg border border-destructive bg-destructive/10 px-3 py-2 text-center ring-2 ring-destructive/30"><div className="text-sm font-semibold">заблокировано</div><div className="mt-0.5 text-xs text-muted-foreground">kill switch</div></div>
         : <Node title="WAN" sub="напрямую" active={state === 'wan'} />}
     </div>
   )

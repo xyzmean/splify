@@ -3,8 +3,18 @@ import { rpc, type Status, type EventRow } from '@/lib/rpc'
 import StatusDashboard from '@/components/StatusDashboard'
 import WgPanel from '@/components/WgPanel'
 import ApiPanel from '@/components/ApiPanel'
+import { cn } from '@/lib/utils'
+import { Activity, Radio, ShieldCheck } from 'lucide-react'
 
 type Tab = 'status' | 'wg' | 'api'
+
+// Same left-rail navigation as the settings view — the two pages must read as
+// one system, and Argon has no second-level horizontal tab row to mimic.
+const NAV: { id: Tab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+  { id: 'status', label: 'Состояние', icon: Activity },
+  { id: 'wg', label: 'AmneziaWG', icon: ShieldCheck },
+  { id: 'api', label: 'Удалённое управление', icon: Radio },
+]
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('status')
@@ -41,42 +51,38 @@ export default function App() {
   const wgIfaces = status ? (status.endpoints || []).map((e) => e.iface) : []
 
   return (
-    <div className="splify-react-root max-w-5xl mx-auto p-1 font-sans antialiased text-slate-900 dark:text-slate-100">
-      <div className="flex items-center gap-1 border-b border-slate-200 dark:border-slate-800 mb-5">
-        <TabBtn id="status" cur={tab} set={setTab}>Состояние</TabBtn>
-        <TabBtn id="wg" cur={tab} set={setTab}>AmneziaWG</TabBtn>
-        <TabBtn id="api" cur={tab} set={setTab}>Удалённое управление</TabBtn>
+    <div className="splify-react-root p-1 antialiased text-foreground">
+      <div className="flex flex-col gap-4 md:flex-row">
+        <nav className="flex shrink-0 flex-row gap-1 overflow-x-auto md:w-52 md:flex-col md:overflow-visible">
+          {NAV.map(({ id, label, icon: Icon }) => {
+            const active = tab === id
+            return (
+              <button key={id} onClick={() => setTab(id)}
+                className={cn('flex items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-left text-sm transition',
+                  active ? 'bg-primary font-medium text-primary-foreground' : 'text-muted-foreground hover:bg-primary/90 hover:text-primary-foreground')}>
+                <Icon className="size-4 shrink-0" />{label}
+              </button>
+            )
+          })}
+        </nav>
+
+        <div className="min-w-0 flex-1 space-y-4">
+          {tab === 'status' && (
+            loading && !status ? (
+              <div className="p-8 text-center text-muted-foreground animate-pulse">Загрузка splify…</div>
+            ) : error && !status ? (
+              <div className="p-8 text-center text-destructive">Ошибка: {error}</div>
+            ) : (
+              <StatusDashboard
+                status={status} events={events} wgIfaces={wgIfaces}
+                busy={busy} setBusy={setBusy} refresh={refresh}
+              />
+            )
+          )}
+          {tab === 'wg' && <WgPanel />}
+          {tab === 'api' && <ApiPanel />}
+        </div>
       </div>
-
-      {tab === 'status' && (
-        loading && !status ? (
-          <div className="p-8 text-center text-slate-500 animate-pulse">Загрузка splify…</div>
-        ) : error && !status ? (
-          <div className="p-8 text-center text-rose-500">Ошибка: {error}</div>
-        ) : (
-          <StatusDashboard
-            status={status} events={events} wgIfaces={wgIfaces}
-            busy={busy} setBusy={setBusy} refresh={refresh}
-          />
-        )
-      )}
-      {tab === 'wg' && <WgPanel />}
-      {tab === 'api' && <ApiPanel />}
     </div>
-  )
-}
-
-function TabBtn({ id, cur, set, children }: { id: Tab; cur: Tab; set: (t: Tab) => void; children: React.ReactNode }) {
-  const active = cur === id
-  return (
-    <button
-      onClick={() => set(id)}
-      className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition ${
-        active
-          ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-          : 'border-transparent opacity-70 hover:opacity-100'
-      }`}>
-      {children}
-    </button>
   )
 }

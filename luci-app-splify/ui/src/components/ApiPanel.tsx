@@ -119,20 +119,20 @@ export default function ApiPanel() {
 
       {/* node name (node_id) */}
       <Card>
-        <CardHeader className="p-4 pb-2"><CardTitle className="flex items-center gap-2 text-sm"><Tag className="size-4" />Имя ноды</CardTitle></CardHeader>
+        <CardHeader className="p-4 pb-2"><CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><Tag className="size-4" />Имя ноды</CardTitle></CardHeader>
         <CardContent className="p-4 pt-2">
           <p className="mb-2 text-xs text-muted-foreground">Под этим именем роутер виден в панели. Латиница/цифры и <code>. _ -</code>, без пробелов, до 64 символов. Задайте его <b>до подключения</b> — это самое простое.</p>
           <div className="flex gap-2">
             <input className={cn(field, 'max-w-xs')} value={nodeId} onChange={(e) => setNodeId(e.target.value)} placeholder="office-rt1" />
             <Button size="sm" variant="outline" disabled={!!busy} onClick={saveNode}>{busy === 'node' ? 'Сохраняю…' : 'Сохранить имя'}</Button>
           </div>
-          {enrolled && <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">Нода уже подключена. После смены имени нажмите «Перерегистрировать» — в панели появится новая запись с новым именем, старую можно удалить.</p>}
+          {enrolled && <p className="mt-2 text-xs text-warning">Нода уже подключена. После смены имени нажмите «Перерегистрировать» — в панели появится новая запись с новым именем, старую можно удалить.</p>}
         </CardContent>
       </Card>
 
       {/* connect via connection JSON */}
       <Card>
-        <CardHeader className="p-4 pb-2"><CardTitle className="flex items-center gap-2 text-sm"><Plug className="size-4" />Подключить к панели</CardTitle></CardHeader>
+        <CardHeader className="p-4 pb-2"><CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><Plug className="size-4" />Подключить к панели</CardTitle></CardHeader>
         <CardContent className="p-4 pt-2">
           <p className="mb-2 text-xs text-muted-foreground">Вставьте «JSON подключения» из панели управления (внешний + внутренний адрес и ключ доступа). Роутер сгенерирует свой ключ связи и зарегистрируется.</p>
           <textarea className={cn(field, 'min-h-[90px] font-mono text-xs')} value={connJson} onChange={(e) => setConnJson(e.target.value)}
@@ -147,7 +147,7 @@ export default function ApiPanel() {
       {/* outbound agent */}
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0 p-4 pb-2">
-          <CardTitle className="flex items-center gap-2 text-sm"><Radio className="size-4" />Исходящий агент (CGNAT / упавший туннель)</CardTitle>
+          <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><Radio className="size-4" />Исходящий агент (CGNAT / упавший туннель)</CardTitle>
           <Switch on={agentOn} disabled={!!busy} onClick={() => toggle('agent_enabled', !agentOn)} />
         </CardHeader>
         <CardContent className="p-4 pt-2">
@@ -167,7 +167,7 @@ export default function ApiPanel() {
       {/* inbound REST */}
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0 p-4 pb-2">
-          <CardTitle className="flex items-center gap-2 text-sm"><KeyRound className="size-4" />Входящий REST API (LAN / WG)</CardTitle>
+          <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><KeyRound className="size-4" />Входящий REST API (LAN / WG)</CardTitle>
           <Switch on={restOn} disabled={!!busy} onClick={() => toggle('enabled', !restOn)} />
         </CardHeader>
         <CardContent className="p-4 pt-2">
@@ -203,12 +203,12 @@ function StatTile({ label, value, sub }: { label: string; value: React.ReactNode
   )
 }
 function OkBadge({ ok, children }: { ok: boolean; children: React.ReactNode }) {
-  return <Badge className={ok ? 'border-transparent bg-emerald-500 text-white' : 'border-transparent bg-muted-foreground/40 text-white'}>{children}</Badge>
+  return <Badge className={ok ? 'border-transparent bg-success text-white' : 'border-transparent bg-muted-foreground/40 text-white'}>{children}</Badge>
 }
 function Switch({ on, onClick, disabled }: { on: boolean; onClick: () => void; disabled?: boolean }) {
   return (
     <button onClick={onClick} disabled={disabled}
-      className={cn('relative h-6 w-11 rounded-full transition disabled:opacity-50', on ? 'bg-emerald-500' : 'bg-muted-foreground/30')}>
+      className={cn('relative h-6 w-11 rounded-full transition disabled:opacity-50', on ? 'bg-success' : 'bg-muted-foreground/30')}>
       <span className={cn('absolute left-0.5 top-0.5 size-5 rounded-full bg-white transition-transform', on && 'translate-x-5')} />
     </button>
   )
