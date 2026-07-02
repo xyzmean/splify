@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && sed -i 's|\\./splify-x\\.js|./splify-x.js?v=0.0.0|g' dist/splify-index.js dist/splify-settings.js",
     "lint": "oxlint",
     "preview": "vite preview"
   },

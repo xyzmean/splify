@@ -8,13 +8,13 @@
 	"admin/services/splify/home": {
 		"title": "Главная",
 		"order": 1,
-		"action": { "type": "view", "path": "splify/home" },
+		"action": { "type": "view", "path": "splify/main" },
 		"depends": { "acl": [ "luci-app-splify" ] }
 	},
 	"admin/services/splify/settings": {
 		"title": "Дополнительно",
 		"order": 2,
-		"action": { "type": "view", "path": "splify/settings" },
+		"action": { "type": "view", "path": "splify/advanced" },
 		"depends": { "acl": [ "luci-app-splify" ] }
 	}
 }
