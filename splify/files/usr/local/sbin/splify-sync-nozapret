@@ -65,7 +65,11 @@ fi
 # to the last synced one AND the live set is still healthy. INCLUDE_VPN is part of
 # the signature so the degradation toggle (1->0) always forces a rebuild.
 NEW_SIG="$INCLUDE_VPN:$(md5sum < "$TMP/all.lst" | cut -d' ' -f1)"
-OLD_SIG="$(cat "$NOZAPRET_SIG" 2>/dev/null)"
+# `|| true` is load-bearing: the sig lives on tmpfs, so after a reboot the file
+# is GONE, the bare `cat` exits 1 and `set -e` would kill the script right here
+# — before the rebuild — leaving nozapret with only zapret's own private nets
+# (and the sig is written last, so every subsequent tick died the same way).
+OLD_SIG="$(cat "$NOZAPRET_SIG" 2>/dev/null || true)"
 LIVE="$(set_count "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET")"
 if nozapret_current "$NEW_SIG" "$OLD_SIG" "${LIVE:-0}" "$ZAPRET_NOZAPRET_MIN" "${SPLIFY_FORCE_SYNC:-0}"; then
     exit 0
