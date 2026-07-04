@@ -217,6 +217,72 @@ config_get() { eval "$1=\"\${cfg_${2}_${3}:-$4}\""; }
     run fw_zone_glob_covering eth0; [ "$status" -ne 0 ]   # exact device, not a glob
 }
 
+# ---- wg_handshake_age: freshest peer wins -----------------------------------
+# A multi-peer iface must report liveness from the peer that handshook most
+# recently, not from whichever peer `wg show` lists first.
+@test "wg_handshake_age picks the freshest peer" {
+    load_fn "$COMMON_SH" wg_handshake_age
+    date()   { echo 1000; }
+    wgshow() { printf 'pkA\t400\npkB\t900\npkC\t0\n'; }
+    [ "$(wg_handshake_age wg0)" = "100" ]
+}
+
+@test "wg_handshake_age: never handshaken / no output -> 999999" {
+    load_fn "$COMMON_SH" wg_handshake_age
+    date()   { echo 1000; }
+    wgshow() { printf 'pkA\t0\n'; }
+    [ "$(wg_handshake_age wg0)" = "999999" ]
+    wgshow() { :; }
+    [ "$(wg_handshake_age wg0)" = "999999" ]
+}
+
+# ---- probe_candidate: degraded-path healing ----------------------------------
+# The regression this pins: after a degrade nothing was ever re-setup — `ifup`
+# on an up-but-wedged tunnel is a netifd no-op, so a recovered WG server (or a
+# DDNS endpoint move) was never picked up until a manual ifdown/ifup. A
+# present-but-unhealthy candidate must now get a full re-setup (ep_restart).
+setup_probe() {
+    load_fn "$FAILOVER_SH" probe_candidate
+    CALLS=""
+    log()            { :; }
+    bring_up()       { CALLS="$CALLS bring_up"; }
+    ep_restart()     { CALLS="$CALLS ep_restart"; }
+    wait_handshake() { CALLS="$CALLS wait_handshake"; }
+}
+
+@test "probe_candidate: present+healthy -> ok, no bounce" {
+    setup_probe
+    ep_present()    { return 0; }
+    iface_healthy() { return 0; }
+    probe_candidate wg0
+    [ -z "$CALLS" ] || { echo "unexpected calls:$CALLS"; return 1; }
+}
+
+@test "probe_candidate: absent -> plain parallel bring_up, no restart" {
+    setup_probe
+    ep_present()    { return 1; }
+    iface_healthy() { return 0; }
+    probe_candidate wg0
+    [ "$CALLS" = " bring_up" ] || { echo "calls:$CALLS"; return 1; }
+}
+
+@test "probe_candidate: present but unhealthy -> full re-setup heals it" {
+    setup_probe
+    ep_present() { return 0; }
+    HP_N=0
+    iface_healthy() { HP_N=$((HP_N + 1)); [ "$HP_N" -ge 2 ]; }   # sick, then healed
+    probe_candidate wg0
+    [ "$CALLS" = " ep_restart wait_handshake" ] || { echo "calls:$CALLS"; return 1; }
+}
+
+@test "probe_candidate: re-setup did not help -> reports unhealthy" {
+    setup_probe
+    ep_present()    { return 0; }
+    iface_healthy() { return 1; }
+    run probe_candidate wg0
+    [ "$status" -ne 0 ]
+}
+
 # The simple Главная toggle relies on two allow-listed actions, on/off. The rpcd
 # plugin is now a thin wrapper that funnels `action` into splify-ctl's cmd_action,
 # so the on)/off) branches live there (mirrored by the inbound REST API + agent).

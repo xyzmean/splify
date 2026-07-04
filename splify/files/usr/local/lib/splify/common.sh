@@ -541,8 +541,11 @@ single_run() {
 wgshow() { awg show "$@" 2>/dev/null; wg show "$@" 2>/dev/null; }
 
 # Live tunnel handshake age in seconds (huge number if never), for one iface.
+# FRESHEST peer wins (max timestamp), not the first listed one: on a multi-peer
+# iface an extra/dead peer sorted first would report the tunnel as down although
+# the peer actually carrying traffic handshook seconds ago.
 wg_handshake_age() {
-    _hs=$(wgshow "${1:-$VPN_IFACE}" latest-handshakes | awk 'NR==1{print $2}')
+    _hs=$(wgshow "${1:-$VPN_IFACE}" latest-handshakes | awk '$2 > m { m = $2 } END { print m + 0 }')
     [ -n "$_hs" ] && [ "$_hs" -gt 0 ] 2>/dev/null && echo $(( $(date +%s) - _hs )) || echo 999999
 }
 

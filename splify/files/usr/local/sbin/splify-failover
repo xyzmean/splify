@@ -5,12 +5,16 @@
 # interfaces listed in UCI (`config endpoint`, lowest priority number wins).
 #
 # Each tick walks the endpoints best-first and picks the first HEALTHY one,
-# probing candidates NON-disruptively (`ifup` a parallel iface, then
-# `ping -I <iface>` through it — the live path is never torn down to test others):
+# probing candidates without touching the live path (`ping -I <iface>` through a
+# parallel iface — the iface carrying traffic is never torn down to test others):
 #   1. current iface healthy            -> keep it
 #   2. current iface stuck              -> RESTART it first (ifdown/ifup), recheck
 #   3. a higher-priority iface healthy  -> switch up to it (recover toward #1)
 #   4. some lower-priority iface healthy -> fail over down to it
+#      (a candidate that is present-but-unhealthy is also re-setup via
+#      ifdown/ifup: it carries no traffic, and a plain `ifup` is a netifd NO-OP
+#      on an up interface, so it can never heal a stuck tunnel — see
+#      probe_candidate)
 #   5. no tunnel healthy + zapret avail -> WAN fallback, pull VPN IPs OUT of
 #      nozapret so zapret DPI-bypasses them on WAN (state "zapret")
 #   6. no tunnel + no/failing zapret     -> plain WAN fallback (state "wan")
@@ -57,6 +61,31 @@ restart_iface() {   # WG often unsticks on a plain restart — do this FIRST
 bring_up() {        # bring a candidate up in parallel (no list/route changes yet)
     ep_bringup "$1"
     wait_handshake "$1"
+}
+
+# Probe a NON-active candidate; 0 iff it ends up healthy. The crucial rung is
+# "present but unhealthy": `ifup` is a netifd NO-OP on an already-up interface,
+# so after a degrade (state wan/zapret/killswitch, _cur empty) nothing would
+# ever re-setup a wedged tunnel — the daemon then sits in fallback forever even
+# after the WG server recovers, and only a manual ifdown/ifup (what a dashboard
+# config re-push does) revives it. Failure modes that ONLY a full re-setup
+# heals: a stale resolved endpoint IP (netifd resolves the hostname once, at
+# proto setup — a DDNS move is never picked up), a wedged UDP/CGNAT path (the
+# re-setup rebinds the socket), a netifd proto-error state. The bounce is
+# non-disruptive: a candidate reaching this rung carries no traffic (routes
+# point at _cur / blackhole / WAN). Log-only, no journal: a long-dead candidate
+# would flood the events ring with a restart entry every tick.
+probe_candidate() {
+    if ! ep_present "$1"; then
+        bring_up "$1"
+    elif iface_healthy "$1"; then
+        return 0
+    else
+        log "candidate $1 present but unhealthy — re-setup (ifdown/ifup)"
+        ep_restart "$1"
+        wait_handshake "$1"
+    fi
+    iface_healthy "$1"
 }
 
 # ---- zapret -----------------------------------------------------------------
@@ -169,23 +198,28 @@ tick() {
 
     _cur=""; case "$(read_state)" in vpn:*) _cur="$(active_iface)" ;; esac
 
+    # Probe the active iface ONCE up front; the result feeds both the killswitch
+    # decision and the loop below (probing it twice per tick doubled the
+    # failure-detection latency by a full ping round).
+    _cur_ok=""
+    [ -n "$_cur" ] && iface_healthy "$_cur" && _cur_ok=1
+
     # killswitch: blackhole table 200 BEFORE any disruptive ifdown/probe whenever
     # we don't already have a healthy active tunnel — covers a stuck current iface
     # AND a cold start / previously-down state (_cur empty), so nothing leaks to
     # WAN during the probe window. set_vpn lifts it on recovery.
-    if [ "$KILLSWITCH" = "1" ]; then
-        if [ -z "$_cur" ] || ! iface_healthy "$_cur"; then fail_closed; fi
+    if [ "$KILLSWITCH" = "1" ] && [ "$_cur_ok" != 1 ]; then
+        fail_closed
     fi
 
     _best=""
     for _if in $_ordered; do
         if [ "$_if" = "$_cur" ]; then
-            iface_healthy "$_if" && { _best="$_if"; break; }
+            [ "$_cur_ok" = 1 ] && { _best="$_if"; break; }
             restart_iface "$_if"                       # stuck -> restart FIRST
             iface_healthy "$_if" && { _best="$_if"; break; }
         else
-            bring_up "$_if"                            # parallel probe
-            iface_healthy "$_if" && { _best="$_if"; break; }
+            probe_candidate "$_if" && { _best="$_if"; break; }
         fi
     done
 
@@ -255,6 +289,26 @@ heal_lists() {
     ) >/dev/null 2>&1 &
 }
 
+# ---- pass mutex ---------------------------------------------------------------
+# The daemon tick and a one-shot pass (splify-apply on Save&Apply / agent import /
+# cron) otherwise interleave: both restart ifaces, write state and share the probe
+# rule/table (prio 998 / table 201) — one pass can delete the other's probe rule
+# mid-ping and manufacture a spurious "stuck endpoint" restart. Serialize whole
+# passes; the subshell scopes the lock fd so it drops when the pass ends (a
+# bare `flock 9` held by the long-lived daemon would starve one-shots forever).
+# Degrades to unserialized if flock isn't installed. tick only communicates via
+# files (state/journal/fail counter), so running it in a subshell changes nothing.
+FAILOVER_LOCK="/var/run/splify-failover.lock"
+run_pass() {
+    # writability pre-check: if the lock file can't be opened the redirect would
+    # kill the whole compound and the pass would silently never run.
+    if command -v flock >/dev/null 2>&1 && : 2>/dev/null >> "$FAILOVER_LOCK"; then
+        ( flock 9; tick ) 9>>"$FAILOVER_LOCK"
+    else
+        tick
+    fi
+}
+
 # ---- entry ------------------------------------------------------------------
 if [ "${1:-}" = "--daemon" ]; then
     [ -x /usr/local/sbin/splify-apply ] && /usr/local/sbin/splify-apply >/dev/null 2>&1 || true
@@ -262,11 +316,11 @@ if [ "${1:-}" = "--daemon" ]; then
     rm -f "$LIST_HEAL_STAMP" 2>/dev/null || true
     heal_lists
     while :; do
-        tick
+        run_pass
         heal_lists
         _iv="$(uci -q get splify.global.interval 2>/dev/null)"
         [ "$_iv" -ge 5 ] 2>/dev/null || _iv=180
         sleep "$_iv"
     done
 fi
-tick
+run_pass
