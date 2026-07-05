@@ -143,8 +143,20 @@ device_is_wg() {  # device
     return 1
 }
 # True iff $1 is the iface of a configured `config singbox` section (no netifd
-# proto check possible — sing-box has none). Mirrors iface_is_wg's role as a
-# second gate: a name found in this UCI type is a genuine sing-box tunnel.
+# proto check possible — sing-box has none).
+#
+# SECURITY NOTE: unlike iface_is_wg (whose truth depends on network.$1.proto,
+# something splify's own write ACL can never set — a real WG interface can
+# only be provisioned via LuCI's separate Network page), a `config singbox`
+# section lives entirely inside splify's own UCI and the SAME write-ACL grant
+# that lets an operator import a legitimate sing-box endpoint could just as
+# easily create one named `guest`/`wan`/`lan`. This function alone is NOT a
+# safe "genuine tunnel, not an arbitrary existing network" gate the way
+# iface_is_wg is — that guarantee instead comes from splify-ctl's
+# cmd_singbox_import REFUSING to create/rename a `config singbox` section
+# whose iface collides with any already-existing network.<iface> section, so
+# a sing-box endpoint name can never alias a real interface in the first
+# place. Do not remove that check without re-deriving an equivalent guarantee.
 iface_is_singbox() { [ -n "$(singbox_section_of "$1")" ]; }
 # True iff $1 is ANY splify-managed tunnel iface, regardless of transport.
 iface_is_tunnel() { iface_is_wg "$1" || iface_is_singbox "$1"; }
@@ -231,12 +243,14 @@ ep_bringup() {
 # MUST actually stop then start (full teardown+rebuild), not just start —
 # splify-failover's probe_candidate() calls ep_restart specifically for the
 # "present but unhealthy, needs a full re-setup" rung and depends on this
-# rebuilding the instance, mirroring wg's ifdown+ifup.
+# rebuilding the instance, mirroring wg's ifdown+ifup. (_singbox_instance_ctl's
+# underlying primitive is already a full service restart regardless of the
+# start|stop argument, so one call already gives stop+start semantics — a
+# second call would just restart the whole service twice.)
 ep_restart() {
     case "$(ep_type "$1")" in
         singbox)
             command -v sing-box >/dev/null 2>&1 || { _ep_singbox_down "$1"; return; }
-            _singbox_instance_ctl "$1" stop
             [ -x /usr/local/sbin/splify-singbox-render ] && /usr/local/sbin/splify-singbox-render "$1"
             _singbox_instance_ctl "$1" start ;;
         wg|*) ifdown "$1" >/dev/null 2>&1 || true
@@ -268,11 +282,21 @@ singbox_l3dev() {
     [ -n "$_sl_dev" ] && printf '%s\n' "$_sl_dev" || printf '%s\n' "$1"
 }
 
-# start|stop the named procd instance of the splify-singbox service via ubus.
-# Shared by ep_bringup/ep_restart so both callers use one implementation.
+# Bounce the sing-box service to (re)start a named endpoint's instance. procd's
+# `service` ubus object has no `start_instance`/`stop_instance` methods (its
+# real surface is set/add/list/delete/signal/update_start/update_complete/
+# event/validate/get_data/set_data/state/watchdog) — calling those silently
+# no-ops, so `ep_bringup`/`ep_restart` would never actually start/rebuild
+# anything. The correct, always-available primitive is the init script's own
+# restart, which re-renders+starts every configured+referenced sing-box
+# endpoint via config_foreach. Coarser than WG's per-iface ifdown/ifup (this
+# bounces EVERY sing-box instance, not just $1), but correct — acceptable
+# given sing-box endpoints are expected to be few. $1 (iface) is accepted for
+# call-site clarity/future use but unused; $2 is ignored (both callers just
+# need "make sure this instance is freshly (re)started").
 _singbox_instance_ctl() {  # iface start|stop
-    command -v ubus >/dev/null 2>&1 || return 1
-    ubus call service "${2}_instance" '{"name":"splify-singbox","instance":"'"$1"'"}' >/dev/null 2>&1
+    [ -x /etc/init.d/splify-singbox ] || return 1
+    /etc/init.d/splify-singbox restart >/dev/null 2>&1
 }
 
 # ---- sing-box URI parser (design §2) ---------------------------------------
@@ -379,7 +403,11 @@ singbox_parse_hysteria2() {
     # port MAY carry a comma port-hop suffix (e.g. "443,5000-6000") — don't
     # validate it as a single integer, just require it starts with digits.
     case "$_sbh_port" in [0-9]*) : ;; *) _singbox_reject "empty/non-numeric port (hysteria2)"; return 1 ;; esac
-    _sbh_password="$_sbh_userinfo"
+    # userinfo is percent-encoded like everything else in the URI (a password
+    # containing e.g. '@' would arrive as %40) — decode it the same way query
+    # params and the fragment already are, or auth fails on any password with
+    # a reserved character in it.
+    _sbh_password="$(printf '%s' "$_sbh_userinfo" | uri_unescape)"
     [ -n "$_sbh_password" ] || { _singbox_reject "empty password (hysteria2)"; return 1; }
 
     _sbh_name=""

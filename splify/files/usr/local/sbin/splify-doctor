@@ -87,6 +87,7 @@ for _sbsec in $(uci -q show splify 2>/dev/null | sed -n "s/^splify\.\([^.=]*\)=s
     config_get _sbif "$_sbsec" iface ''
     [ -n "$_sbif" ] || continue
     is_endpoint "$_sbif" || continue            # not referenced by any failover endpoint — skip
+    [ "$(ep_type "$_sbif")" = singbox ] || continue   # that endpoint isn't actually type=singbox — skip
     command -v sing-box >/dev/null 2>&1 || continue   # already reported as FAIL above
     _cf="$(singbox_conf_file "$_sbif")"
     if [ -s "$_cf" ]; then
@@ -130,6 +131,14 @@ for _if in $ORDERED; do
         # path in the summary already names the daemon-confirmed live tunnel.
         _hs="$(ep_liveness "$_if")"
         if [ "$_hs" -lt 180 ] 2>/dev/null; then _health=ok; else _health=idle; fi
+    elif iface_is_singbox "$_if"; then
+        # A sing-box endpoint intentionally has no network.$_if section at
+        # all (its TUN is managed by splify-singbox/procd, not netifd) — the
+        # sing-box-specific loop above already reported package/config/TUN/
+        # process diagnostics for it, so don't ALSO fall through to the
+        # generic "not configured in /etc/config/network" FAIL below, which
+        # would wrongly tell the operator to create a network interface.
+        :
     elif [ -n "$(uci -q get "network.$_if" 2>/dev/null)" ]; then
         # configured in /etc/config/network but the kernel link is gone (stopped /
         # auto 0) — recoverable; failover brings candidates up with ifup.

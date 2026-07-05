@@ -23,6 +23,11 @@ _singbox_start_one() {
     config_get iface "$1" iface ''
     [ -n "$iface" ] || return 0
     is_endpoint "$iface" || return 0   # not referenced by any failover endpoint — skip
+    # ...and that endpoint must actually be type=singbox — a link imported
+    # under a name that's (still) a `type=wg` endpoint, or reused from one,
+    # must NOT get a sing-box instance started against it (it could collide
+    # with a real WG device sharing that name and respawn forever broken).
+    [ "$(ep_type "$iface")" = singbox ] || return 0
 
     /usr/local/sbin/splify-singbox-render "$iface" || {
         log "singbox $iface: render failed, instance not started"

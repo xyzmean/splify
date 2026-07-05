@@ -393,6 +393,15 @@ setup_singbox_parser() {
     case "$output" in *'port=443,5000-6000'*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
+@test "singbox_parse_hysteria2 url-decodes a percent-encoded password" {
+    setup_singbox_parser
+    # p%40ss -> p@ss: the userinfo is percent-encoded like query params/fragment
+    # are — a reserved character in the password must not reach sing-box raw.
+    run singbox_parse_hysteria2 'hysteria2://p%40ss@host.example.com:443'
+    [ "$status" -eq 0 ]
+    case "$output" in *'password=p@ss'*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
 @test "singbox_parse_uri rejects an unrecognized scheme with empty stdout" {
     setup_singbox_parser
     run singbox_parse_uri 'ss://foo@bar.example.com:1'

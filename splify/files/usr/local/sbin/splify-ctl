@@ -534,6 +534,23 @@ cmd_singbox_get() {
     json_init; emit_singbox_iface "$_sec"; json_dump
 }
 
+# Every `tun_index` already claimed by a config singbox section (used to
+# allocate a collision-free 172.19.<N>.1/30 for a NEW section — see below).
+_singbox_used_tun_indexes() {
+    for _s in $(singbox_secs); do g "splify.$_s.tun_index"; done
+}
+# Smallest positive integer (1..60, matching the /30 addressing space) not
+# already claimed by another config singbox section.
+_singbox_next_tun_index() {
+    _used=" $(_singbox_used_tun_indexes) "
+    _n=1
+    while [ "$_n" -le 60 ]; do
+        case "$_used" in *" $_n "*) ;; *) echo "$_n"; return 0 ;; esac
+        _n=$((_n + 1))
+    done
+    return 1   # all 60 slots taken — caller must refuse to create a new endpoint
+}
+
 # Parse a vless/hysteria2 URI (plain text, matching wg-import's convention) from
 # stdin into UCI for <iface>. Unlike wg-import, a sing-box endpoint CAN be
 # created purely by importing — there's no separate "create the interface in
@@ -574,8 +591,18 @@ EOF
 
     _sec="$(singbox_section_of "$_if")"
     if [ -z "$_sec" ]; then
+        # SECURITY: a sing-box iface is a synthetic name that must never alias
+        # a real network interface — unlike wg-import (gated by iface_is_wg,
+        # which only ever recognizes an iface splify's own write ACL can't
+        # forge), a config-singbox section lives entirely in splify's own UCI
+        # and this very method could otherwise be used to "adopt" e.g. `guest`
+        # or `wan`, after which iface_is_tunnel would wrongly treat it as a
+        # genuine tunnel and splify-firewall fix could mutate its real zone.
+        [ -z "$(g "network.$_if")" ] || die_json "iface '$_if' already exists as a network interface — choose a different (synthetic) name for the sing-box endpoint" 2
+        _idx="$(_singbox_next_tun_index)" || die_json "no free sing-box TUN slot (max 60 concurrent endpoints)" 2
         _sec="$(uci add splify singbox)"
         uci set "splify.$_sec.iface=$_if"
+        uci set "splify.$_sec.tun_index=$_idx"
     fi
     # l3dev only set on first import — a re-import must not silently rename an
     # already-running TUN device.
@@ -590,17 +617,26 @@ EOF
     [ -n "$_name" ] && uci set "splify.$_sec.name=$_name"
     uci commit splify
 
+    # The URI/cached fields are saved either way — but if the render/validate
+    # step fails, the running endpoint (if any) is still on its OLD config, so
+    # this must NOT report ok:true (a controller/UI would otherwise record a
+    # successful import that never actually took effect).
+    _render_ok=1
     if [ "$_apply" = 1 ]; then
-        [ -x /usr/local/sbin/splify-singbox-render ] && /usr/local/sbin/splify-singbox-render "$_if"
-        _singbox_instance_ctl "$_if" stop
-        _singbox_instance_ctl "$_if" start
-        /usr/local/sbin/splify-apply >/dev/null 2>&1
+        if [ -x /usr/local/sbin/splify-singbox-render ] && ! /usr/local/sbin/splify-singbox-render "$_if"; then
+            _render_ok=0
+        fi
+        if [ "$_render_ok" = 1 ]; then
+            _singbox_instance_ctl "$_if" start
+            /usr/local/sbin/splify-apply >/dev/null 2>&1
+        fi
     fi
 
     json_init
-    json_add_boolean ok 1
+    json_add_boolean ok "$_render_ok"
     json_add_boolean applied "$_apply"
     json_add_string  iface "$_if"
+    [ "$_render_ok" = 0 ] && json_add_string error "ссылка сохранена, но sing-box отклонил получившийся конфиг — проверьте параметры и импортируйте заново"
     emit_singbox_iface "$_sec"
     json_dump
 }

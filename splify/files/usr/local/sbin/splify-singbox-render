@@ -52,21 +52,26 @@ PORT="$(_pf port)"
 }
 
 # ---- deterministic local TUN /30 (172.19.<N>.1/30) -------------------------
-# N is derived purely from the iface string (sum of byte values mod 60, +1 ->
-# always in 1..60), so it's stable and reproducible WITHOUT persisting a new
-# UCI field (we don't own splify-ctl / the singbox UCI schema — only read it).
-_tun_index() {
-    _ti_sum=0
-    _ti_s="$1"
-    while [ -n "$_ti_s" ]; do
-        _ti_c="${_ti_s%"${_ti_s#?}"}"   # first character
-        _ti_s="${_ti_s#?}"              # rest
-        _ti_o="$(printf '%d' "'$_ti_c")"
-        _ti_sum=$((_ti_sum + _ti_o))
-    done
-    echo $(( (_ti_sum % 60) + 1 ))
-}
-TUN_N="$(_tun_index "$IFACE")"
+# N is the `tun_index` splify-ctl allocates (and persists) at import time —
+# the smallest free slot not already claimed by another config singbox
+# section, so two concurrent endpoints can never collide on the same /30.
+# Fall back to a hash of the iface string ONLY for a section that somehow has
+# no tun_index cached (e.g. hand-edited UCI) — not collision-free, but better
+# than refusing to render at all; log a warning so it gets noticed.
+TUN_N="$(uci -q get "splify.$_SEC.tun_index" 2>/dev/null)"
+case "$TUN_N" in
+    ''|*[!0-9]*)
+        warn "singbox $IFACE: no cached tun_index — falling back to a hashed (not collision-checked) TUN address; re-import to get a properly allocated one"
+        _ti_sum=0; _ti_s="$IFACE"
+        while [ -n "$_ti_s" ]; do
+            _ti_c="${_ti_s%"${_ti_s#?}"}"   # first character
+            _ti_s="${_ti_s#?}"              # rest
+            _ti_o="$(printf '%d' "'$_ti_c")"
+            _ti_sum=$((_ti_sum + _ti_o))
+        done
+        TUN_N=$(( (_ti_sum % 60) + 1 ))
+        ;;
+esac
 TUN_ADDR="172.19.${TUN_N}.1/30"
 
 L3DEV="$(singbox_l3dev "$IFACE")"
@@ -193,15 +198,29 @@ hysteria2)
     json_add_string type hysteria2
     json_add_string tag sb-out
     json_add_string server "$SERVER"
-    # PORT may carry a comma port-hop range (e.g. "443,5000-6000"). v1
-    # simplification: a plain numeric port is sent as server_port (int); a
-    # comma-range is passed through as-is in the same field (recent sing-box
-    # hysteria2 outbound schemas accept the combined string form too, per
-    # upstream docs) — not exhaustively spec-verified against every version.
-    case "$PORT" in
-        *,*) json_add_string server_port "$PORT" ;;
-        *)   json_add_int    server_port "$PORT" ;;
-    esac
+    # PORT may be a plain port ("443") or a hysteria2 port-hop list/range
+    # ("443,5000-6000"). sing-box's hysteria2 outbound treats server_port
+    # (single int) and server_ports (range list) as MUTUALLY EXCLUSIVE, not a
+    # combined string in one field — https://sing-box.sagernet.org/configuration/outbound/hysteria2/#server_ports.
+    # Split on ',' into entries into a temp file (avoids unquoted-expansion
+    # word-splitting AND a `| while read` subshell, which would lose jshn's
+    # in-progress document state); a lone plain-integer entry -> server_port;
+    # anything else (a range, or more than one entry) -> server_ports, with
+    # hysteria2's '-' range separator converted to sing-box's own ':'.
+    _ph_tmp="$(mktemp 2>/dev/null || printf '/tmp/splify-sbports.%s' "$$")"
+    # trailing \n guarantees `wc -l`/`read` see every entry, including the last
+    printf '%s\n' "$PORT" | tr ',' '\n' > "$_ph_tmp"
+    _ph_n="$(wc -l < "$_ph_tmp")"
+    if [ "$_ph_n" -eq 1 ] && ! grep -q '[^0-9]' "$_ph_tmp"; then
+        json_add_int server_port "$PORT"
+    else
+        json_add_array server_ports
+        while IFS= read -r _ph_p; do
+            [ -n "$_ph_p" ] && json_add_string "" "$(printf '%s' "$_ph_p" | sed 's/-/:/')"
+        done < "$_ph_tmp"
+        json_close_array
+    fi
+    rm -f "$_ph_tmp"
     json_add_string password "$PASSWORD"
     [ -n "$OBFS" ] && {
         json_add_object obfs
