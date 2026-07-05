@@ -54,6 +54,11 @@ _clear_rai() {
     uci -q set "network.$1.route_allowed_ips=0" && _net_changed=1
 }
 for _if in $EP_LIST; do
+    # This loop is WG-only: route_allowed_ips is a wireguard/amneziawg peer
+    # option, and sing-box has no matching network.<iface> section anyway (so
+    # it was already an effective no-op for a singbox iface) — this makes that
+    # explicit instead of relying on an empty uci-show match.
+    iface_is_wg "$_if" || continue
     _clear_rai "$_if"
     for _sec in $(uci show network 2>/dev/null \
             | sed -n "s/^network\.\([^=]*\)=\(wireguard\|amneziawg\)_${_if}\$/\1/p"); do
@@ -106,10 +111,25 @@ emit_set() {  # $1 set name, $2 size, stdin = cidrs
 # Anti-loop daddr: the IPs every configured tunnel actually connects to (so
 # LAN->endpoint packets aren't themselves routed into a tunnel). Prefer the live
 # kernel endpoint per iface; fall back to nothing if the tunnel is down.
+# sing-box has no `wg show`-style endpoint discovery — its remote server comes
+# from the singbox section's cached `server` field instead: used directly if
+# it's already a bare dotted-quad, else resolved via nslookup, best-effort
+# (contributes nothing if resolution fails — same failure mode as a down WG
+# tunnel reporting no endpoint via wgshow).
 EP_IPS=""
 for _if in $EP_LIST; do
-    EP_IPS="$EP_IPS $(wgshow "$_if" endpoints 2>/dev/null \
-        | awk '{print $2}' | sed 's/:[0-9]*$//' | grep -E '^[0-9]+\.')"
+    if iface_is_singbox "$_if"; then
+        _sbsec="$(singbox_section_of "$_if")"
+        _srv="$(uci -q get "splify.$_sbsec.server" 2>/dev/null)"
+        case "$_srv" in
+            ''|*[!0-9.]*) _ip="$(nslookup "$_srv" 2>/dev/null | awk '/^Address/{a=$3} END{print a}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')" ;;
+            *) _ip="$_srv" ;;
+        esac
+        [ -n "$_ip" ] && EP_IPS="$EP_IPS $_ip"
+    else
+        EP_IPS="$EP_IPS $(wgshow "$_if" endpoints 2>/dev/null \
+            | awk '{print $2}' | sed 's/:[0-9]*$//' | grep -E '^[0-9]+\.')"
+    fi
 done
 ep_braces="$(echo "$EP_IPS" | tr ' ' '\n' | grep -E '^[0-9]' | sort -u | tr '\n' ',' | sed 's/,$//')"
 

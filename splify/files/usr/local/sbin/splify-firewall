@@ -24,12 +24,13 @@ case "$CMD" in check|fix) : ;; *) die "usage: splify-firewall {check|fix} <iface
 # ubus `action` method with the write ACL) could pass `wan` and open WAN->LAN.
 # Both check and fix are restricted so the tool can never touch a foreign iface.
 is_endpoint "$IFACE" || die "$IFACE is not a configured splify endpoint — refusing"
-# Second gate: the endpoint must be a REAL WireGuard/AmneziaWG interface, not just
-# a name in splify's UCI. A write-ACL caller could add an arbitrary iface (e.g.
-# `guest`, already in its own zone) as an endpoint section and then fw_fix it,
-# adding masq + guest->lan/wan forwarding to that foreign zone. Requiring the
-# tunnel proto stops firewall mutation from ever reaching a non-tunnel network.
-iface_is_wg "$IFACE" || die "$IFACE is not a WireGuard/AmneziaWG interface — refusing to modify its firewall zone"
+# Second gate: the endpoint must be a REAL splify tunnel (WireGuard/AmneziaWG OR
+# sing-box), not just a name in splify's UCI. A write-ACL caller could add an
+# arbitrary iface (e.g. `guest`, already in its own zone) as an endpoint section
+# and then fw_fix it, adding masq + guest->lan/wan forwarding to that foreign
+# zone. Requiring a genuine tunnel (of either transport) stops firewall
+# mutation from ever reaching a non-tunnel network.
+iface_is_tunnel "$IFACE" || die "$IFACE is not a configured splify tunnel (wg/awg/singbox) — refusing to modify its firewall zone"
 
 # fw_wan_zone (zone covering 'wan', else conventional 'wan') and fw_zone_is_shared
 # (refuse to touch the WAN/LAN zone — fixing it would open the whole infra zone,
@@ -161,7 +162,14 @@ fix_iface() {
         uci set "firewall.$_zs.forward=ACCEPT"
         uci set "firewall.$_zs.masq=1"
         uci set "firewall.$_zs.mtu_fix=1"
-        uci add_list "firewall.$_zs.network=$IFACE"
+        if iface_is_singbox "$IFACE"; then
+            # sing-box has no netifd `network.<iface>` section to reference by
+            # name — it only exists as a TUN device, so the zone must list it
+            # via `device=` instead of `network=`.
+            uci add_list "firewall.$_zs.device=$(singbox_l3dev "$IFACE")"
+        else
+            uci add_list "firewall.$_zs.network=$IFACE"
+        fi
         CHANGED=1
         log "firewall: created zone '$ZONE' for $IFACE (accept-all + masq + mtu_fix)"
     fi

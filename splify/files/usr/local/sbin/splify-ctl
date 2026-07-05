@@ -23,6 +23,8 @@
 #   wg-get <iface> [--reveal]    one interface -> stdout (JSON)
 #   wg-set <iface> [--no-apply]  set one interface from stdin (JSON)
 #   wg-import <iface> [--no-apply]  parse a wg/awg .conf from stdin into <iface>
+#   singbox-get <iface>          one sing-box interface -> stdout (JSON, cached fields only)
+#   singbox-import <iface> [--no-apply]  parse a vless/hysteria2 URI from stdin into <iface>
 #   action <name> [iface]        run one allow-listed maintenance action
 #   status                       splify-doctor --json (passthrough)
 #   api-get                      api/agent config + runtime -> stdout (JSON)
@@ -125,6 +127,22 @@ emit_wg_iface() {  # iface reveal
     json_close_array
 }
 
+# Every `config singbox` section name in /etc/config/splify, one per line.
+singbox_secs() {
+    uci show splify 2>/dev/null | sed -n 's/^splify\.\([^.=]*\)=singbox$/\1/p'
+}
+
+# Emit ONE sing-box interface as a jshn object (caller has opened it). CACHED
+# display fields only — the raw `uri` (embeds a credential/uuid) is NEVER
+# emitted, since this object may be exposed via the read ACL.
+emit_singbox_iface() {  # section
+    _sec="$1"
+    for _o in protocol server port security network name; do
+        _v="$(g "splify.$_sec.$_o")"; [ -n "$_v" ] && json_add_string "$_o" "$_v"
+    done
+    json_add_string iface "$(g "splify.$_sec.iface")"
+}
+
 # splify.global -> jshn object (caller has opened it). Known schema; list-typed
 # keys become arrays, the rest strings. Reading raw UCI (not common.sh's derived
 # vars) keeps export faithful for round-tripping.
@@ -177,6 +195,14 @@ cmd_export() {
     json_add_object wg
     for _if in $(wg_ifaces); do
         json_add_object "$_if"; emit_wg_iface "$_if" "$_reveal"; json_close_object
+    done
+    json_close_object
+
+    json_add_object singbox
+    for _sec in $(singbox_secs); do
+        _sbif="$(g "splify.$_sec.iface")"
+        [ -n "$_sbif" ] || continue
+        json_add_object "$_sbif"; emit_singbox_iface "$_sec"; json_close_object
     done
     json_close_object
 
@@ -498,6 +524,85 @@ cmd_wg_import() {
         /usr/local/sbin/splify-apply >/dev/null 2>&1
     fi
     json_init; json_add_boolean ok 1; json_add_boolean applied "$_apply"; json_dump
+}
+
+# ---- sing-box single-interface get/import ----------------------------------
+cmd_singbox_get() {
+    valid_iface "$1" || die_json "invalid iface" 2
+    iface_is_singbox "$1" || die_json "not a sing-box interface" 2
+    _sec="$(singbox_section_of "$1")"
+    json_init; emit_singbox_iface "$_sec"; json_dump
+}
+
+# Parse a vless/hysteria2 URI (plain text, matching wg-import's convention) from
+# stdin into UCI for <iface>. Unlike wg-import, a sing-box endpoint CAN be
+# created purely by importing — there's no separate "create the interface in
+# Network" step first, so a missing section is added, not rejected.
+cmd_singbox_import() {
+    _if="$1"
+    valid_iface "$_if" || die_json "invalid iface" 2
+    # IFNAMSIZ: this becomes the default TUN device name, which the kernel
+    # truncates/rejects past 15 chars.
+    [ "${#_if}" -le 15 ] || die_json "iface name too long (max 15 chars): $_if" 2
+    _apply=1; [ "$2" = "--no-apply" ] && _apply=0
+
+    _uri="$(cat)"
+    # trim leading/trailing whitespace/newlines
+    _uri="$(printf '%s' "$_uri" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+    _errf="$(mktemp 2>/dev/null || printf '/tmp/splify-sbimport-err.%s' "$$")"
+    _parsed="$(singbox_parse_uri "$_uri" 2>"$_errf")" || {
+        _err="$(cat "$_errf" 2>/dev/null)"
+        rm -f "$_errf" 2>/dev/null
+        die_json "invalid vless/hysteria2 URI for $_if: ${_err:-parse failed}" 2
+    }
+    rm -f "$_errf" 2>/dev/null
+
+    _protocol=""; _server=""; _port=""; _security=""; _network=""; _name=""
+    while IFS='=' read -r _k _v; do
+        case "$_k" in
+            protocol) _protocol="$_v" ;;
+            server)   _server="$_v" ;;
+            port)     _port="$_v" ;;
+            security) _security="$_v" ;;
+            network)  _network="$_v" ;;
+            name)     _name="$_v" ;;
+        esac
+    done <<EOF
+$_parsed
+EOF
+
+    _sec="$(singbox_section_of "$_if")"
+    if [ -z "$_sec" ]; then
+        _sec="$(uci add splify singbox)"
+        uci set "splify.$_sec.iface=$_if"
+    fi
+    # l3dev only set on first import — a re-import must not silently rename an
+    # already-running TUN device.
+    [ -n "$(g "splify.$_sec.l3dev")" ] || uci set "splify.$_sec.l3dev=$_if"
+
+    uci set "splify.$_sec.uri=$_uri"
+    uci set "splify.$_sec.protocol=$_protocol"
+    uci set "splify.$_sec.server=$_server"
+    uci set "splify.$_sec.port=$_port"
+    uci set "splify.$_sec.security=$_security"
+    uci set "splify.$_sec.network=$_network"
+    [ -n "$_name" ] && uci set "splify.$_sec.name=$_name"
+    uci commit splify
+
+    if [ "$_apply" = 1 ]; then
+        [ -x /usr/local/sbin/splify-singbox-render ] && /usr/local/sbin/splify-singbox-render "$_if"
+        _singbox_instance_ctl "$_if" stop
+        _singbox_instance_ctl "$_if" start
+        /usr/local/sbin/splify-apply >/dev/null 2>&1
+    fi
+
+    json_init
+    json_add_boolean ok 1
+    json_add_boolean applied "$_apply"
+    json_add_string  iface "$_if"
+    emit_singbox_iface "$_sec"
+    json_dump
 }
 
 # ---- allow-listed maintenance actions (mirror of the rpcd plugin) ----------
@@ -834,6 +939,8 @@ case "$1" in
     wg-get)     shift; cmd_wg_get "$@" ;;
     wg-set)     shift; cmd_wg_set "$@" ;;
     wg-import)  shift; cmd_wg_import "$@" ;;
+    singbox-get)    shift; cmd_singbox_get "$@" ;;
+    singbox-import) shift; cmd_singbox_import "$@" ;;
     action)     shift; cmd_action "$@" ;;
     status)     /usr/local/sbin/splify-doctor --json || true ;;
     api-get)    cmd_api_get ;;
@@ -842,5 +949,5 @@ case "$1" in
     token-regen) cmd_token_regen ;;
     connect)    cmd_connect ;;
     enroll)     cmd_enroll ;;
-    *) die_json "usage: splify-ctl {export|import|wg-get|wg-set|wg-import|action|status|api-get|api-set|api-token|token-regen|connect|enroll|sites-apply|sites-clear|sites-get|lan}" 2 ;;
+    *) die_json "usage: splify-ctl {export|import|wg-get|wg-set|wg-import|singbox-get|singbox-import|action|status|api-get|api-set|api-token|token-regen|connect|enroll|sites-apply|sites-clear|sites-get|lan}" 2 ;;
 esac

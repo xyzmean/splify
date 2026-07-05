@@ -142,6 +142,26 @@ device_is_wg() {  # device
     done
     return 1
 }
+# True iff $1 is the iface of a configured `config singbox` section (no netifd
+# proto check possible — sing-box has none). Mirrors iface_is_wg's role as a
+# second gate: a name found in this UCI type is a genuine sing-box tunnel.
+iface_is_singbox() { [ -n "$(singbox_section_of "$1")" ]; }
+# True iff $1 is ANY splify-managed tunnel iface, regardless of transport.
+iface_is_tunnel() { iface_is_wg "$1" || iface_is_singbox "$1"; }
+# True iff L3 device $1 is the l3dev/iface of some `config singbox` section.
+# Mirrors device_is_wg's pattern above, but checks config singbox sections
+# instead of netifd interfaces (sing-box has no network.*.proto to query).
+device_is_singbox() {  # device
+    [ -n "$1" ] || return 1
+    for _ds in $(uci -q show splify 2>/dev/null | sed -n "s/^splify\.\([^.=]*\)=singbox\$/\1/p"); do
+        config_get _ds_iface "$_ds" iface ''
+        [ -n "$_ds_iface" ] || continue
+        [ "$(singbox_l3dev "$_ds_iface")" = "$1" ] && return 0
+    done
+    return 1
+}
+# True iff device $1 is ANY splify-managed tunnel device, regardless of transport.
+device_is_tunnel() { device_is_wg "$1" || device_is_singbox "$1"; }
 
 # ---- endpoint type dispatch (transport-agnostic seam; design §2.2) ----------
 # Every endpoint carries a `type` (default wg, covering wireguard+amneziawg). All
@@ -158,45 +178,237 @@ _ep_type_emit() {  # $1=section $2=wanted iface — print type if it matches
 }
 ep_type() { config_foreach _ep_type_emit endpoint "$1" | head -1; }
 
-# A `singbox` endpoint is the documented future-transport stub: there is no
-# working sing-box backend yet, so every dispatcher treats it as DOWN and the
-# failover loop simply skips it. Warn once per process to avoid log spam.
+# A `singbox` endpoint falls back to this stub ONLY when the sing-box package
+# itself isn't installed — so failover never crash-loops chasing a missing
+# binary. Warn once per process to avoid log spam. (When sing-box IS installed,
+# ep_bringup/ep_restart below drive the real procd instance instead.)
 _SINGBOX_WARNED=
 _ep_singbox_down() {
     [ -n "$_SINGBOX_WARNED" ] || {
-        logger -t splify "sing-box backend not implemented yet (endpoint $1); treated as down"
+        logger -t splify "sing-box not installed (endpoint $1); treated as down"
         _SINGBOX_WARNED=1
     }
 }
 
-# Is there a live egress device for this endpoint? (wg = kernel link present)
-ep_present() { case "$(ep_type "$1")" in singbox) _ep_singbox_down "$1"; return 1 ;; wg|*) iface_present "$1" ;; esac; }
-# L3 device for `ip route … dev` (wg = the iface itself).
-ep_egress_dev() { case "$(ep_type "$1")" in singbox) _ep_singbox_down "$1"; return 1 ;; wg|*) echo "$1" ;; esac; }
+# Is there a live egress device for this endpoint? (wg = kernel link present;
+# singbox = its TUN l3dev present — no separate netifd proto to query).
+ep_present() { case "$(ep_type "$1")" in singbox) iface_present "$(singbox_l3dev "$1")" ;; wg|*) iface_present "$1" ;; esac; }
+# L3 device for `ip route … dev` (wg = the iface itself; singbox = cached l3dev).
+ep_egress_dev() { case "$(ep_type "$1")" in singbox) singbox_l3dev "$1" ;; wg|*) echo "$1" ;; esac; }
 # Liveness age in seconds, smaller = healthier (wg = handshake age; 999999 down).
-ep_liveness() { case "$(ep_type "$1")" in singbox) _ep_singbox_down "$1"; echo 999999 ;; wg|*) wg_handshake_age "$1" ;; esac; }
+# singbox has no cheap handshake-age equivalent to `wg show latest-handshakes`,
+# so this is a binary present/absent signal (0 or 999999) — a known v1 fidelity
+# gap (no gradual staleness signal), documented in the design plan.
+ep_liveness() { case "$(ep_type "$1")" in singbox) ep_present "$1" >/dev/null 2>&1 && echo 0 || echo 999999 ;; wg|*) wg_handshake_age "$1" ;; esac; }
 # rx/tx cumulative bytes — echoes "rx tx" (wg = summed `wg show transfer`).
+# singbox has no free rx/tx counters without enabling its Clash-API stats port
+# per instance (extra attack surface) — v1 always reports "0 0", documented
+# limitation (UI shows flat/zero speed for sing-box rows).
 ep_transfer() {
     case "$(ep_type "$1")" in
-        singbox) _ep_singbox_down "$1"; echo "0 0" ;;
+        singbox) echo "0 0" ;;
         wg|*) wgshow "$1" transfer \
             | awk '{rx+=$2; tx+=$3} END{printf "%d %d", rx+0, tx+0}' ;;
     esac
 }
 # Bring an endpoint up / restart it (wg = ifup / ifdown+ifup). Callers that need
 # to wait for liveness do so themselves (failover's wait_handshake).
+# singbox = start/restart its named procd instance via ubus, guarded on the
+# package actually being installed so failover never crash-loops on a missing
+# binary (falls back to _ep_singbox_down, same as before sing-box support
+# existed). Re-renders the config first (best-effort — the render script may
+# not exist yet if it hasn't landed from a parallel change).
 ep_bringup() {
     case "$(ep_type "$1")" in
-        singbox) _ep_singbox_down "$1" ;;
+        singbox)
+            command -v sing-box >/dev/null 2>&1 || { _ep_singbox_down "$1"; return; }
+            [ -x /usr/local/sbin/splify-singbox-render ] && /usr/local/sbin/splify-singbox-render "$1"
+            _singbox_instance_ctl "$1" start ;;
         wg|*) ifup "$1" >/dev/null 2>&1 \
             || /etc/init.d/network reload >/dev/null 2>&1 || true ;;
     esac
 }
+# MUST actually stop then start (full teardown+rebuild), not just start —
+# splify-failover's probe_candidate() calls ep_restart specifically for the
+# "present but unhealthy, needs a full re-setup" rung and depends on this
+# rebuilding the instance, mirroring wg's ifdown+ifup.
 ep_restart() {
     case "$(ep_type "$1")" in
-        singbox) _ep_singbox_down "$1" ;;
+        singbox)
+            command -v sing-box >/dev/null 2>&1 || { _ep_singbox_down "$1"; return; }
+            _singbox_instance_ctl "$1" stop
+            [ -x /usr/local/sbin/splify-singbox-render ] && /usr/local/sbin/splify-singbox-render "$1"
+            _singbox_instance_ctl "$1" start ;;
         wg|*) ifdown "$1" >/dev/null 2>&1 || true
               ifup "$1" >/dev/null 2>&1 || true ;;
+    esac
+}
+
+# ---- sing-box: UCI lookups + rendered-config path (design §5/§3) -----------
+SINGBOX_CONF_DIR="/var/etc"
+# Absolute path to the rendered sing-box config.json for endpoint iface $1.
+singbox_conf_file() { printf '%s/splify-singbox-%s.json' "$SINGBOX_CONF_DIR" "$1"; }
+
+# UCI section name (not iface) of the `config singbox` entry whose `iface` option
+# matches $1, or empty if none. Mirrors _ep_type_emit's config_foreach-scan pattern.
+_singbox_section_emit() {  # $1=section $2=wanted iface
+    config_get _sse_i "$1" iface ''
+    [ "$_sse_i" = "$2" ] || return 0
+    printf '%s\n' "$1"
+}
+singbox_section_of() { config_foreach _singbox_section_emit singbox "$1" | head -1; }
+
+# TUN device name for a singbox endpoint iface: the section's cached `l3dev`
+# option if set, else the iface name itself. Does NOT validate/truncate for
+# IFNAMSIZ (<=15 chars) — callers that CREATE the l3dev value own that check.
+singbox_l3dev() {
+    _sl_sec="$(singbox_section_of "$1")"
+    [ -n "$_sl_sec" ] || { printf '%s\n' "$1"; return; }
+    config_get _sl_dev "$_sl_sec" l3dev ''
+    [ -n "$_sl_dev" ] && printf '%s\n' "$_sl_dev" || printf '%s\n' "$1"
+}
+
+# start|stop the named procd instance of the splify-singbox service via ubus.
+# Shared by ep_bringup/ep_restart so both callers use one implementation.
+_singbox_instance_ctl() {  # iface start|stop
+    command -v ubus >/dev/null 2>&1 || return 1
+    ubus call service "${2}_instance" '{"name":"splify-singbox","instance":"'"$1"'"}' >/dev/null 2>&1
+}
+
+# ---- sing-box URI parser (design §2) ---------------------------------------
+# Pure string parsing — NEVER touches UCI. singbox_parse_uri dispatches on
+# scheme to singbox_parse_vless/singbox_parse_hysteria2 (hy2:// is an alias for
+# hysteria2). On success: "key=value" lines to stdout (one per non-empty
+# recognized field), return 0. On failure: nothing to stdout, an error to
+# stderr, return 1.
+
+# stdin -> stdout: decode the fixed set of %XX escapes + '+' (space) actually
+# seen in vless/hysteria2 share links (UUIDs, base64url tokens, hostnames,
+# short obfuscator names — not free text). A small fixed table is realistically
+# sufficient and safer than a generic decoder loop under busybox awk, which
+# does NOT support strtonum() (verified: only gawk/mawk do, not the busybox
+# awk applet OpenWrt actually ships) — see the bats test proving %40/+ decode.
+uri_unescape() {
+    sed \
+        -e 's/%40/@/g' -e 's/%3[Aa]/:/g' -e 's/%2[Ff]/\//g' \
+        -e 's/%2[Bb]/+/g' -e 's/%3[Dd]/=/g' -e 's/%2[Cc]/,/g' \
+        -e 's/%20/ /g' -e 's/+/ /g'
+}
+# $1 = query string (a=b&c=d, no leading '?'), $2 = param name -> prints
+# decoded value on stdout, or nothing if absent.
+uri_qparam() {
+    printf '&%s&' "$1" | sed -n "s/.*&$2=\([^&]*\)&.*/\1/p" | uri_unescape
+}
+
+_singbox_reject() { warn "singbox_parse_uri: $*"; return 1; }
+
+# vless://uuid@host:port?query#fragment (query, fragment optional).
+singbox_parse_vless() {
+    _sbv_x="${1#*://}"
+    _sbv_frag=""
+    case "$_sbv_x" in *'#'*) _sbv_frag="${_sbv_x#*#}"; _sbv_x="${_sbv_x%%#*}" ;; esac
+    _sbv_query=""
+    case "$_sbv_x" in *'?'*) _sbv_query="${_sbv_x#*\?}"; _sbv_x="${_sbv_x%%\?*}" ;; esac
+    _sbv_userinfo=""
+    case "$_sbv_x" in *'@'*) _sbv_userinfo="${_sbv_x%%@*}"; _sbv_x="${_sbv_x#*@}" ;; esac
+    _sbv_hostport="${_sbv_x%%/*}"
+
+    case "$_sbv_hostport" in
+        '['*) _singbox_reject "IPv6 bracketed host literals are not supported (vless)"; return 1 ;;
+    esac
+    _sbv_port="${_sbv_hostport##*:}"
+    _sbv_host="${_sbv_hostport%:*}"
+
+    [ -n "$_sbv_host" ] || { _singbox_reject "empty host (vless)"; return 1; }
+    case "$_sbv_port" in ''|*[!0-9]*) _singbox_reject "empty/non-numeric port (vless)"; return 1 ;; esac
+    _sbv_uuid="$_sbv_userinfo"
+    [ -n "$_sbv_uuid" ] || { _singbox_reject "empty uuid (vless)"; return 1; }
+
+    _sbv_name=""
+    [ -n "$_sbv_frag" ] && _sbv_name="$(printf '%s' "$_sbv_frag" | uri_unescape)"
+
+    _sbv_flow="$(uri_qparam "$_sbv_query" flow)"
+    _sbv_security="$(uri_qparam "$_sbv_query" security)"; [ -n "$_sbv_security" ] || _sbv_security=none
+    _sbv_sni="$(uri_qparam "$_sbv_query" sni)"
+    _sbv_pbk="$(uri_qparam "$_sbv_query" pbk)"
+    _sbv_sid="$(uri_qparam "$_sbv_query" sid)"
+    _sbv_network="$(uri_qparam "$_sbv_query" type)"; [ -n "$_sbv_network" ] || _sbv_network=tcp
+    _sbv_thost="$(uri_qparam "$_sbv_query" host)"
+    _sbv_tpath="$(uri_qparam "$_sbv_query" path)"
+    _sbv_svc="$(uri_qparam "$_sbv_query" serviceName)"
+    # Explicitly ignored (never emitted, never rejected): fp, alpn, spx,
+    # headerType, mode, authority, pinSHA256, encryption (vless encryption is
+    # always "none" and carries no information).
+
+    printf 'protocol=vless\n'
+    printf 'server=%s\n' "$_sbv_host"
+    printf 'port=%s\n' "$_sbv_port"
+    printf 'uuid=%s\n' "$_sbv_uuid"
+    [ -n "$_sbv_name" ] && printf 'name=%s\n' "$_sbv_name"
+    [ -n "$_sbv_flow" ] && printf 'flow=%s\n' "$_sbv_flow"
+    printf 'security=%s\n' "$_sbv_security"
+    [ -n "$_sbv_sni" ] && printf 'sni=%s\n' "$_sbv_sni"
+    [ -n "$_sbv_pbk" ] && printf 'pbk=%s\n' "$_sbv_pbk"
+    [ -n "$_sbv_sid" ] && printf 'sid=%s\n' "$_sbv_sid"
+    printf 'network=%s\n' "$_sbv_network"
+    [ -n "$_sbv_thost" ] && printf 'host=%s\n' "$_sbv_thost"
+    [ -n "$_sbv_tpath" ] && printf 'path=%s\n' "$_sbv_tpath"
+    [ -n "$_sbv_svc" ] && printf 'svc=%s\n' "$_sbv_svc"
+    return 0
+}
+
+# hysteria2://auth@host:port[/][?query][#fragment] (hy2:// is the same shape).
+# port MAY carry a comma port-hop suffix (e.g. "443,5000-6000") — kept verbatim.
+singbox_parse_hysteria2() {
+    _sbh_x="${1#*://}"
+    _sbh_frag=""
+    case "$_sbh_x" in *'#'*) _sbh_frag="${_sbh_x#*#}"; _sbh_x="${_sbh_x%%#*}" ;; esac
+    _sbh_query=""
+    case "$_sbh_x" in *'?'*) _sbh_query="${_sbh_x#*\?}"; _sbh_x="${_sbh_x%%\?*}" ;; esac
+    _sbh_userinfo=""
+    case "$_sbh_x" in *'@'*) _sbh_userinfo="${_sbh_x%%@*}"; _sbh_x="${_sbh_x#*@}" ;; esac
+    _sbh_hostport="${_sbh_x%%/*}"
+
+    case "$_sbh_hostport" in
+        '['*) _singbox_reject "IPv6 bracketed host literals are not supported (hysteria2)"; return 1 ;;
+    esac
+    _sbh_port="${_sbh_hostport##*:}"
+    _sbh_host="${_sbh_hostport%:*}"
+
+    [ -n "$_sbh_host" ] || { _singbox_reject "empty host (hysteria2)"; return 1; }
+    # port MAY carry a comma port-hop suffix (e.g. "443,5000-6000") — don't
+    # validate it as a single integer, just require it starts with digits.
+    case "$_sbh_port" in [0-9]*) : ;; *) _singbox_reject "empty/non-numeric port (hysteria2)"; return 1 ;; esac
+    _sbh_password="$_sbh_userinfo"
+    [ -n "$_sbh_password" ] || { _singbox_reject "empty password (hysteria2)"; return 1; }
+
+    _sbh_name=""
+    [ -n "$_sbh_frag" ] && _sbh_name="$(printf '%s' "$_sbh_frag" | uri_unescape)"
+
+    _sbh_sni="$(uri_qparam "$_sbh_query" sni)"
+    _sbh_insecure="$(uri_qparam "$_sbh_query" insecure)"; [ -n "$_sbh_insecure" ] || _sbh_insecure=0
+    _sbh_obfs="$(uri_qparam "$_sbh_query" obfs)"
+    _sbh_obfspw="$(uri_qparam "$_sbh_query" obfs-password)"
+
+    printf 'protocol=hysteria2\n'
+    printf 'server=%s\n' "$_sbh_host"
+    printf 'port=%s\n' "$_sbh_port"
+    printf 'password=%s\n' "$_sbh_password"
+    [ -n "$_sbh_name" ] && printf 'name=%s\n' "$_sbh_name"
+    [ -n "$_sbh_sni" ] && printf 'sni=%s\n' "$_sbh_sni"
+    printf 'insecure=%s\n' "$_sbh_insecure"
+    [ -n "$_sbh_obfs" ] && printf 'obfs=%s\n' "$_sbh_obfs"
+    [ -n "$_sbh_obfspw" ] && printf 'obfspw=%s\n' "$_sbh_obfspw"
+    return 0
+}
+
+# $1 = full URI string. Dispatches on scheme; rejects unknown schemes. NEVER
+# touches UCI — pure string parsing.
+singbox_parse_uri() {
+    case "$1" in
+        vless://*)              singbox_parse_vless "$1" ;;
+        hysteria2://*|hy2://*)  singbox_parse_hysteria2 "$1" ;;
+        *) _singbox_reject "unrecognized scheme"; return 1 ;;
     esac
 }
 
@@ -468,13 +680,13 @@ fw_zone_is_tunnel_only() {  # zone-name
         if [ "$(uci -q get "firewall.@zone[$_zt].name" 2>/dev/null)" = "$1" ]; then
             _zt_seen=1
             for _ztn in $(uci -q get "firewall.@zone[$_zt].network" 2>/dev/null); do
-                iface_is_wg "$_ztn" || return 1
+                iface_is_tunnel "$_ztn" || return 1
             done
             for _ztd in $(uci -q get "firewall.@zone[$_zt].device" 2>/dev/null); do
                 # an exact device that IS a tunnel's L3 device qualifies; a glob (or
                 # any non-tunnel device) can't be proven tunnel-only -> reject.
                 case "$_ztd" in *[*+?]*) return 1 ;; esac
-                device_is_wg "$_ztd" || return 1
+                device_is_tunnel "$_ztd" || return 1
             done
         fi
         _zt=$((_zt + 1))

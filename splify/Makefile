@@ -22,6 +22,9 @@ define Package/splify/description
  заблокированное идёт через VPN, остальное — напрямую. Приоритетный failover между
  туннелями, автообновляемые списки, опциональный обход DPI (zapret). Управление —
  через простую страницу в LuCI. zapret опционален и определяется в рантайме.
+ Также поддерживаются sing-box туннели (VLESS/Hysteria2) как опциональный
+ транспорт failover — требует отдельно установленного пакета sing-box
+ (opkg install sing-box), определяется в рантайме, как и zapret.
 endef
 
 define Package/splify/conffiles
@@ -47,6 +50,11 @@ grep -q 'splify-update-domains' "$$CRON" || echo '50 4 * * * /usr/local/sbin/spl
 /etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1
 /etc/init.d/splify enable >/dev/null 2>&1
 /etc/init.d/splify restart >/dev/null 2>&1
+# sing-box (VLESS/Hysteria2) endpoints: register the service (it self-gates on
+# the sing-box package actually being installed, same runtime-detected
+# convention as zapret, so enabling the init script is always safe).
+/etc/init.d/splify-singbox enable >/dev/null 2>&1
+/etc/init.d/splify-singbox start >/dev/null 2>&1
 # remote-management agent: register the service (it self-gates on
 # splify.api.agent_enabled, so enabling the init script is safe even when the
 # agent is configured off — it simply won't open an instance).

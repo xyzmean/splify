@@ -19,6 +19,8 @@
 #   wg_get        -> one wg/awg interface
 #   wg_set        -> set one interface (data = JSON string)
 #   wg_import     -> import a wg/awg .conf (conf = text)
+#   singbox_get   -> one sing-box interface
+#   singbox_import -> import a vless/hysteria2 URI (conf = text)
 #   api_get       -> api/agent config + runtime
 #   api_set       -> set api/agent config (data = JSON string)
 #   token_regen   -> rotate the API token
@@ -52,6 +54,13 @@ case "$1" in
             json_add_string "data" ""
         json_close_object
         json_add_object "wg_import"
+            json_add_string "iface" ""
+            json_add_string "conf" ""
+        json_close_object
+        json_add_object "singbox_get"
+            json_add_string "iface" ""
+        json_close_object
+        json_add_object "singbox_import"
             json_add_string "iface" ""
             json_add_string "conf" ""
         json_close_object
@@ -116,6 +125,16 @@ case "$1" in
                 input="$(cat)"; json_load "$input" 2>/dev/null
                 json_get_var iface iface; json_get_var conf conf
                 printf '%s' "$conf" | "$CTL" wg-import "$iface"
+                ;;
+            singbox_get)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var iface iface
+                "$CTL" singbox-get "$iface"
+                ;;
+            singbox_import)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var iface iface; json_get_var conf conf
+                printf '%s' "$conf" | "$CTL" singbox-import "$iface"
                 ;;
             api_get)
                 "$CTL" api-get

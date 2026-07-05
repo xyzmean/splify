@@ -158,12 +158,27 @@ config_get() { eval "$1=\"\${cfg_${2}_${3}:-$4}\""; }
     load_fn "$COMMON_SH" iface_is_wg
     load_fn "$COMMON_SH" iface_l3dev
     load_fn "$COMMON_SH" device_is_wg
+    load_fn "$COMMON_SH" singbox_section_of
+    load_fn "$COMMON_SH" _singbox_section_emit
+    load_fn "$COMMON_SH" singbox_l3dev
+    load_fn "$COMMON_SH" iface_is_singbox
+    load_fn "$COMMON_SH" iface_is_tunnel
+    load_fn "$COMMON_SH" device_is_singbox
+    load_fn "$COMMON_SH" device_is_tunnel
     load_fn "$COMMON_SH" fw_zone_is_tunnel_only
+    # No `config singbox` sections in this fixture -> config_foreach/config_get
+    # are no-ops (singbox_section_of never matches), so iface_is_tunnel /
+    # device_is_tunnel degrade to plain iface_is_wg / device_is_wg here.
+    config_foreach() { :; }
+    config_get() { eval "$1="; }
     # NB: bracket patterns are single-quoted so case treats '[0]' literally, not as
     # a glob character class. `uci show network` lists the interface sections.
     uci() {
         if [ "$1" = show ] && [ "$2" = network ]; then
             printf 'network.wg0=interface\nnetwork.awg0=interface\nnetwork.guest=interface\n'; return
+        fi
+        if [ "$1" = -q ] && [ "$2" = show ] && [ "$3" = splify ]; then
+            return
         fi
         case "$3" in
             'firewall.@zone[0]') echo x ;;
@@ -289,4 +304,235 @@ setup_probe() {
 @test "action handler covers on/off" {
     run grep -nE '^[[:space:]]*(on|off)\)' splify/files/usr/local/sbin/splify-ctl
     [ "$status" -eq 0 ]
+}
+
+# ---- sing-box URI parser: uri_unescape / uri_qparam -------------------------
+setup_uri_helpers() {
+    load_fn "$COMMON_SH" uri_unescape
+    load_fn "$COMMON_SH" uri_qparam
+}
+
+@test "uri_unescape decodes %40 to @ and + to space" {
+    setup_uri_helpers
+    [ "$(printf '%%40' | uri_unescape)" = "@" ]
+    [ "$(printf 'a+b' | uri_unescape)" = "a b" ]
+    [ "$(printf 'foo%%2Fbar' | uri_unescape)" = "foo/bar" ]
+}
+
+@test "uri_qparam extracts a decoded value, empty when the param is absent" {
+    setup_uri_helpers
+    [ "$(uri_qparam 'a=1&b=hello%40world' b)" = "hello@world" ]
+    [ "$(uri_qparam 'a=1&b=2' c)" = "" ]
+}
+
+# ---- sing-box URI parser: singbox_parse_vless / singbox_parse_hysteria2 ----
+setup_singbox_parser() {
+    load_fn "$COMMON_SH" uri_unescape
+    load_fn "$COMMON_SH" uri_qparam
+    load_fn "$COMMON_SH" _singbox_reject
+    load_fn "$COMMON_SH" singbox_parse_vless
+    load_fn "$COMMON_SH" singbox_parse_hysteria2
+    load_fn "$COMMON_SH" singbox_parse_uri
+    warn() { :; }   # silence stderr noise from rejected-URI tests
+}
+
+@test "singbox_parse_vless emits every field from a full-featured URI" {
+    setup_singbox_parser
+    uri='vless://a1b2c3d4-1234-5678-9abc-def012345678@example.com:443?flow=xtls-rprx-vision&security=reality&sni=www.example.com&pbk=abc123PBK&sid=abcd&type=tcp&host=example.com&path=%2Fws&serviceName=grpcsvc&fp=chrome&alpn=h2#My%20Node'
+    run singbox_parse_vless "$uri"
+    [ "$status" -eq 0 ]
+    for line in \
+        'protocol=vless' 'server=example.com' 'port=443' \
+        'uuid=a1b2c3d4-1234-5678-9abc-def012345678' 'name=My Node' \
+        'flow=xtls-rprx-vision' 'security=reality' 'sni=www.example.com' \
+        'pbk=abc123PBK' 'sid=abcd' 'network=tcp' 'host=example.com' \
+        'path=/ws' 'svc=grpcsvc'
+    do
+        case "$output" in *"$line"*) : ;; *) echo "missing line: $line"; return 1 ;; esac
+    done
+    # ignored params never emitted
+    case "$output" in *fp=*|*alpn=*|*encryption=*) echo "leaked ignored param: $output"; return 1 ;; esac
+}
+
+@test "singbox_parse_vless defaults security=none and network=tcp when absent" {
+    setup_singbox_parser
+    run singbox_parse_vless 'vless://uuid-1234@example.com:443'
+    [ "$status" -eq 0 ]
+    case "$output" in *'security=none'*) : ;; *) echo "$output"; return 1 ;; esac
+    case "$output" in *'network=tcp'*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "singbox_parse_hysteria2 emits every field from a full-featured URI" {
+    setup_singbox_parser
+    uri='hysteria2://mypassword@host.example.com:443/?insecure=1&sni=sni.example.com&obfs=salamander&obfs-password=secretpw#Remote%201'
+    run singbox_parse_hysteria2 "$uri"
+    [ "$status" -eq 0 ]
+    for line in \
+        'protocol=hysteria2' 'server=host.example.com' 'port=443' \
+        'password=mypassword' 'name=Remote 1' 'sni=sni.example.com' \
+        'insecure=1' 'obfs=salamander' 'obfspw=secretpw'
+    do
+        case "$output" in *"$line"*) : ;; *) echo "missing line: $line"; return 1 ;; esac
+    done
+}
+
+@test "singbox_parse_hysteria2 accepts the without-slash form and hy2:// alias, defaults insecure=0" {
+    setup_singbox_parser
+    run singbox_parse_hysteria2 'hysteria2://pw@host.example.com:443?sni=x.com'
+    [ "$status" -eq 0 ]
+    case "$output" in *'insecure=0'*) : ;; *) echo "$output"; return 1 ;; esac
+    run singbox_parse_uri 'hy2://pw@host.example.com:443'
+    [ "$status" -eq 0 ]
+    case "$output" in *'protocol=hysteria2'*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "singbox_parse_hysteria2 keeps a comma port-hop suffix verbatim" {
+    setup_singbox_parser
+    run singbox_parse_hysteria2 'hysteria2://pw@host.example.com:443,5000-6000/?sni=x.com'
+    [ "$status" -eq 0 ]
+    case "$output" in *'port=443,5000-6000'*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "singbox_parse_uri rejects an unrecognized scheme with empty stdout" {
+    setup_singbox_parser
+    run singbox_parse_uri 'ss://foo@bar.example.com:1'
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+}
+
+@test "singbox_parse_uri rejects a missing host with empty stdout" {
+    setup_singbox_parser
+    run singbox_parse_uri 'vless://uuid-1234@:443'
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    run singbox_parse_uri 'hysteria2://pw@:443'
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+}
+
+@test "singbox_parse_uri rejects a missing vless uuid with empty stdout" {
+    setup_singbox_parser
+    run singbox_parse_uri 'vless://@example.com:443'
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+}
+
+@test "singbox_parse_uri rejects a bracketed IPv6 host literal with empty stdout" {
+    setup_singbox_parser
+    run singbox_parse_uri 'vless://uuid-1234@[::1]:443'
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    run singbox_parse_uri 'hysteria2://pw@[::1]:443'
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+}
+
+# ---- ep_present / ep_egress_dev: real singbox dispatch (not the stub) ------
+# Stub iface_present/singbox_l3dev the same way probe_candidate's tests stub
+# collaborators, so this exercises the real case-branch wiring in ep_type's
+# dispatch, not a re-implementation of it.
+setup_ep_singbox() {
+    load_endpoint_helpers
+    load_fn "$COMMON_SH" ep_present
+    load_fn "$COMMON_SH" ep_egress_dev
+    SECTIONS="a b"
+    cfg_a_iface=wg0 cfg_a_priority=1
+    cfg_b_iface=sb0 cfg_b_priority=2 cfg_b_type=singbox
+}
+
+@test "ep_present/ep_egress_dev use the real singbox_l3dev branch for a singbox endpoint" {
+    setup_ep_singbox
+    singbox_l3dev()  { [ "$1" = sb0 ] && echo tun-sb0; }
+    iface_present()  { [ "$1" = tun-sb0 ]; }
+    run ep_present sb0;     [ "$status" -eq 0 ]
+    run ep_egress_dev sb0;  [ "$status" -eq 0 ]; [ "$output" = "tun-sb0" ]
+}
+
+@test "ep_present reports down when the singbox l3dev is absent" {
+    setup_ep_singbox
+    singbox_l3dev() { echo tun-sb0; }
+    iface_present() { return 1; }
+    run ep_present sb0
+    [ "$status" -ne 0 ]
+}
+
+@test "ep_present/ep_egress_dev still use plain iface logic for a wg endpoint" {
+    setup_ep_singbox
+    iface_present() { [ "$1" = wg0 ]; }
+    run ep_present wg0;    [ "$status" -eq 0 ]
+    run ep_egress_dev wg0; [ "$output" = "wg0" ]
+}
+
+# ---- iface_is_singbox / iface_is_tunnel / device_is_tunnel ------------------
+# Mirrors the existing iface_is_wg UCI-stubbing style: stub `uci` directly.
+@test "iface_is_singbox / iface_is_tunnel / device_is_tunnel across wg and singbox" {
+    load_fn "$COMMON_SH" iface_is_wg
+    load_fn "$COMMON_SH" iface_l3dev
+    load_fn "$COMMON_SH" device_is_wg
+    load_fn "$COMMON_SH" singbox_section_of
+    load_fn "$COMMON_SH" _singbox_section_emit
+    load_fn "$COMMON_SH" singbox_l3dev
+    load_fn "$COMMON_SH" iface_is_singbox
+    load_fn "$COMMON_SH" iface_is_tunnel
+    load_fn "$COMMON_SH" device_is_singbox
+    load_fn "$COMMON_SH" device_is_tunnel
+    config_foreach() { local cb="$1"; shift 2; for s in $SECTIONS; do "$cb" "$s" "$@"; done; }
+    config_get() { eval "$1=\"\${cfg_${2}_${3}:-$4}\""; }
+    SECTIONS="sb0"
+    cfg_sb0_iface=sb0 cfg_sb0_l3dev=tun-sb0
+    uci() {
+        if [ "$1" = show ] && [ "$2" = network ]; then
+            printf 'network.wg0=interface\n'; return
+        fi
+        if [ "$1" = -q ] && [ "$2" = show ] && [ "$3" = splify ]; then
+            printf 'splify.sb0=singbox\n'; return
+        fi
+        case "$3" in
+            network.wg0.proto) echo wireguard ;;
+            *) echo "" ;;
+        esac
+    }
+    run iface_is_singbox sb0;  [ "$status" -eq 0 ]
+    run iface_is_singbox wg0;  [ "$status" -ne 0 ]
+    run iface_is_tunnel sb0;   [ "$status" -eq 0 ]
+    run iface_is_tunnel wg0;   [ "$status" -eq 0 ]
+    run iface_is_tunnel wan;   [ "$status" -ne 0 ]
+    run device_is_tunnel tun-sb0; [ "$status" -eq 0 ]
+    run device_is_tunnel wg0;     [ "$status" -eq 0 ]
+    run device_is_tunnel eth0;    [ "$status" -ne 0 ]
+}
+
+# ---- fw_zone_is_tunnel_only: sing-box device= member also qualifies --------
+@test "fw_zone_is_tunnel_only recognises a sing-box device= zone member" {
+    load_fn "$COMMON_SH" iface_is_wg
+    load_fn "$COMMON_SH" iface_l3dev
+    load_fn "$COMMON_SH" device_is_wg
+    load_fn "$COMMON_SH" singbox_section_of
+    load_fn "$COMMON_SH" _singbox_section_emit
+    load_fn "$COMMON_SH" singbox_l3dev
+    load_fn "$COMMON_SH" iface_is_singbox
+    load_fn "$COMMON_SH" iface_is_tunnel
+    load_fn "$COMMON_SH" device_is_singbox
+    load_fn "$COMMON_SH" device_is_tunnel
+    load_fn "$COMMON_SH" fw_zone_is_tunnel_only
+    config_foreach() { local cb="$1"; shift 2; for s in $SECTIONS; do "$cb" "$s" "$@"; done; }
+    config_get() { eval "$1=\"\${cfg_${2}_${3}:-$4}\""; }
+    SECTIONS="sb0"
+    cfg_sb0_iface=sb0 cfg_sb0_l3dev=tun-sb0
+    uci() {
+        if [ "$1" = show ] && [ "$2" = network ]; then
+            printf 'network.wg0=interface\n'; return
+        fi
+        if [ "$1" = -q ] && [ "$2" = show ] && [ "$3" = splify ]; then
+            printf 'splify.sb0=singbox\n'; return
+        fi
+        case "$3" in
+            'firewall.@zone[0]') echo x ;;
+            'firewall.@zone[0].name') echo vpn ;;
+            'firewall.@zone[0].device') echo tun-sb0 ;;
+            network.wg0.proto) echo wireguard ;;
+            *) echo "" ;;
+        esac
+    }
+    run fw_zone_is_tunnel_only vpn;  [ "$status" -eq 0 ]
 }

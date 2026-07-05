@@ -399,11 +399,16 @@ export default function SettingsPage() {
                     {endpoints.map((e, i) => (
                       <TableRow key={e.sid}>
                         <TableCell>
-                          <select className={cn(field, 'w-auto')} value={e.iface}
-                            onChange={(ev) => mark(setEndpoints)(endpoints.map((x, j) => j === i ? { ...x, iface: ev.target.value } : x))}>
-                            {ifaces.length === 0 && <option value="">(интерфейсы WireGuard/AmneziaWG не найдены)</option>}
-                            {ifaces.map((n) => <option key={n} value={n}>{n}</option>)}
-                          </select>
+                          {e.type === 'singbox' ? (
+                            <input className={cn(field, 'w-auto')} value={e.iface} placeholder="sb0"
+                              onChange={(ev) => mark(setEndpoints)(endpoints.map((x, j) => j === i ? { ...x, iface: ev.target.value } : x))} />
+                          ) : (
+                            <select className={cn(field, 'w-auto')} value={e.iface}
+                              onChange={(ev) => mark(setEndpoints)(endpoints.map((x, j) => j === i ? { ...x, iface: ev.target.value } : x))}>
+                              {ifaces.length === 0 && <option value="">(интерфейсы WireGuard/AmneziaWG не найдены)</option>}
+                              {ifaces.map((n) => <option key={n} value={n}>{n}</option>)}
+                            </select>
+                          )}
                         </TableCell>
                         <TableCell>
                           <input className={cn(field, 'w-20')} value={e.priority} placeholder="1"
@@ -413,7 +418,7 @@ export default function SettingsPage() {
                           <select className={cn(field, 'w-auto')} value={e.type}
                             onChange={(ev) => mark(setEndpoints)(endpoints.map((x, j) => j === i ? { ...x, type: ev.target.value } : x))}>
                             <option value="wg">WireGuard / AmneziaWG</option>
-                            <option value="singbox" disabled>sing-box (скоро)</option>
+                            <option value="singbox">sing-box (VLESS/Hysteria2)</option>
                           </select>
                         </TableCell>
                         <TableCell>

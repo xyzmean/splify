@@ -22,6 +22,9 @@
 #   GET  /wg/<iface>[?reveal=1] -> one interface
 #   POST /wg/<iface>        -> set one interface (JSON body)
 #   POST /wg/<iface>/import -> import a wg/awg .conf (text body)
+#   GET  /singbox           -> full snapshot (its "singbox" object lists every interface)
+#   GET  /singbox/<iface>   -> one sing-box interface (cached fields only)
+#   POST /singbox/<iface>/import -> import a vless/hysteria2 URI (text body)
 #   GET  /api               -> api/agent config + runtime
 #   POST /api               -> set api/agent config (JSON body)
 #   POST /action            -> run an action (JSON body {"name":..,"iface":..})
@@ -133,6 +136,20 @@ case "$METHOD/$route" in
     POST/wg/*)
         iface="${route#wg/}"
         emit 200 "$(read_body | "$CTL" wg-set "$iface")" ;;
+
+    GET/singbox)
+        emit 200 "$("$CTL" export)" ;;   # full snapshot; UI/API caller reads the "singbox" object
+
+    GET/singbox/*)
+        iface="${route#singbox/}"
+        case "$iface" in
+            */import) err 405 "use POST for import" ;;
+        esac
+        emit 200 "$("$CTL" singbox-get "$iface")" ;;
+
+    POST/singbox/*/import)
+        mid="${route#singbox/}"; iface="${mid%/import}"
+        emit 200 "$(read_body | "$CTL" singbox-import "$iface")" ;;
 
     GET/api)
         emit 200 "$("$CTL" api-get)" ;;
