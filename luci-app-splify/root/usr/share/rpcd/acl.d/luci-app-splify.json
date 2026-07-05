@@ -7,13 +7,13 @@
 				"network.interface": [ "dump" ],
 				"network": [ "get_proto_handlers" ],
 				"luci-rpc": [ "getHostHints" ],
-				"splify": [ "status", "events", "config_export", "wg_get", "api_get" ]
+				"splify": [ "status", "events", "config_export", "wg_get", "singbox_get", "api_get" ]
 			}
 		},
 		"write": {
 			"uci": [ "splify" ],
 			"ubus": {
-				"splify": [ "action", "config_import", "config_reveal", "wg_set", "wg_import", "wg_reveal", "api_set", "api_token", "token_regen", "connect", "enroll" ]
+				"splify": [ "action", "config_import", "config_reveal", "wg_set", "wg_import", "wg_reveal", "singbox_import", "api_set", "api_token", "token_regen", "connect", "enroll" ]
 			}
 		}
 	}

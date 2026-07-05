@@ -49,6 +49,32 @@ config endpoint
 #	option ip '192.168.1.50'
 #	option mode 'vpn'
 
+# sing-box endpoint (optional): import a vless:// or hysteria2:// share link as
+# a failover endpoint alongside wg/awg ones. iface is a SYNTHETIC name (there is
+# no pre-existing netifd interface to point at — unlike wg/awg), so add a
+# matching `config endpoint` section (type 'singbox') referencing the same
+# iface to make it a failover candidate. `uri` is the SOURCE OF TRUTH — it is
+# re-parsed at every render/apply and is never hand-edited by the UI; re-import
+# (paste a new link) to change anything. The rest are cached display-only
+# fields written by `splify-ctl singbox-import`, purely for a read-only summary
+# — never authoritative, and a stale one can never produce a wrong running
+# config (only a stale-looking summary until the next import).
+#config singbox 'sb0'
+#	option iface 'sb0'
+#	option uri 'vless://uuid@host:443?...'
+#	# cached display fields (vless | hysteria2)
+#	option protocol 'vless'
+#	option server ''
+#	option port ''
+#	# vless: none|tls|reality; hysteria2: always tls-like, left empty
+#	option security ''
+#	# vless transport: tcp|ws|grpc|http|httpupgrade|xhttp; empty for hysteria2
+#	option network ''
+#	# uri #fragment, human remark
+#	option name ''
+#	# TUN device actually used, <=15 chars (IFNAMSIZ); defaults to iface
+#	option l3dev 'sb0'
+
 # Remote management API (design §5). Two channels share one backend (splify-ctl):
 #   - inbound token REST (/cgi-bin/splify-api): direct mgmt when the router is
 #     reachable (LAN / live tunnel). Keep it OFF the public internet.

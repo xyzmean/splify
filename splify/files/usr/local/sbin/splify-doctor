@@ -69,6 +69,43 @@ if [ -z "$LAN_CIDR" ]; then
     add FAIL config "LAN subnet not set or not detected on '$LAN_IFACE' — no policy chains, all LAN traffic exits WAN" "set the LAN subnet (CIDR) or fix the LAN interface in Services -> splify"
 fi
 
+# ---- sing-box (package presence + per-endpoint rendered config / TUN) ------
+# Only probed at all if at least one `config singbox` section exists — an
+# install with zero sing-box endpoints stays silent here (no noise for
+# wg/awg-only setups).
+if [ -n "$(uci -q get splify.@singbox[0] 2>/dev/null)" ]; then
+    if command -v sing-box >/dev/null 2>&1; then
+        add OK singbox "sing-box package installed"
+    else
+        add FAIL singbox "sing-box endpoint(s) configured but the sing-box package is not installed" "opkg install sing-box (or remove the singbox endpoint)"
+    fi
+fi
+# Walk `config singbox` sections inline (same uci-show/sed enumeration
+# common.sh's device_is_singbox uses) rather than via a new config_foreach
+# callback function — keeps this file's top-level function count steady.
+for _sbsec in $(uci -q show splify 2>/dev/null | sed -n "s/^splify\.\([^.=]*\)=singbox\$/\1/p"); do
+    config_get _sbif "$_sbsec" iface ''
+    [ -n "$_sbif" ] || continue
+    is_endpoint "$_sbif" || continue            # not referenced by any failover endpoint — skip
+    [ "$(ep_type "$_sbif")" = singbox ] || continue   # that endpoint isn't actually type=singbox — skip
+    command -v sing-box >/dev/null 2>&1 || continue   # already reported as FAIL above
+    _cf="$(singbox_conf_file "$_sbif")"
+    if [ -s "$_cf" ]; then
+        sing-box check -c "$_cf" >/dev/null 2>&1 \
+            || add FAIL singbox "$_sbif: rendered config fails 'sing-box check'" "re-import the vless/hysteria2 link"
+    else
+        add FIXABLE singbox "$_sbif: no rendered config" "run: splify-singbox-render $_sbif"
+    fi
+    _l3="$(singbox_l3dev "$_sbif")"
+    if iface_present "$_l3"; then
+        pgrep -f "sing-box run.*$(singbox_conf_file "$_sbif")" >/dev/null 2>&1 \
+            && add OK singbox "$_sbif: TUN up ($_l3), process running" \
+            || add WARN singbox "$_sbif: TUN device up but sing-box process not found" "/etc/init.d/splify-singbox restart"
+    else
+        add FIXABLE singbox "$_sbif: TUN device ($_l3) not present" "/etc/init.d/splify-singbox restart"
+    fi
+done
+
 # ---- per-endpoint ----------------------------------------------------------
 # peer sections carrying this iface's route_allowed_ips (named + anonymous cfg).
 _peers_of() { uci show network 2>/dev/null | sed -n "s/^network\.\([^.=]*\)=\(wireguard\|amneziawg\)_$1\$/\1/p"; }
@@ -94,6 +131,14 @@ for _if in $ORDERED; do
         # path in the summary already names the daemon-confirmed live tunnel.
         _hs="$(ep_liveness "$_if")"
         if [ "$_hs" -lt 180 ] 2>/dev/null; then _health=ok; else _health=idle; fi
+    elif iface_is_singbox "$_if"; then
+        # A sing-box endpoint intentionally has no network.$_if section at
+        # all (its TUN is managed by splify-singbox/procd, not netifd) — the
+        # sing-box-specific loop above already reported package/config/TUN/
+        # process diagnostics for it, so don't ALSO fall through to the
+        # generic "not configured in /etc/config/network" FAIL below, which
+        # would wrongly tell the operator to create a network interface.
+        :
     elif [ -n "$(uci -q get "network.$_if" 2>/dev/null)" ]; then
         # configured in /etc/config/network but the kernel link is gone (stopped /
         # auto 0) — recoverable; failover brings candidates up with ifup.

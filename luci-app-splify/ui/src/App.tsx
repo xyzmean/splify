@@ -3,16 +3,18 @@ import { rpc, type Status, type EventRow } from '@/lib/rpc'
 import StatusDashboard from '@/components/StatusDashboard'
 import WgPanel from '@/components/WgPanel'
 import ApiPanel from '@/components/ApiPanel'
+import SingboxPanel from '@/components/SingboxPanel'
 import { cn } from '@/lib/utils'
-import { Activity, Radio, ShieldCheck } from 'lucide-react'
+import { Activity, Radio, ShieldCheck, Waypoints } from 'lucide-react'
 
-type Tab = 'status' | 'wg' | 'api'
+type Tab = 'status' | 'wg' | 'api' | 'singbox'
 
 // Same left-rail navigation as the settings view — the two pages must read as
 // one system, and Argon has no second-level horizontal tab row to mimic.
 const NAV: { id: Tab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: 'status', label: 'Состояние', icon: Activity },
   { id: 'wg', label: 'AmneziaWG', icon: ShieldCheck },
+  { id: 'singbox', label: 'sing-box', icon: Waypoints },
   { id: 'api', label: 'Удалённое управление', icon: Radio },
 ]
 
@@ -80,6 +82,7 @@ export default function App() {
             )
           )}
           {tab === 'wg' && <WgPanel />}
+          {tab === 'singbox' && <SingboxPanel />}
           {tab === 'api' && <ApiPanel />}
         </div>
       </div>

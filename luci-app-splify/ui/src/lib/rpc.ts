@@ -41,6 +41,10 @@ export interface Status {
   checks: Check[]
 }
 export interface EventRow { ts: number; kind: string; from: string; to: string; reason: string }
+export interface SingboxIface {
+  iface: string; protocol: 'vless' | 'hysteria2'; server: string; port: string
+  security: string; network: string; name: string
+}
 export interface ApiInfo {
   enabled: string; agent_enabled: string; has_token: boolean; token: string
   control_internal: string; control_external: string; has_access_key: boolean
@@ -59,6 +63,8 @@ export const rpc = {
   wgGet: (iface: string, reveal = 0): Promise<any> => reveal ? decl('wg_reveal', ['iface'])(iface) : decl('wg_get', ['iface'])(iface),
   wgSet: (iface: string, data: any): Promise<any> => decl('wg_set', ['iface', 'data'])(iface, JSON.stringify(data)),
   wgImport: (iface: string, conf: string): Promise<any> => decl('wg_import', ['iface', 'conf'])(iface, conf),
+  singboxGet: (iface: string): Promise<any> => decl('singbox_get', ['iface'])(iface),
+  singboxImport: (iface: string, uri: string): Promise<any> => decl('singbox_import', ['iface', 'conf'])(iface, uri),
   apiGet: (): Promise<ApiInfo> => decl('api_get')(),
   apiToken: (): Promise<{ token: string }> => decl('api_token')(),
   apiSet: (data: any): Promise<any> => decl('api_set', ['data'])(JSON.stringify(data)),
