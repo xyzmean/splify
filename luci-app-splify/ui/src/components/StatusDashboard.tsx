@@ -8,25 +8,15 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
+import { notify } from '@/lib/notify'
 import {
   ShieldCheck, AlertTriangle, Ban, Globe, RefreshCw, Play, RotateCw, Power,
-  Download, Wrench, ArrowRight, Check as CheckIcon, X as XIcon,
+  Download, Wrench, ArrowRight, Check as CheckIcon, X as XIcon, Minus, Rocket,
   Activity, ListChecks, Network, History, Stethoscope, ExternalLink,
 } from 'lucide-react'
 import {
   fmtAge, fmtRate, fmtWhen, pathLabel, EVENT_META, ratesFor, type RateSample,
 } from '@/lib/format'
-
-function notify(msg: string, kind: 'info' | 'warning' | 'error' = 'info') {
-  try {
-    if (window.ui?.addNotification) {
-      window.ui.addNotification(null, window.L ? window.L.dom.create('p', {}, msg) : msg, kind)
-      return
-    }
-  } catch { /* fall through */ }
-  // eslint-disable-next-line no-console
-  console.log('[splify]', kind, msg)
-}
 
 // Severity → semantic styling. One source of truth so the hero, badges and
 // diagnostics all read identically.
@@ -52,6 +42,14 @@ function YesNo({ v }: { v: boolean }) {
   return v
     ? <CheckIcon className="size-4 text-success" />
     : <XIcon className="size-4 text-destructive" />
+}
+
+// Mirrors YesNo: an icon carries the meaning, not colour alone.
+function HealthState({ health }: { health: string }) {
+  if (health === 'ok' || health === 'OK') return <span className="flex items-center gap-1 text-success"><CheckIcon className="size-4" />ок</span>
+  if (health === 'idle') return <span className="flex items-center gap-1 text-muted-foreground"><Minus className="size-4" />простой</span>
+  if (health === 'FAIL') return <span className="flex items-center gap-1 text-destructive"><XIcon className="size-4" />FAIL</span>
+  return <span className="text-muted-foreground">—</span>
 }
 
 interface Props {
@@ -216,7 +214,7 @@ export default function StatusDashboard(p: Props) {
       {firstRun && (
         <Card className="border border-dashed border-warning bg-warning/5">
           <CardContent className="p-5">
-            <h4 className="mb-2 font-semibold">👋 Подключим первый туннель</h4>
+            <h4 className="mb-2 flex items-center gap-2 font-semibold"><Rocket className="size-4 text-warning" />Подключим первый туннель</h4>
             <p className="mb-2 text-sm text-muted-foreground">Туннелей пока нет, поэтому весь трафик LAN сейчас идёт через обычный WAN.</p>
             <ol className="ml-5 list-decimal space-y-1 text-sm">
               <li>Создайте интерфейс WireGuard/AmneziaWG в <a className="text-primary underline-offset-4 hover:underline" href={window.L?.url('admin/network/network')}>Сеть → Интерфейсы</a> (splify не управляет ключами).</li>
@@ -252,7 +250,7 @@ export default function StatusDashboard(p: Props) {
                     <TableCell>{e.priority || '—'}</TableCell>
                     <TableCell>{e.present ? fmtAge(e.handshake_age) : '—'}</TableCell>
                     <TableCell className="whitespace-nowrap">{e.present ? <><span className="text-success">↓{fmtRate(r.rx)}</span> <span className="text-info">↑{fmtRate(r.tx)}</span></> : '—'}</TableCell>
-                    <TableCell>{e.health === 'ok' || e.health === 'OK' ? <span className="text-success">ок</span> : e.health === 'idle' ? <span className="text-muted-foreground">простой</span> : e.health === 'FAIL' ? <span className="text-destructive">FAIL</span> : '—'}</TableCell>
+                    <TableCell><HealthState health={e.health} /></TableCell>
                     <TableCell>{e.zone || <span className="text-destructive">нет</span>}</TableCell>
                     <TableCell><YesNo v={e.masq} /></TableCell>
                     <TableCell><YesNo v={e.forwarding} /></TableCell>

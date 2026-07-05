@@ -5,19 +5,15 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
+import { notify } from '@/lib/notify'
 import { Plug, Radio, KeyRound, Eye, EyeOff, RefreshCw, Tag } from 'lucide-react'
-
-function notify(msg: string, kind: 'info' | 'warning' | 'error' = 'info') {
-  try { if (window.ui?.addNotification) { window.ui.addNotification(null, window.L ? window.L.dom.create('p', {}, msg) : msg, kind); return } } catch { /* */ }
-  // eslint-disable-next-line no-console
-  console.log('[splify]', kind, msg)
-}
 
 const field = 'w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring'
 const lbl = 'mb-1 block text-xs text-muted-foreground'
 
 export default function ApiPanel() {
   const [info, setInfo] = useState<ApiInfo | null>(null)
+  const [loadError, setLoadError] = useState('')
   const [connJson, setConnJson] = useState('')
   const [busy, setBusy] = useState('')
   const [showToken, setShowToken] = useState(false)
@@ -35,7 +31,12 @@ export default function ApiPanel() {
       setCi(i.control_internal || ''); setCe(i.control_external || '')
       setIntervalV(i.interval || ''); setAllow(i.allow_subnet || '')
       setNodeId(i.node_id || '')
-    } catch (e: any) { notify('Не удалось загрузить настройки API: ' + (e?.message || e), 'error') }
+      setLoadError('')
+    } catch (e: any) {
+      const msg = e?.message || String(e)
+      setLoadError(msg)
+      notify('Не удалось загрузить настройки API: ' + msg, 'error')
+    }
   }
   useEffect(() => { load() }, [])
 
@@ -101,6 +102,12 @@ export default function ApiPanel() {
     finally { setBusy('') }
   }
 
+  if (!info && loadError) return (
+    <Card><CardContent className="flex items-center justify-between gap-3 p-6 text-destructive">
+      <span>Не удалось загрузить настройки API: {loadError}</span>
+      <Button size="sm" variant="outline" onClick={() => load()}>Повторить</Button>
+    </CardContent></Card>
+  )
   if (!info) return <Card><CardContent className="p-6 text-muted-foreground">Загрузка…</CardContent></Card>
   const enrolled = info.enrolled === '1'
   const agentOn = info.agent_enabled === '1'

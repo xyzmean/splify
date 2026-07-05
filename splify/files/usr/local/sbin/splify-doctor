@@ -74,7 +74,10 @@ fi
 _peers_of() { uci show network 2>/dev/null | sed -n "s/^network\.\([^.=]*\)=\(wireguard\|amneziawg\)_$1\$/\1/p"; }
 rai_ok() { for _s in $(_peers_of "$1"); do [ "$(uci -q get "network.$_s.route_allowed_ips" 2>/dev/null)" = "0" ] || return 1; done; return 0; }
 # priority of an iface, via common.sh's endpoint collector (emits "prio<TAB>iface").
-prio_of() { config_foreach _collect_endpoint endpoint | awk -v i="$1" '$2==i{print $1; exit}'; }
+# Collected once (not per-iface — this loop runs once per endpoint, and
+# re-walking UCI inside it would make the whole loop O(n^2)).
+PRIO_MAP="$(config_foreach _collect_endpoint endpoint)"
+prio_of() { printf '%s\n' "$PRIO_MAP" | awk -v i="$1" '$2==i{print $1; exit}'; }
 
 LANZ="$(fw_lan_zone)"
 for _if in $ORDERED; do
