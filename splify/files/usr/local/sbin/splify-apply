@@ -13,12 +13,30 @@
 # No `set -u`: OpenWrt's config_* helpers (sourced below) aren't nounset-safe.
 . /usr/local/lib/splify/common.sh
 
+# ---- serialize whole runs ---------------------------------------------------
+# This is invoked concurrently from the CGI import/wg-set path, `splify-ctl
+# action apply`, `splify-firewall fix`, the outbound agent's poll-driven
+# import, and the daily list-updater self-heal. With no lock, two overlapping
+# runs race the `mv` below and can install a half-written or stale-generation
+# ruleset (same class of bug splify-failover's own pass mutex fixes). Unlike
+# the list updaters, a run here must never be dropped — wait for the lock
+# instead of skipping. Plain `flock` (not `-n`): fd 9 lives for the rest of the
+# script and releases on exit.
+APPLY_LOCK="/var/run/splify-apply.lock"
+if command -v flock >/dev/null 2>&1 && : 2>/dev/null >> "$APPLY_LOCK"; then
+    exec 9>>"$APPLY_LOCK"
+    flock 9
+fi
+
 # Keep only bare IPv4 / IPv4-CIDR tokens — these go verbatim into the nft ruleset.
 valid_cidr4() { grep -Ex '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?'; }
 clean_cidrs() { echo "$1" | tr ' ' '\n' | grep -v '^$' | valid_cidr4; }
 
 VPN_CIDRS="$(clean_cidrs "$VPN_CIDRS")"
 DIRECT_CIDRS="$(clean_cidrs "$DIRECT_CIDRS")"
+# Endpoint list is UCI-derived and doesn't change mid-run — compute once,
+# reuse across the three loops below instead of re-walking UCI each time.
+EP_LIST="$(endpoints_by_priority)"
 
 # ---- endpoints must not self-route -----------------------------------------
 # splify owns routing via marks + table 200. If a tunnel interface has
@@ -35,7 +53,7 @@ _clear_rai() {
     [ "$(uci -q get "network.$1.route_allowed_ips")" = "0" ] && return
     uci -q set "network.$1.route_allowed_ips=0" && _net_changed=1
 }
-for _if in $(endpoints_by_priority); do
+for _if in $EP_LIST; do
     _clear_rai "$_if"
     for _sec in $(uci show network 2>/dev/null \
             | sed -n "s/^network\.\([^=]*\)=\(wireguard\|amneziawg\)_${_if}\$/\1/p"); do
@@ -60,7 +78,7 @@ fi
 # LAN->tunnel packet through fw4. With no firewall zone on the tunnel iface fw4
 # REJECTs it (looks exactly like a dead tunnel — the #1 post-reflash gotcha); with
 # a zone but no masquerading the VPN server can't route the reply back.
-for _if in $(endpoints_by_priority); do
+for _if in $EP_LIST; do
     _zone="$(fw_zone_of_net "$_if")" || {
         warn "endpoint '$_if' is in NO firewall zone — fw4 will REJECT LAN->tunnel forwarding; add '$_if' to a zone (masq=1) and allow forwarding lan -> that zone"
         continue
@@ -89,7 +107,7 @@ emit_set() {  # $1 set name, $2 size, stdin = cidrs
 # LAN->endpoint packets aren't themselves routed into a tunnel). Prefer the live
 # kernel endpoint per iface; fall back to nothing if the tunnel is down.
 EP_IPS=""
-for _if in $(endpoints_by_priority); do
+for _if in $EP_LIST; do
     EP_IPS="$EP_IPS $(wgshow "$_if" endpoints 2>/dev/null \
         | awk '{print $2}' | sed 's/:[0-9]*$//' | grep -E '^[0-9]+\.')"
 done
@@ -168,7 +186,8 @@ DEV_LINES="$(config_foreach emit_devices device)"
         echo "}"
     fi
 } > "${POLICY_NFT_FILE}.tmp"
-mv "${POLICY_NFT_FILE}.tmp" "$POLICY_NFT_FILE"
+_APPLY_FAIL=0
+mv "${POLICY_NFT_FILE}.tmp" "$POLICY_NFT_FILE" || { warn "failed to install $POLICY_NFT_FILE — policy ruleset NOT updated"; _APPLY_FAIL=1; }
 
 # ---- dnsmasq domain -> nftset (resolve-time tagging) -----------------------
 # The live dnsmasq conf-dir wins (instanced builds use /tmp/dnsmasq.cfgXXXX.d).
@@ -187,11 +206,13 @@ mkdir -p "$DNSMASQ_DIR"
 
 # ---- reload + re-apply routing ---------------------------------------------
 /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
-fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1 || true
+fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1 \
+    || { warn "fw4/firewall reload failed — new policy may not be active"; _APPLY_FAIL=1; }
 # fw4 reload REPLACES `table inet fw4`, wiping the resolve-time set elements
 # dnsmasq populated — restart dnsmasq again AFTER the reload so domain marks
 # are re-established immediately.
 /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
 [ -x /usr/local/sbin/splify-failover ] && /usr/local/sbin/splify-failover >/dev/null 2>&1 || true
 
-log "applied: mode=$MODE ipsum=$IPSUM_ENABLED zapret=$ZAPRET_ENABLED kill=$KILLSWITCH vpn_cidrs=$(echo "$VPN_CIDRS" | wc -w) direct_cidrs=$(echo "$DIRECT_CIDRS" | wc -w)"
+_STATUS="applied"; [ "$_APPLY_FAIL" = 1 ] && _STATUS="applied WITH WARNINGS (see above)"
+log "$_STATUS: mode=$MODE ipsum=$IPSUM_ENABLED zapret=$ZAPRET_ENABLED kill=$KILLSWITCH vpn_cidrs=$(echo "$VPN_CIDRS" | wc -w) direct_cidrs=$(echo "$DIRECT_CIDRS" | wc -w)"

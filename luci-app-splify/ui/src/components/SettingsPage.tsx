@@ -5,16 +5,11 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
+import { notify } from '@/lib/notify'
 import {
   Settings2, ListChecks, Network, ShieldCheck, Globe, Activity, Save, Check as CheckIcon,
   Plus, X as XIcon, Router, MonitorSmartphone, Loader2,
 } from 'lucide-react'
-
-function notify(msg: string, kind: 'info' | 'warning' | 'error' = 'info') {
-  try { if (window.ui?.addNotification) { window.ui.addNotification(null, window.L ? window.L.dom.create('p', {}, msg) : msg, kind); return } } catch { /* */ }
-  // eslint-disable-next-line no-console
-  console.log('[splify]', kind, msg)
-}
 
 const field = 'w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring'
 const lbl = 'mb-1 block text-xs text-muted-foreground'
@@ -136,6 +131,7 @@ export default function SettingsPage() {
   const [busy, setBusy] = useState('')
   const [dirty, setDirty] = useState(false)
 
+  const [hasLoaded, setHasLoaded] = useState(false)
   const [ifaces, setIfaces] = useState<string[]>([])
   const [hostHints, setHostHints] = useState<[string, string][]>([])
 
@@ -185,6 +181,7 @@ export default function SettingsPage() {
       setHostHints(ipHints(hh))
       setError('')
       setDirty(false)
+      setHasLoaded(true)
     } catch (e: any) {
       setError(e?.message || String(e))
     } finally {
@@ -230,11 +227,19 @@ export default function SettingsPage() {
     }
   }
 
-  if (loading) return <div className="p-8 text-center text-muted-foreground animate-pulse">Загрузка настроек…</div>
-  if (error) return <Card><CardContent className="p-8 text-center text-destructive">Ошибка: {error}</CardContent></Card>
+  if (loading && !hasLoaded) return <div className="p-8 text-center text-muted-foreground animate-pulse">Загрузка настроек…</div>
+  if (error && !hasLoaded) return <Card><CardContent className="p-8 text-center text-destructive">Ошибка: {error}</CardContent></Card>
 
   return (
     <div className="space-y-4">
+      {/* A reload error after a successful save shouldn't blank an otherwise-working
+          settings page — keep the last-good form visible and surface this instead. */}
+      {error && hasLoaded && (
+        <Card className="border-destructive/50"><CardContent className="flex items-center justify-between gap-3 p-3 text-sm text-destructive">
+          <span>Не удалось обновить данные: {error}</span>
+          <Button size="sm" variant="outline" onClick={() => load()}>Повторить</Button>
+        </CardContent></Card>
+      )}
       <Card>
         <CardContent className="flex flex-wrap items-start justify-between gap-3 p-5">
           <div>
@@ -408,7 +413,7 @@ export default function SettingsPage() {
                           <select className={cn(field, 'w-auto')} value={e.type}
                             onChange={(ev) => mark(setEndpoints)(endpoints.map((x, j) => j === i ? { ...x, type: ev.target.value } : x))}>
                             <option value="wg">WireGuard / AmneziaWG</option>
-                            <option value="singbox">sing-box (скоро)</option>
+                            <option value="singbox" disabled>sing-box (скоро)</option>
                           </select>
                         </TableCell>
                         <TableCell>

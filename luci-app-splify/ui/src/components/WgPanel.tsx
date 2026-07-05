@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { rpc } from '@/lib/rpc'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
+import { notify } from '@/lib/notify'
 import { Settings2, FileDown, Eye, KeyRound } from 'lucide-react'
 
 // Small numeric obfuscation knobs (rendered as a compact grid).
@@ -13,12 +14,6 @@ const JUNK_KEYS = ['i1', 'i2', 'i3', 'i4', 'i5', 'j1', 'j2', 'j3'] as const
 const ALL_AWG = [...NUM_KEYS, ...JUNK_KEYS]
 
 type Form = Record<string, string>
-
-function notify(msg: string, kind: 'info' | 'warning' | 'error' = 'info') {
-  try { if (window.ui?.addNotification) { window.ui.addNotification(null, window.L ? window.L.dom.create('p', {}, msg) : msg, kind); return } } catch { /* */ }
-  // eslint-disable-next-line no-console
-  console.log('[splify]', kind, msg)
-}
 
 const field = 'w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring'
 const lbl = 'mb-1 block text-xs text-muted-foreground'
@@ -32,6 +27,10 @@ export default function WgPanel() {
   const [revealed, setRevealed] = useState(false)
   const [showJunk, setShowJunk] = useState(false)
   const [err, setErr] = useState('')
+  // Live pointer to the selected iface — a closure captures `iface` by value,
+  // so an in-flight reveal() needs this to notice the user switched ifaces.
+  const ifaceRef = useRef(iface)
+  useEffect(() => { ifaceRef.current = iface }, [iface])
 
   const load = async () => {
     try {
@@ -69,8 +68,12 @@ export default function WgPanel() {
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }))
 
   async function reveal() {
+    const forIface = iface
     try {
-      const d = await rpc.wgGet(iface, 1)
+      const d = await rpc.wgGet(forIface, 1)
+      // The user may have switched interfaces while this was in flight — never
+      // let a stale response drop a private key into the wrong iface's form.
+      if (ifaceRef.current !== forIface) return
       set('private_key', d?.private_key || '')
       setRevealed(true)
     } catch (e: any) { notify('Не удалось показать ключ: ' + (e?.message || e), 'error') }

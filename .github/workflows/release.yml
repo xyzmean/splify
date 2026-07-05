@@ -1,13 +1,14 @@
 name: Release
 
 # Manual release. Actions tab -> "Release" -> Run workflow, enter a version like
-# 1.4.0. Builds the .apk packages via Dockerfile-apk (buildx layer cache keeps it
-# to a few minutes) and publishes a tagged GitHub release with them attached.
+# 26.7.5 (CalVer: YY.M.D — same scheme auto-version.yml stamps on every push to
+# main). Builds the .apk packages via Dockerfile-apk (buildx layer cache keeps
+# it to a few minutes) and publishes a tagged GitHub release with them attached.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Версия релиза (например 1.4.0)'
+        description: 'Версия релиза (например 26.7.5)'
         required: true
         type: string
 
