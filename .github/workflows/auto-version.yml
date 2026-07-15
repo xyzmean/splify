@@ -25,7 +25,8 @@ jobs:
       - name: Compute CalVer version
         id: calver
         run: |
-          base="$(date -u +'%y.%-m.%-d')"
+          # Используем TZ=Europe/Moscow для локального времени
+          base="$(TZ='Europe/Moscow' date +'%y.%-m.%-d')"
           version="$base"
           n=1
           while git rev-parse -q --verify "refs/tags/v$version" >/dev/null 2>&1; do
