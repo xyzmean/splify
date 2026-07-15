@@ -104,10 +104,10 @@ function ListEditor({ values, onChange, placeholder }: { values: string[]; onCha
         return (
           <div key={i} className="flex gap-2">
             <input className={field} value={v} placeholder={placeholder}
-              onChange={(e) => (isLast ? null : update(i, e.target.value))}
-              onBlur={(e) => { if (isLast && e.target.value.trim()) { add(e.target.value); e.target.value = '' } }}
+              onChange={(e) => update(i, e.target.value)}
+              onBlur={(e) => { if (isLast && e.target.value.trim()) { add(e.target.value); } }}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && isLast) { add((e.target as HTMLInputElement).value); (e.target as HTMLInputElement).value = '' }
+                if (e.key === 'Enter' && isLast && (e.target as HTMLInputElement).value.trim()) { add((e.target as HTMLInputElement).value); }
               }} />
             {isLast
               ? <Button type="button" size="icon" variant="secondary" className="bg-success text-white hover:bg-success/90"
@@ -191,7 +191,15 @@ export default function SettingsPage() {
   useEffect(() => { load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   function commit() {
-    const g = (k: string, v: string | string[] | boolean) => uci.set('global', k, typeof v === 'boolean' ? (v ? '1' : '0') : v)
+    const g = (k: string, v: string | string[] | boolean) => {
+      const val = typeof v === 'boolean' ? (v ? '1' : '0') : v
+      if (Array.isArray(val)) {
+        const filtered = val.filter(s => s.trim() !== '')
+        uci.set('global', k, filtered.length > 0 ? filtered : undefined)
+      } else {
+        uci.set('global', k, val)
+      }
+    }
     g('mode', general.mode); g('interval', general.interval); g('killswitch', general.killswitch)
     g('lan_iface', general.lan_iface); g('lan_cidr', general.lan_cidr); g('health_url', general.health_url)
     g('health_target', general.health_target)
@@ -208,7 +216,7 @@ export default function SettingsPage() {
     }
     for (const d of devices) {
       const sid = d.isNew ? uci.add('device') : d.sid
-      uci.set(sid, 'ip', d.ip); uci.set(sid, 'mode', d.mode)
+      uci.set(sid, 'ip', d.ip.trim()); uci.set(sid, 'mode', d.mode)
     }
   }
 
