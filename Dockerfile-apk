@@ -32,6 +32,20 @@ RUN ./scripts/feeds update luci packages base \
 # below; the dependency/kernel layer above stays cached.
 COPY --chown=buildbot:buildbot splify          feed/splify
 COPY --chown=buildbot:buildbot luci-app-splify feed/luci-app-splify
+
+# Drop the freshly-built UI bundles (produced by `npm run build` in CI) into the
+# feed's htdocs. The committed bundles were removed from git (git-ignored) to
+# force a single source of truth: src/ -> vite build -> here. build-id.txt is
+# stamped below; favicon.svg/icons.svg come from ui/public via the vite build.
+# This layer is cheap (small text files) and keyed on the bundle content.
+COPY --chown=buildbot:buildbot luci-app-splify/ui/dist/splify-index.js \
+                          luci-app-splify/ui/dist/splify-settings.js \
+                          luci-app-splify/ui/dist/splify-x.js \
+                          luci-app-splify/ui/dist/splify-index.css \
+                          luci-app-splify/ui/dist/favicon.svg \
+                          luci-app-splify/ui/dist/icons.svg \
+     feed/luci-app-splify/htdocs/luci-static/resources/splify/
+
 RUN echo "src-link splify /builder/feed" >> feeds.conf.default \
  && ./scripts/feeds update splify \
  && ./scripts/feeds install -p splify splify luci-app-splify

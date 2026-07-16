@@ -1,11 +1,20 @@
 # Tooling / local agent state
 .serena/
 .claude/
+.zcode/
 
 # Build output
 out/
 bin/
 *.apk
+
+# LuCI UI bundles — rebuilt from src/ by `npm run build` in CI (build.yml /
+# auto-version.yml) and copied into the package by Dockerfile-apk. Never
+# committed: committing them caused src/ fixes to silently never ship, because
+# nothing regenerated the bundles. build-id.txt is stamped at package-build
+# time; favicon.svg/icons.svg live in ui/public and are emitted by the build.
+luci-app-splify/htdocs/luci-static/resources/splify/*.js
+luci-app-splify/htdocs/luci-static/resources/splify/*.css
 
 # Python caches (reference control server)
 __pycache__/

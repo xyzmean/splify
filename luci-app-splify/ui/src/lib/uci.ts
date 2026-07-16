@@ -46,6 +46,17 @@ export const uci = {
   remove: (sid: string) => u().remove(CONFIG, sid),
   save: (): Promise<any> => u().save(),
   apply: (): Promise<any> => u().apply(),
+  // uci.save() only STAGES changes in /tmp/.uci (they vanish on reboot). The
+  // real write to /etc/config happens on ubus `uci commit`. "Save" (without
+  // apply) must persist too, otherwise edits silently evaporate — the
+  // rollback-protected apply() in LuCI commits as a side effect, but the plain
+  // save path does not, so we call commit explicitly. LuCI's frontend uci
+  // module keeps callCommit private, so reach it through rpc.declare directly.
+  commit: (): Promise<any> => {
+    const rpc = window.luci_rpc
+    if (!rpc) throw new Error('LuCI RPC bridge not found (window.luci_rpc)')
+    return rpc.declare({ object: 'uci', method: 'commit', params: ['config'] })(CONFIG)
+  },
   // Discard the in-memory change-set (used after a failed save so the form
   // doesn't drift from what's actually on disk).
   unload: () => { try { u().unload(CONFIG) } catch { /* */ } },

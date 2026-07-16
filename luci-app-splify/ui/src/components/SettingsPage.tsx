@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { uci, arr, wgIfaces, ipHints, type Section } from '@/lib/uci'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -144,6 +144,11 @@ export default function SettingsPage() {
   const [manual, setManual] = useState<ManualForm>({ vpn_cidr: [], direct_cidr: [], vpn_domain: [], direct_domain: [] })
   const [endpoints, setEndpoints] = useState<EndpointRow[]>([])
   const [devices, setDevices] = useState<DeviceRow[]>([])
+  // Sids present at the last load() — the basis for detecting rows the user
+  // has since removed (filter button). Those must be uci.remove()'d in commit(),
+  // otherwise the deleted section reappears on the next reload.
+  const loadedEndpointSids = useRef<Set<string>>(new Set())
+  const loadedDeviceSids = useRef<Set<string>>(new Set())
 
   function mark<T>(setter: (v: T) => void) {
     return (v: T) => { setDirty(true); setter(v) }
@@ -169,10 +174,14 @@ export default function SettingsPage() {
         vpn_cidr: arr(uci.get('global', 'vpn_cidr')), direct_cidr: arr(uci.get('global', 'direct_cidr')),
         vpn_domain: arr(uci.get('global', 'vpn_domain')), direct_domain: arr(uci.get('global', 'direct_domain')),
       })
-      setEndpoints(uci.sections('endpoint').map((s: Section) => ({
+      const epSections = uci.sections('endpoint')
+      const devSections = uci.sections('device')
+      setEndpoints(epSections.map((s: Section) => ({
         sid: s['.name'], iface: s.iface || '', priority: s.priority || '', type: s.type || 'wg',
       })).sort((a, b) => (parseInt(a.priority) || 0) - (parseInt(b.priority) || 0)))
-      setDevices(uci.sections('device').map((s: Section) => ({ sid: s['.name'], ip: s.ip || '', mode: s.mode || 'vpn' })))
+      setDevices(devSections.map((s: Section) => ({ sid: s['.name'], ip: s.ip || '', mode: s.mode || 'vpn' })))
+      loadedEndpointSids.current = new Set(epSections.map((s) => s['.name']))
+      loadedDeviceSids.current = new Set(devSections.map((s) => s['.name']))
       const [ifs, hh] = await Promise.all([
         wgIfaces(),
         Promise.resolve(window.__splifyHostHints || {}),
@@ -210,6 +219,19 @@ export default function SettingsPage() {
     g('vpn_cidr', manual.vpn_cidr); g('direct_cidr', manual.direct_cidr)
     g('vpn_domain', manual.vpn_domain); g('direct_domain', manual.direct_domain)
 
+    // Diff against the last load(): any sid that was present then but is gone
+    // from the current array was removed by the user — delete the section, or
+    // it silently reappears on the next reload (this was the "туннели не
+    // сохраняются" bug — new/edits were written but deletions were dropped).
+    const keepEndpoint = new Set(endpoints.filter((e) => !e.isNew).map((e) => e.sid))
+    for (const sid of loadedEndpointSids.current) {
+      if (!keepEndpoint.has(sid)) uci.remove(sid)
+    }
+    const keepDevice = new Set(devices.filter((d) => !d.isNew).map((d) => d.sid))
+    for (const sid of loadedDeviceSids.current) {
+      if (!keepDevice.has(sid)) uci.remove(sid)
+    }
+
     for (const e of endpoints) {
       const sid = e.isNew ? uci.add('endpoint') : e.sid
       uci.set(sid, 'iface', e.iface); uci.set(sid, 'priority', e.priority); uci.set(sid, 'type', e.type || 'wg')
@@ -225,7 +247,15 @@ export default function SettingsPage() {
     try {
       commit()
       await uci.save()
-      if (apply) await uci.apply()
+      if (apply) {
+        // apply() commits to /etc/config + reloads services + starts the
+        // rollback timer (it persists as a side effect of ubus uci.apply).
+        await uci.apply()
+      } else {
+        // save() only stages to /tmp/.uci — commit explicitly so the edit
+        // survives a reboot without forcing a service reload right now.
+        await uci.commit()
+      }
       notify(apply ? 'Настройки сохранены и применены' : 'Настройки сохранены', 'info')
       await load()
     } catch (e: any) {
