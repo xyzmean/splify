@@ -47,6 +47,7 @@ CRON=/etc/crontabs/root; touch "$$CRON"
 grep -q 'splify-update-ipsum'   "$$CRON" || echo '30 4 * * * /usr/local/sbin/splify-update-ipsum >/dev/null 2>&1'   >> "$$CRON"
 grep -q 'splify-update-ru'      "$$CRON" || echo '45 4 * * * /usr/local/sbin/splify-update-ru >/dev/null 2>&1'      >> "$$CRON"
 grep -q 'splify-update-domains' "$$CRON" || echo '50 4 * * * /usr/local/sbin/splify-update-domains >/dev/null 2>&1' >> "$$CRON"
+grep -q 'splify-update-faceit'  "$$CRON" || echo '35 4 * * * /usr/local/sbin/splify-update-faceit >/dev/null 2>&1'  >> "$$CRON"
 /etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1
 /etc/init.d/splify enable >/dev/null 2>&1
 /etc/init.d/splify restart >/dev/null 2>&1
@@ -55,6 +56,11 @@ grep -q 'splify-update-domains' "$$CRON" || echo '50 4 * * * /usr/local/sbin/spl
 # convention as zapret, so enabling the init script is always safe).
 /etc/init.d/splify-singbox enable >/dev/null 2>&1
 /etc/init.d/splify-singbox start >/dev/null 2>&1
+# FACEIT DPI bypass: register the service (self-gates on the nfqws binary being
+# installed AND on splify.global.faceit_enabled, so enabling the init script is
+# always safe — it no-ops cleanly until both conditions hold).
+/etc/init.d/splify-faceit enable >/dev/null 2>&1
+/etc/init.d/splify-faceit start >/dev/null 2>&1
 # remote-management agent: register the service (it self-gates on
 # splify.api.agent_enabled, so enabling the init script is safe even when the
 # agent is configured off — it simply won't open an instance).
@@ -63,7 +69,7 @@ grep -q 'splify-update-domains' "$$CRON" || echo '50 4 * * * /usr/local/sbin/spl
 # register the splify ubus object (rpcd plugin) so LuCI can call it
 /etc/init.d/rpcd reload >/dev/null 2>&1
 # first list fetch in the background so the install returns promptly
-( /usr/local/sbin/splify-update-ipsum; /usr/local/sbin/splify-update-ru; /usr/local/sbin/splify-update-domains ) >/dev/null 2>&1 &
+( /usr/local/sbin/splify-update-ipsum; /usr/local/sbin/splify-update-ru; /usr/local/sbin/splify-update-domains; /usr/local/sbin/splify-update-faceit ) >/dev/null 2>&1 &
 exit 0
 endef
 
@@ -72,6 +78,8 @@ define Package/splify/prerm
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
 /etc/init.d/splify-agent stop >/dev/null 2>&1
 /etc/init.d/splify-agent disable >/dev/null 2>&1
+/etc/init.d/splify-faceit stop >/dev/null 2>&1
+/etc/init.d/splify-faceit disable >/dev/null 2>&1
 /usr/local/sbin/splify-uninstall >/dev/null 2>&1 || true
 exit 0
 endef

@@ -1,0 +1,102 @@
+#!/bin/sh /etc/rc.common
+# procd service for splify's FACEIT DPI-bypass nfqws — a SEPARATE nfqws instance
+# dedicated to FACEIT/CS2 game traffic (UDP 27015-27036 + TCP {443,27015-27030}
+# to hosting-provider IPs). This is an officially supported zapret pattern
+# (bol-van/zapret init.d/custom.d.examples.linux/50-nfqws-ipset): a second
+# nfqws on a different --qnum coexists cleanly with zapret's own (qnum=200).
+#
+# IP-limiting is done at the KERNEL layer (the splify_faceit_queue_postrouting
+# nft chain, installed by splify-apply, queues ONLY ip daddr @splify_faceit_v4),
+# NOT via nfqws's --ipset flag (upstream marks that "VERY INEFFECTIVE": every
+# queued packet still pays a kernel->userspace round-trip even for non-matching
+# IPs). Kernel-side filtering means non-FACEIT traffic never enters this queue.
+#
+# Self-gates on the nfqws binary actually being installed (soft/runtime-detected
+# dependency, same convention as sing-box): installing splify alone never
+# requires nfqws; the service simply reports "not installed" and exits 0 (procd
+# sees a clean stop, not a crash-loop) until the operator installs zapret.
+# The queue chain's `bypass` flag then keeps FACEIT traffic flowing unchanged if
+# this daemon is absent — a dead/missing nfqws must never drop game packets.
+START=93
+STOP=12
+USE_PROCD=1
+
+# Build the UDP desync options from UCI. Reads the FACEIT_UDP_* knobs already
+# loaded by common.sh. Echoes zero-or-more space-separated nfqws flags (so an
+# empty result means "no UDP block at all" and the caller must skip the
+# --filter-udp). Pure-ish: only string formatting, no nft/uci mutation, but it
+# DOES reference $FACEIT_UDP_* so it must run AFTER common.sh is sourced.
+_faceit_udp_opts() {
+    [ "$FACEIT_UDP_ENABLED" = "1" ] || return 0
+    [ "$FACEIT_UDP_MODE" = "none" ] && return 0
+    _opts="--filter-udp=27015-27036"
+    _opts="$_opts --dpi-desync=$FACEIT_UDP_MODE"
+    [ -n "$FACEIT_UDP_CUTOFF" ]  && _opts="$_opts --dpi-desync-cutoff=$FACEIT_UDP_CUTOFF"
+    # repeats=1 is nfqws's default; emit only for >1 to keep the cmdline clean.
+    [ "${FACEIT_UDP_REPEATS:-1}" != "1" ] && _opts="$_opts --dpi-desync-repeats=$FACEIT_UDP_REPEATS"
+    _opts="$_opts --dpi-desync-any-protocol=1"
+    # fake-unknown-udp defaults to a zero-filled packet when no bin is given
+    # (upstream docs) — so an empty FACEIT_UDP_FAKE still produces a working fake.
+    if [ -n "$FACEIT_UDP_FAKE" ]; then
+        _opts="$_opts --dpi-desync-fake-unknown-udp=$FACEIT_UDP_FAKE"
+    else
+        _opts="$_opts --dpi-desync-fake-unknown-udp=0x00"
+    fi
+    echo "$_opts"
+}
+
+# Build the TCP desync options from UCI (same shape as the UDP variant).
+_faceit_tcp_opts() {
+    [ "$FACEIT_TCP_ENABLED" = "1" ] || return 0
+    _opts="--filter-tcp=443,27015-27030"
+    _opts="$_opts --dpi-desync=$FACEIT_TCP_MODE"
+    [ -n "$FACEIT_TCP_CUTOFF" ]  && _opts="$_opts --dpi-desync-cutoff=$FACEIT_TCP_CUTOFF"
+    [ "${FACEIT_TCP_REPEATS:-1}" != "1" ] && _opts="$_opts --dpi-desync-repeats=$FACEIT_TCP_REPEATS"
+    _opts="$_opts --dpi-desync-any-protocol=1"
+    echo "$_opts"
+}
+
+start_service() {
+    . /lib/functions.sh
+    # shellcheck source=/dev/null
+    . /usr/local/lib/splify/common.sh
+
+    # Soft dependency: nfqws ships with zapret (or standalone). Never crash-loop
+    # if it is absent — log once and exit 0 so procd treats this as a clean stop.
+    command -v nfqws >/dev/null 2>&1 || {
+        log "nfqws not installed — FACEIT DPI bypass inactive (install zapret to enable)"
+        return 0
+    }
+    [ "$FACEIT_ENABLED" = "1" ] || return 0
+
+    _udp_opts="$(_faceit_udp_opts)"
+    _tcp_opts="$(_faceit_tcp_opts)"
+    # Bail (cleanly) if BOTH planes are disabled — nothing for nfqws to do.
+    [ -n "$_udp_opts" ] || [ -n "$_tcp_opts" ] || {
+        log "faceit enabled but both udp/tcp planes off — nothing to do"
+        return 0
+    }
+
+    procd_open_instance "faceit"
+    # --qnum MUST match the queue num in the splify_faceit_queue_postrouting
+    # nft chain (FACEIT_QNUM, default 192 — deliberately far from zapret's 200).
+    # --dpi-desync-fwmark is nfqws's own "already processed" mark; it MUST be
+    # unique vs zapret (0x40000000 / 0x20000000) or nfqws re-processes packets.
+    # $_udp_opts / $_tcp_opts each expand to a whitespace-separated list of
+    # nfqws flags (--filter-udp=..., --dpi-desync=..., ...); the word-split is
+    # intentional — quoting would pass the whole list as one broken argument.
+    # shellcheck disable=SC2086
+    procd_set_param command nfqws \
+        --qnum="$FACEIT_QNUM" \
+        --dpi-desync-fwmark="$FACEIT_FWMARK" \
+        $_udp_opts \
+        $_tcp_opts
+    procd_set_param respawn 3600 5 0
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+
+service_triggers() {
+    procd_add_reload_trigger "splify"
+}

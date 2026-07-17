@@ -22,7 +22,7 @@ jobs:
             splify/files/usr/local/sbin/splify-* \
             splify/files/usr/local/lib/splify/*.sh \
             splify/files/usr/libexec/rpcd/splify \
-            splify/files/etc/init.d/splify \
+            splify/files/etc/init.d/splify* \
             splify/files/etc/uci-defaults/*
 
   test:

@@ -545,3 +545,65 @@ setup_ep_singbox() {
     }
     run fw_zone_is_tunnel_only vpn;  [ "$status" -eq 0 ]
 }
+
+# ---- faceit_url_for: provider name -> fetch descriptor ----------------------
+# Pure function (reads $FACEIT_PROVIDERS, prints "kind<TAB>url" per known
+# provider). Defined at the top of splify-update-faceit BEFORE any nft/uci/curl
+# call specifically so it can be tested off-box via extract_fn, mirroring
+# nozapret_current's placement in splify-sync-nozapret.
+setup_faceit() {
+    load_fn "$UPDATE_FACEIT_SH" faceit_url_for
+    # silence the log()/die() the sourced body might reach if test mis-uses it
+    log() { :; }
+}
+
+@test "faceit_url_for: each known provider yields a kind+url line" {
+    setup_faceit
+    FACEIT_PROVIDERS='ovh'
+    out="$(faceit_url_for)"
+    [ "$out" = "$(printf 'cidr\thttps://cdn.jsdelivr.net/gh/rezmoss/cloud-provider-ip-addresses@main/ovhcloud/ovhcloud_ips_v4.txt')" ] || { echo "got:[$out]"; return 1; }
+
+    FACEIT_PROVIDERS='hetzner'
+    out="$(faceit_url_for)"
+    case "$out" in *hetzner/hetzner_ips_v4.txt*) : ;; *) echo "bad hetzner url:[$out]"; return 1 ;; esac
+
+    FACEIT_PROVIDERS='gcp'
+    out="$(faceit_url_for)"
+    case "$out" in *googlecloud/googlecloud_ips_v4.txt*) : ;; *) echo "bad gcp url:[$out]"; return 1 ;; esac
+
+    # i3d is the only CSV source (geofeed) — kind must be 'csv' so the fetcher
+    # strips the first comma-column instead of feeding raw CSV to clean_ip_list.
+    FACEIT_PROVIDERS='i3d'
+    out="$(faceit_url_for)"
+    [ "$out" = "$(printf 'csv\thttps://geofeed.i3d.net/i3d_geofeed.csv')" ] || { echo "got:[$out]"; return 1; }
+}
+
+@test "faceit_url_for: multiple providers -> one line each, in order" {
+    setup_faceit
+    FACEIT_PROVIDERS='ovh gcp'
+    out="$(faceit_url_for)"
+    n=$(printf '%s\n' "$out" | wc -l)
+    [ "$n" = "2" ] || { echo "expected 2 lines, got $n:[$out]"; return 1; }
+    # order follows FACEIT_PROVIDERS
+    first="$(printf '%s\n' "$out" | head -1)"
+    case "$first" in *ovhcloud*) : ;; *) echo "first line not ovh:[$first]"; return 1 ;; esac
+    second="$(printf '%s\n' "$out" | tail -1)"
+    case "$second" in *googlecloud*) : ;; *) echo "second line not gcp:[$second]"; return 1 ;; esac
+}
+
+@test "faceit_url_for: unknown tokens silently skipped" {
+    setup_faceit
+    # a typo in faceit_providers must never break the refresh — unknown names
+    # produce no line, known ones still resolve.
+    FACEIT_PROVIDERS='ovh bogusname hetzner'
+    out="$(faceit_url_for)"
+    n=$(printf '%s\n' "$out" | wc -l)
+    [ "$n" = "2" ] || { echo "expected 2 lines (typo dropped), got $n:[$out]"; return 1; }
+}
+
+@test "faceit_url_for: empty providers list yields nothing" {
+    setup_faceit
+    FACEIT_PROVIDERS=''
+    out="$(faceit_url_for)"
+    [ -z "$out" ] || { echo "expected empty, got:[$out]"; return 1; }
+}

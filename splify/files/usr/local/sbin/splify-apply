@@ -165,6 +165,10 @@ DEV_LINES="$(config_foreach emit_devices device)"
     [ "$HAS_VPN" = 1 ]    && { echo "$VPN_CIDRS"    | emit_set "$VPN_SET" 4096; }
     [ "$HAS_DIRECT" = 1 ] && { echo "$DIRECT_CIDRS" | emit_set "$DIRECT_SET" 4096; }
     [ "$RU_DIRECT" = 1 ]  && emit_set "$RU_SET" 65536 </dev/null   # filled live by update-ru
+    # FACEIT set is always defined when enabled (independent of mode); populated
+    # live by splify-update-faceit. The queue chain below is emitted only once
+    # the set is non-empty so a pre-refresh boot stays all-WAN-safe.
+    [ "$FACEIT_ENABLED" = "1" ] && emit_set "$FACEIT_SET" 65536 </dev/null
 
     if [ -n "$DEV_LINES" ]; then
         echo "chain splify_device_mark_prerouting {"
@@ -205,6 +209,27 @@ DEV_LINES="$(config_foreach emit_devices device)"
         esac
         echo "}"
     fi
+
+    # FACEIT DPI bypass: route game traffic to hosting-provider IPs into splify's
+    # OWN nfqws (qnum=192). Mirrors zapret's own nfqws placement (postrouting +
+    # mangle) so the two instances coexist; priority mangle+2 is free (the ladder
+    # mangle-2..mangle+1 is taken by the mark chains above). The `bypass` queue
+    # flag keeps FACEIT traffic flowing unchanged if splify's nfqws is absent or
+    # crashes — critical for games (a dead daemon must never drop packets). Only
+    # emitted when faceit_enabled AND the set has been populated by
+    # splify-update-faceit, so a pre-refresh boot never installs a queue rule
+    # pointing at an empty set (which would queue every UDP-27015 packet in the
+    # LAN into a daemon that may not even be running yet).
+    if [ "$FACEIT_ENABLED" = "1" ] && [ -n "$FACEIT_QNUM" ] \
+       && [ "$(set_count "$FACEIT_TABLE" "$FACEIT_SET")" -gt 0 ]; then
+        echo "chain splify_faceit_queue_postrouting {"
+        echo "    type filter hook postrouting priority mangle + 2; policy accept;"
+        [ "$FACEIT_UDP_ENABLED" = "1" ] && \
+        echo "    ip daddr @$FACEIT_SET udp dport 27015-27036 queue num $FACEIT_QNUM bypass counter"
+        [ "$FACEIT_TCP_ENABLED" = "1" ] && \
+        echo "    ip daddr @$FACEIT_SET tcp dport { 443, 27015-27030 } queue num $FACEIT_QNUM bypass counter"
+        echo "}"
+    fi
 } > "${POLICY_NFT_FILE}.tmp"
 _APPLY_FAIL=0
 mv "${POLICY_NFT_FILE}.tmp" "$POLICY_NFT_FILE" || { warn "failed to install $POLICY_NFT_FILE — policy ruleset NOT updated"; _APPLY_FAIL=1; }
@@ -232,7 +257,18 @@ fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1 \
 # dnsmasq populated — restart dnsmasq again AFTER the reload so domain marks
 # are re-established immediately.
 /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+# fw4 reload also wipes the FACEIT provider set (same table). Replay its saved
+# flush+add-element block so the queue chain installed above has IPs to match
+# against, then (re)start splify's dedicated nfqws so it is bound to FACEIT_QNUM
+# when those packets start arriving. Best-effort: a missing/empty replay file
+# just means the set stays empty until the next daily refresh (the queue chain
+# was emitted only if the set was already non-empty, so there is nothing to
+# feed yet on a truly fresh install).
+if [ "$FACEIT_ENABLED" = "1" ] && [ -r "$FACEIT_NFT_FILE" ]; then
+    nft -f "$FACEIT_NFT_FILE" >/dev/null 2>&1 || warn "FACEIT set replay failed — will refill on next splify-update-faceit run"
+    [ -x /etc/init.d/splify-faceit ] && /etc/init.d/splify-faceit restart >/dev/null 2>&1 || true
+fi
 [ -x /usr/local/sbin/splify-failover ] && /usr/local/sbin/splify-failover >/dev/null 2>&1 || true
 
 _STATUS="applied"; [ "$_APPLY_FAIL" = 1 ] && _STATUS="applied WITH WARNINGS (see above)"
-log "$_STATUS: mode=$MODE ipsum=$IPSUM_ENABLED zapret=$ZAPRET_ENABLED kill=$KILLSWITCH vpn_cidrs=$(echo "$VPN_CIDRS" | wc -w) direct_cidrs=$(echo "$DIRECT_CIDRS" | wc -w)"
+log "$_STATUS: mode=$MODE ipsum=$IPSUM_ENABLED zapret=$ZAPRET_ENABLED faceit=$FACEIT_ENABLED kill=$KILLSWITCH vpn_cidrs=$(echo "$VPN_CIDRS" | wc -w) direct_cidrs=$(echo "$DIRECT_CIDRS" | wc -w)"

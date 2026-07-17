@@ -11,6 +11,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMMON_SH="$REPO_ROOT/splify/files/usr/local/lib/splify/common.sh"
 DOCTOR_SH="$REPO_ROOT/splify/files/usr/local/sbin/splify-doctor"
 FAILOVER_SH="$REPO_ROOT/splify/files/usr/local/sbin/splify-failover"
+UPDATE_FACEIT_SH="$REPO_ROOT/splify/files/usr/local/sbin/splify-update-faceit"
 
 # extract_fn FILE FNNAME -> prints the function's source.
 extract_fn() {

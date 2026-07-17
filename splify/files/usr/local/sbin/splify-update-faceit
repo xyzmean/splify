@@ -1,0 +1,104 @@
+#!/bin/sh
+# splify-update-faceit — daily refresh of FACEIT hosting-provider prefixes
+# (OVH/Hetzner/GCP/i3D) → nft set splify_faceit_v4.
+#
+# Strategy: pull each enabled provider's IPv4 list → validate via clean_ip_list
+# → atomic live nft reload via a single compact `flush set; add element {…}`
+# block (the memory-safe primitive; per-line add OOMs at 38k entries). Persist
+# the same block to FACEIT_NFT_FILE (replay source after fw4 flush / reboot) and
+# the plain list to FACEIT_FILE (consumed by diagnostics).
+#
+# Sources (all bare-CIDR-per-line; i3D's geofeed is CSV, first column stripped):
+#   ovh      — rezmoss/cloud-provider-ip-addresses ovhcloud_ips_v4.txt   (~688)
+#   hetzner  — rezmoss ...                       hetzner_ips_v4.txt      (~682)
+#   gcp      — rezmoss ...                       googlecloud_ips_v4.txt  (~991)
+#   i3d      — geofeed.i3d.net/i3d_geofeed.csv   (parsed awk -F, '{print $1}')
+# rezmoss is mirrored via jsDelivr (CDN, no GitHub raw rate limits), license CC0.
+#
+# FACEIT_NFT_FILE lives OUTSIDE /etc/nftables.d/ so fw4 does not auto-include it
+# (the set definition is in /etc/nftables.d/30-splify.nft).
+
+set -e   # fail-fast on curl/validation; no `-u`, /lib/functions.sh isn't nounset-safe
+. /usr/local/lib/splify/common.sh
+
+# Pure provider-name -> URL mapping, defined at the TOP (before any nft/uci/curl
+# call) so it can be unit-tested off-box via tests/helper.bash's extract_fn,
+# mirroring the nozapret_current placement in splify-sync-nozapret. Reads
+# $FACEIT_PROVIDERS (space-joined) and prints one "kind<TAB>url" line per known
+# provider in that list; unknown tokens are silently skipped (so a user typing
+# a typo into faceit_providers never breaks the refresh). The kind tag tells the
+# fetch loop below whether the body needs CSV first-column extraction (i3d) or
+# is already bare CIDR.
+faceit_url_for() {   # reads FACEIT_PROVIDERS
+    for _p in $FACEIT_PROVIDERS; do
+        case "$_p" in
+            ovh)     printf 'cidr\thttps://cdn.jsdelivr.net/gh/rezmoss/cloud-provider-ip-addresses@main/ovhcloud/ovhcloud_ips_v4.txt\n' ;;
+            hetzner) printf 'cidr\thttps://cdn.jsdelivr.net/gh/rezmoss/cloud-provider-ip-addresses@main/hetzner/hetzner_ips_v4.txt\n' ;;
+            gcp)     printf 'cidr\thttps://cdn.jsdelivr.net/gh/rezmoss/cloud-provider-ip-addresses@main/googlecloud/googlecloud_ips_v4.txt\n' ;;
+            i3d)     printf 'csv\thttps://geofeed.i3d.net/i3d_geofeed.csv\n' ;;
+        esac
+    done
+}
+
+[ "$FACEIT_ENABLED" = "1" ] || { log "faceit disabled (FACEIT_ENABLED=0)"; exit 0; }
+[ -n "$FACEIT_PROVIDERS" ] || die "no faceit_providers configured"
+single_run update-faceit   # bail if a concurrent run (cron vs self-heal) holds the lock
+
+TMP="/tmp/splify-update-faceit.$$"
+mkdir -p "$TMP" "$(dirname "$FACEIT_FILE")" "$(dirname "$FACEIT_NFT_FILE")"
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+# Fetch every enabled provider into one stream. A single failed provider is
+# non-fatal (others may still cover most FACEIT subnets), but the min-count gate
+# below still rejects an aggregate botch. NOTE: the while body runs in a subshell
+# (piped), so it can only side-effect via files — not shell variables; the
+# non-empty check on $TMP/raw.lst below is the "at least one provider delivered"
+# signal.
+: > "$TMP/raw.lst"
+faceit_url_for | while IFS=$(printf '\t') read -r _kind _url; do
+    [ -n "$_url" ] || continue
+    echo " * faceit: fetching $_url" >&2
+    if ! curl -fsSL --connect-timeout 10 --max-time 120 --retry 2 -o "$TMP/part.$$" "$_url"; then
+        echo "   WARN: fetch failed: $_url" >&2
+        continue
+    fi
+    case "$_kind" in
+        csv) awk -F, '/^[0-9]/{print $1}' "$TMP/part.$$" >> "$TMP/raw.lst" ;;  # i3d geofeed
+        *)   cat "$TMP/part.$$" >> "$TMP/raw.lst" ;;
+    esac
+    rm -f "$TMP/part.$$"
+done
+
+[ -s "$TMP/raw.lst" ] || die "no provider list fetched (all providers failed)"
+
+clean_ip_list < "$TMP/raw.lst" | sort -u > "$TMP/clean.lst"
+
+count=$(wc -l < "$TMP/clean.lst")
+[ "$count" -ge "$FACEIT_MIN_COUNT" ] || die "only $count valid prefixes (need $FACEIT_MIN_COUNT)"
+
+# Command stream: flush + one comma-block add (no table wrap, no set definition).
+emit_nft_set_block "$FACEIT_TABLE" "$FACEIT_SET" < "$TMP/clean.lst" > "$TMP/live.nft"
+
+# Atomic live reload. On failure keep the payload OUTSIDE $TMP — the EXIT trap
+# wipes $TMP, so a path inside it would be gone before anyone can inspect it.
+nft -f "$TMP/live.nft" || {
+    cp "$TMP/live.nft" /tmp/splify-faceit-failed.nft 2>/dev/null || true
+    die "atomic nft live update failed (kept: /tmp/splify-faceit-failed.nft)"
+}
+
+# Persist. FACEIT_NFT_FILE is the replay source (failover/fw4 reload replays it);
+# the list is re-downloaded daily and gated by FACEIT_MIN_COUNT above, so no
+# separate timestamped backups are kept.
+cat "$TMP/live.nft" > "$FACEIT_NFT_FILE"
+cat "$TMP/clean.lst" > "$FACEIT_FILE"
+
+log "faceit refresh OK: $count prefixes from providers [$(echo "$FACEIT_PROVIDERS" | tr ' ' ',')]"
+
+# The FACEIT queue chain in 30-splify.nft is emitted by splify-apply ONLY when
+# the live set is non-empty (so a pre-refresh boot stays all-WAN-safe). A first
+# successful refresh therefore needs a re-apply to install the chain; subsequent
+# refreshes only update set elements (no re-apply needed). Guard + best-effort.
+if ! { [ -r "$FACEIT_NFT_FILE.prev" ] && cmp -s "$FACEIT_NFT_FILE" "$FACEIT_NFT_FILE.prev"; }; then
+    [ -x /usr/local/sbin/splify-apply ] && /usr/local/sbin/splify-apply >/dev/null 2>&1 || true
+fi
+cp "$FACEIT_NFT_FILE" "$FACEIT_NFT_FILE.prev" 2>/dev/null || true
