@@ -41,6 +41,9 @@ config splify 'global'
 	option faceit_tcp_mode 'fake,multidisorder'
 	option faceit_tcp_cutoff 'n3'
 	option faceit_tcp_repeats '6'
+	# путь к файлу ручных IP-переопределений (мерджится поверх списка хостеров,
+	# никогда не перезаписывается cron'ом). Пусто = /etc/splify/faceit-user.lst.
+	option faceit_user_file ''
 
 	# optional downloadable DOMAIN lists -> tagged at dnsmasq resolve time
 	option vpn_domains_url ''

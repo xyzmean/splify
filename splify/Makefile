@@ -29,6 +29,7 @@ endef
 
 define Package/splify/conffiles
 /etc/config/splify
+/etc/splify/faceit-user.lst
 endef
 
 Build/Compile:=

@@ -607,3 +607,61 @@ setup_faceit() {
     out="$(faceit_url_for)"
     [ -z "$out" ] || { echo "expected empty, got:[$out]"; return 1; }
 }
+
+# ---- faceit_merge_user: merge operator overrides into provider list --------
+# Pure-ish: takes provider list on stdin + a user file path; concats them (NO
+# dedup — the caller does sort -u), validates the user file via clean_ip_list,
+# and marks each valid user entry as "+ <ip>" on stderr for the log line. The
+# contract: missing/empty user file = plain passthrough of stdin; garbage-only
+# user file = passthrough; user file absent = passthrough.
+setup_merge() {
+    load_fn "$UPDATE_FACEIT_SH" faceit_merge_user
+    load_fn "$COMMON_SH" clean_ip_list
+    log() { :; }
+}
+
+@test "faceit_merge_user: concats provider + user, validated, no dedup" {
+    setup_merge
+    printf '10.0.0.0/8\n192.168.0.0/16\n' > "$BATS_TMPDIR/prov.lst"
+    printf '10.0.0.0/8\n# comment\n203.0.113.5/32\nbad\n' > "$BATS_TMPDIR/user.lst"
+    out="$(faceit_merge_user < "$BATS_TMPDIR/prov.lst" "$BATS_TMPDIR/user.lst" 2>"$BATS_TMPDIR/ulog")"
+    # concat preserves the dup (10.0.0.0/8 appears twice) — dedup is caller's job
+    [ "$out" = "$(printf '10.0.0.0/8\n192.168.0.0/16\n10.0.0.0/8\n203.0.113.5/32')" ] \
+        || { echo "got:[$out]"; return 1; }
+    # stderr marks BOTH valid user entries (incl the dup-before-dedup one)
+    n=$(grep -c '^+ ' "$BATS_TMPDIR/ulog")
+    [ "$n" = "2" ] || { echo "expected 2 user marks, got $n"; return 1; }
+}
+
+@test "faceit_merge_user: caller's sort -u dedups the merge (this is what ships)" {
+    setup_merge
+    printf '10.0.0.0/8\n192.168.0.0/16\n' > "$BATS_TMPDIR/prov.lst"
+    printf '10.0.0.0/8\n203.0.113.5/32\n' > "$BATS_TMPDIR/user.lst"
+    final="$(faceit_merge_user < "$BATS_TMPDIR/prov.lst" "$BATS_TMPDIR/user.lst" 2>/dev/null | sort -u)"
+    [ "$final" = "$(printf '10.0.0.0/8\n192.168.0.0/16\n203.0.113.5/32')" ] \
+        || { echo "got:[$final]"; return 1; }
+}
+
+@test "faceit_merge_user: missing user file = passthrough, no stderr marks" {
+    setup_merge
+    printf '10.0.0.0/8\n192.168.0.0/16\n' > "$BATS_TMPDIR/prov.lst"
+    rm -f "$BATS_TMPDIR/absent.lst"
+    out="$(faceit_merge_user < "$BATS_TMPDIR/prov.lst" "$BATS_TMPDIR/absent.lst" 2>"$BATS_TMPDIR/nlog")"
+    [ "$out" = "$(printf '10.0.0.0/8\n192.168.0.0/16')" ] || { echo "got:[$out]"; return 1; }
+    [ ! -s "$BATS_TMPDIR/nlog" ] || { echo "stderr should be empty"; return 1; }
+}
+
+@test "faceit_merge_user: garbage-only user file = passthrough" {
+    setup_merge
+    printf '10.0.0.0/8\n' > "$BATS_TMPDIR/prov.lst"
+    printf 'not_an_ip\n# comment only\n' > "$BATS_TMPDIR/garb.lst"
+    out="$(faceit_merge_user < "$BATS_TMPDIR/prov.lst" "$BATS_TMPDIR/garb.lst" 2>/dev/null)"
+    [ "$out" = "10.0.0.0/8" ] || { echo "got:[$out]"; return 1; }
+}
+
+@test "faceit_merge_user: empty path arg = passthrough" {
+    setup_merge
+    printf '10.0.0.0/8\n' > "$BATS_TMPDIR/prov.lst"
+    out="$(faceit_merge_user < "$BATS_TMPDIR/prov.lst" '' 2>/dev/null)"
+    [ "$out" = "10.0.0.0/8" ] || { echo "got:[$out]"; return 1; }
+}

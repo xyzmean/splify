@@ -438,7 +438,7 @@ export default function SettingsPage() {
                 <p className="text-xs text-muted-foreground">
                   Запускает отдельный nfqws (qnum 192) только для игрового трафика к выбранным хостерам. Требуется zapret/nfqws; если nfqws нет или упал — трафик идёт напрямую без изменений (bypass).
                 </p>
-                <Field label="Хостеры FACEIT">
+                <Field label="Хостеры FACEIT" helpText="Список включает весь дата-центр хостера (не только FACEIT). Для ручных IP-переопределений редактируйте /etc/splify/faceit-user.lst — мерджится поверх, не перезаписывается cron'ом.">
                   <div className="flex flex-wrap gap-2 pt-1">
                     {(['ovh', 'hetzner', 'gcp', 'i3d'] as const).map((p) => {
                       const on = lists.faceit_providers.includes(p)

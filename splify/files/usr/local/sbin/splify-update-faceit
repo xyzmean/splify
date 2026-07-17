@@ -73,8 +73,34 @@ done
 
 clean_ip_list < "$TMP/raw.lst" | sort -u > "$TMP/clean.lst"
 
+# Operator overrides: merge $FACEIT_USER_FILE (if present) into the cleaned
+# provider list. Validated with the same clean_ip_list, so a malformed user
+# entry can never corrupt the set. User entries are added AFTER the min-count
+# gate intentionally — a single hand-added /32 must NOT let a botched provider
+# fetch pass the floor (the floor exists to catch a truncated download), and
+# conversely the user list must survive even if every provider fetch fails.
+# Returns count of user lines added (0 if file absent/empty) on stderr for the
+# log line; the merged list goes to stdout.
+faceit_merge_user() {   # stdin = provider clean list; $1 = user file
+    _uf="$1"
+    cat
+    if [ -n "$_uf" ] && [ -r "$_uf" ]; then
+        clean_ip_list < "$_uf" | sed 's/^/+ /' >&2
+        clean_ip_list < "$_uf"
+    fi
+}
+
 count=$(wc -l < "$TMP/clean.lst")
 [ "$count" -ge "$FACEIT_MIN_COUNT" ] || die "only $count valid prefixes (need $FACEIT_MIN_COUNT)"
+
+_user_added=0
+if [ -n "$FACEIT_USER_FILE" ] && [ -r "$FACEIT_USER_FILE" ]; then
+    faceit_merge_user < "$TMP/clean.lst" "$FACEIT_USER_FILE" 2>"$TMP/user.log" \
+        | sort -u > "$TMP/merged.lst"
+    # `+ <ip>` lines on stderr mark user-added entries (see faceit_merge_user).
+    _user_added=$(grep -c '^+ ' "$TMP/user.log" 2>/dev/null || true)
+    cat "$TMP/merged.lst" > "$TMP/clean.lst"
+fi
 
 # Command stream: flush + one comma-block add (no table wrap, no set definition).
 emit_nft_set_block "$FACEIT_TABLE" "$FACEIT_SET" < "$TMP/clean.lst" > "$TMP/live.nft"
@@ -88,11 +114,17 @@ nft -f "$TMP/live.nft" || {
 
 # Persist. FACEIT_NFT_FILE is the replay source (failover/fw4 reload replays it);
 # the list is re-downloaded daily and gated by FACEIT_MIN_COUNT above, so no
-# separate timestamped backups are kept.
+# separate timestamped backups are kept. FACEIT_FILE holds the MERGED list
+# (provider + user overrides) — that is what the nft set actually contains.
 cat "$TMP/live.nft" > "$FACEIT_NFT_FILE"
 cat "$TMP/clean.lst" > "$FACEIT_FILE"
 
-log "faceit refresh OK: $count prefixes from providers [$(echo "$FACEIT_PROVIDERS" | tr ' ' ',')]"
+_total=$(wc -l < "$TMP/clean.lst")
+if [ "$_user_added" -gt 0 ]; then
+    log "faceit refresh OK: $_total prefixes ($_user_added user + $count provider [$(echo "$FACEIT_PROVIDERS" | tr ' ' ',')])"
+else
+    log "faceit refresh OK: $_total prefixes from providers [$(echo "$FACEIT_PROVIDERS" | tr ' ' ',')]"
+fi
 
 # The FACEIT queue chain in 30-splify.nft is emitted by splify-apply ONLY when
 # the live set is non-empty (so a pre-refresh boot stays all-WAN-safe). A first

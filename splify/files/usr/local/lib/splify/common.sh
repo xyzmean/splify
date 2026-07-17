@@ -63,6 +63,9 @@ config_get        FACEIT_UDP_FAKE      global faceit_udp_fake      ''
 config_get        FACEIT_TCP_MODE      global faceit_tcp_mode      'fake,multidisorder'
 config_get        FACEIT_TCP_CUTOFF    global faceit_tcp_cutoff    'n3'
 config_get        FACEIT_TCP_REPEATS   global faceit_tcp_repeats   '6'
+# Optional override path for the operator's own additions (default
+# /etc/splify/faceit-user.lst). Empty -> use the built-in default.
+config_get        FACEIT_USER_FILE     global faceit_user_file     "$FACEIT_USER_FILE"
 config_get        VPN_CIDRS       global vpn_cidr        ''
 config_get        DIRECT_CIDRS    global direct_cidr     ''
 config_get        VPN_DOMAINS     global vpn_domain      ''
@@ -103,6 +106,13 @@ FACEIT_FILE="/etc/splify/faceit.lst"
 FACEIT_NFT_FILE="/etc/splify/faceit-set.nft"
 FACEIT_SET="splify_faceit_v4"; FACEIT_TABLE="inet fw4"; FACEIT_MIN_COUNT="100"
 FACEIT_QNUM="192"; FACEIT_FWMARK="0x40010000"
+# Operator-owned additions/overrides, merged INTO the provider-derived set on
+# every refresh (and NEVER overwritten by it). Lets an operator (a) add a
+# FACEIT server IP not yet in any provider's BGP set, (b) narrow the broad
+# whole-ASN collateral by maintaining their own /32 list and disabling the
+# provider fetch, or (c) cover a provider rezmoss/i3D doesn't list. One bare
+# IPv4/CIDR per line, '#' comments allowed (validated via clean_ip_list).
+FACEIT_USER_FILE="/etc/splify/faceit-user.lst"
 
 DOMAINS_VPN_FILE="/etc/splify/vpn-domains.lst"
 DOMAINS_IGNORE_FILE="/etc/splify/ignore-domains.lst"
