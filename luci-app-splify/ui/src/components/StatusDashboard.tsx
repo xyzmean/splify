@@ -157,6 +157,7 @@ export default function StatusDashboard(p: Props) {
               <div className="truncate text-sm font-semibold tracking-tight">{path.title}</div>
               <div className="mt-0.5 text-xs text-muted-foreground">
                 Режим <b className="text-foreground">{s.mode || '?'}</b> · Kill switch <b className="text-foreground">{String(s.killswitch) === '1' ? 'вкл' : 'выкл'}</b>
+                {s.zapret_version && <> · DPI: <b className="text-foreground">{s.zapret_version}</b></>}
               </div>
             </div>
           </div>
@@ -392,7 +393,7 @@ function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: 
         const sub = !e.present ? 'недоступен' : active ? <span className="whitespace-nowrap"><span className="text-success">↓{fmtRate(r.rx)}</span> <span className="text-info">↑{fmtRate(r.tx)}</span></span> : e.handshake_age >= 0 && e.handshake_age < 999999 ? '⇄ ' + fmtAge(e.handshake_age) : ''
         return <span key={e.iface} className="contents"><Arrow /><Node title={`#${e.priority || '?'} ${e.iface}`} sub={sub} active={active} dead={!e.present} /></span>
       })}
-      {hasZapret && <><Arrow /><Node title="zapret" sub="обход DPI" active={state === 'zapret'} /></>}
+      {hasZapret && <><Arrow /><Node title={s.zapret_version || "zapret"} sub="обход DPI" active={state === 'zapret'} /></>}
       <Arrow />
       {state === 'killswitch'
         ? <div className="flex min-w-[84px] flex-col justify-center rounded-lg border border-destructive bg-destructive/10 px-3 py-2 text-center ring-2 ring-destructive/30"><div className="text-sm font-semibold">заблокировано</div><div className="mt-0.5 text-xs text-muted-foreground">kill switch</div></div>

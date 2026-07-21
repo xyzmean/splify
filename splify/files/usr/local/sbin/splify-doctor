@@ -260,6 +260,36 @@ if [ "$PATH_KIND" = vpn ] && [ -n "$VPN_CIDRS" ] && [ -n "$ACTIVE" ]; then
     done
 fi
 
+if [ -n "$DIRECT_CIDRS" ]; then
+    for _cidr in $(printf '%s' "$DIRECT_CIDRS" | tr ', ' '\n' | grep -v '^$'); do
+        _addr="${_cidr%/*}"
+        case "$_addr" in *.*.*.*) : ;; *) continue ;; esac
+        if ! nft get element inet fw4 "$DIRECT_SET" "{ $_addr }" >/dev/null 2>&1; then
+            add FIXABLE routing \
+                "Direct subnet $_cidr is missing from the live direct set ($DIRECT_SET)" \
+                "run splify-apply"
+        fi
+    done
+fi
+
+check_device_routing() {
+    config_get _ip "$1" ip ""
+    config_get _dm "$1" mode "vpn"
+    [ -n "$_ip" ] || return 0
+    echo "$_ip" | valid_cidr4 >/dev/null 2>&1 || { add WARN routing "device $_ip is invalid CIDR" "remove or fix in UI"; return 0; }
+    
+    _rule_mark=""
+    [ "$_dm" = "vpn" ] && _rule_mark="$WG_MARK"
+    [ "$_dm" = "direct" ] && _rule_mark="$ANTI_LOOP_MARK"
+    
+    if [ -n "$_rule_mark" ]; then
+        if ! nft list chain inet fw4 splify_device_mark_prerouting 2>/dev/null | grep -q "ip saddr $_ip .*$_rule_mark"; then
+            add FIXABLE routing "device $_ip ($_dm) is missing from device routing rules" "run splify-apply"
+        fi
+    fi
+}
+config_foreach check_device_routing device
+
 # ---- lists -----------------------------------------------------------------
 # In blocklist/split, the live RU_SET is unreferenced — ru's real job is feeding
 # the nozapret bypass set, so report its FILE prefix count (its contribution),
@@ -352,14 +382,24 @@ if [ "$_have_domains" = true ]; then
         || add FIXABLE dnsmasq "domain tagging configured but the dnsmasq nftset drop-in is missing from $_dir" "run splify-apply (regenerates and reloads dnsmasq)"
 fi
 
+# ---- remote control agent --------------------------------------------------
+_agent_enabled="$(uci -q get splify.api.agent_enabled 2>/dev/null || echo 0)"
+if [ "$_agent_enabled" = "1" ]; then
+    if ! pgrep -f "splify-agent" >/dev/null 2>&1; then
+        add WARN agent "remote control agent is enabled but not running" "/etc/init.d/splify-agent restart"
+    else
+        add OK agent "remote control agent is running"
+    fi
+fi
+
 # ---- output ----------------------------------------------------------------
 SEV_NAME() { case "$1" in 0) echo OK;; 1) echo WARN;; 2) echo FIXABLE;; 3) echo FAIL;; esac; }
 OVERALL="$(SEV_NAME "$WORST")"
 
 if [ "$JSON" = 1 ]; then
     printf '{"overall":"%s",' "$OVERALL"
-    printf '"summary":{"mode":"%s","state":"%s","active_iface":"%s","killswitch":%s,"fail_count":%s,"lan_iface":"%s","lan_cidr":"%s"},' \
-        "$(json_esc "$MODE")" "$(json_esc "$STATE")" "$(json_esc "$ACTIVE")" "${KILLSWITCH:-0}" "$(fail_get)" "$(json_esc "$LAN_IFACE")" "$(json_esc "$LAN_CIDR")"
+    printf '"summary":{"mode":"%s","state":"%s","active_iface":"%s","killswitch":%s,"fail_count":%s,"lan_iface":"%s","lan_cidr":"%s","zapret_version":"%s"},' \
+        "$(json_esc "$MODE")" "$(json_esc "$STATE")" "$(json_esc "$ACTIVE")" "${KILLSWITCH:-0}" "$(fail_get)" "$(json_esc "$LAN_IFACE")" "$(json_esc "$LAN_CIDR")" "$(json_esc "$ZAPRET_VERSION")"
     printf '"endpoints":[%s],' "${EP_JSON%,}"
     printf '"lists":[%s],' "${LIST_JSON%,}"
     printf '"checks":['
@@ -375,7 +415,7 @@ else
     echo "=== splify doctor ==="
     echo "overall : $OVERALL"
     echo "mode    : $MODE     state: ${STATE:-(none)}     active: ${ACTIVE:-(none)}"
-    echo "killswitch: ${KILLSWITCH:-0}     fail_count: $(fail_get)     lan: $LAN_IFACE -> ${LAN_CIDR:-(none)}"
+    echo "killswitch: ${KILLSWITCH:-0}     fail_count: $(fail_get)     lan: $LAN_IFACE -> ${LAN_CIDR:-(none)}     zapret: $ZAPRET_VERSION"
     echo
     printf '%s' "$CHECKS" | while IFS='	' read -r _s _cat _m _fix; do
         [ -n "$_s" ] || continue

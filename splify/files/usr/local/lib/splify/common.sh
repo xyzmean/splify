@@ -88,18 +88,23 @@ _zapret_detect_init() {
     if [ -x /etc/init.d/zapret2 ]; then
         ZAPRET_INIT="/etc/init.d/zapret2"
         ZAPRET_NOZAPRET_TABLE="inet zapret2"
+        ZAPRET_VERSION="zapret2"
     elif [ -x /etc/init.d/zapret ]; then
         ZAPRET_INIT="/etc/init.d/zapret"
         ZAPRET_NOZAPRET_TABLE="inet zapret"
+        ZAPRET_VERSION="zapret"
     elif [ -x /opt/zapret2/nfq2/nfqws2 ]; then
         ZAPRET_INIT=""
         ZAPRET_NOZAPRET_TABLE="inet zapret2"
+        ZAPRET_VERSION="zapret2"
     elif [ -x /opt/zapret/nfq/nfqws ]; then
         ZAPRET_INIT=""
         ZAPRET_NOZAPRET_TABLE="inet zapret"
+        ZAPRET_VERSION="zapret"
     else
         ZAPRET_INIT="/etc/init.d/zapret"
         ZAPRET_NOZAPRET_TABLE="inet zapret"
+        ZAPRET_VERSION="zapret"
     fi
 }
 _zapret_detect_init
