@@ -31,14 +31,26 @@ export default function App() {
   // any action). There is deliberately NO background polling interval: a timer
   // firing every few seconds for the lifetime of the tab was both an annoyance
   // and a steady source of work that kept the long-lived view busy.
+  //
+  // Prefer the combined `snapshot` call (one doctor fork = one ubus round-trip
+  // for both status and events); fall back to separate status()+events() only
+  // if the backend is older than the `snapshot` method (or ACL rejects it).
   const refresh = useCallback(async () => {
     try {
-      const [st, ev] = await Promise.all([
-        rpc.status(),
-        rpc.events().catch(() => ({ events: [] as EventRow[] })),
-      ])
-      setStatus(st)
-      setEvents((ev && ev.events) || [])
+      const snap = await rpc.snapshot().catch(async (snapErr: any) => {
+        // Old backend without `snapshot`, or the read ACL doesn't list it yet:
+        // degrade to the legacy two-call path so the page still works.
+        if (snapErr && /not found|No object|declared|UBUS_STATUS_NOT_FOUND|Method not found/i.test(String(snapErr?.message || snapErr))) {
+          const [st, ev] = await Promise.all([
+            rpc.status(),
+            rpc.events().catch(() => ({ events: [] as EventRow[] })),
+          ])
+          return { status: st, events: (ev && ev.events) || [] }
+        }
+        throw snapErr
+      })
+      setStatus(snap.status)
+      setEvents(snap.events || [])
       setError(null)
     } catch (e: any) {
       setError(e?.message || String(e))

@@ -7,7 +7,7 @@
 				"network.interface": [ "dump" ],
 				"network": [ "get_proto_handlers" ],
 				"luci-rpc": [ "getHostHints" ],
-				"splify": [ "status", "events", "config_export", "wg_get", "singbox_get", "api_get" ]
+				"splify": [ "status", "snapshot", "events", "config_export", "wg_get", "singbox_get", "api_get" ]
 			}
 		},
 		"write": {

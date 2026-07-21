@@ -12,6 +12,9 @@
 # which the plugin pipes straight into splify-ctl — no re-serialisation, no jq.
 #
 #   status        -> splify-doctor --json      (diagnostics object)
+#   snapshot      -> splify-doctor --snapshot  (status + events in ONE process:
+#                  saves a second doctor fork the dashboard used to pay when it
+#                  polled status and events as two separate ubus calls)
 #   events        -> { "events": [ … ] }       (failover timeline)
 #   action        -> run one allow-listed maintenance op
 #   config_export -> full node snapshot (keys masked unless reveal=1)
@@ -33,6 +36,7 @@ case "$1" in
     list)
         json_init
         json_add_object "status";  json_close_object
+        json_add_object "snapshot"; json_close_object
         json_add_object "events";  json_close_object
         json_add_object "action"
             json_add_string "name" ""
@@ -84,6 +88,11 @@ case "$1" in
                 # callStatus() doesn't reject exactly when there's a problem to
                 # render (severity is carried in the JSON itself).
                 "$DOCTOR" --json || true
+                ;;
+            snapshot)
+                # Combined {"status":{...},"events":[...]} from a single doctor
+                # process. Same exit-code normalisation as `status` (see above).
+                "$DOCTOR" --snapshot || true
                 ;;
             events)
                 printf '{"events":%s}\n' "$("$DOCTOR" --events)"

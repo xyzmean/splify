@@ -3,6 +3,12 @@
 // before mounting React. Every method here is a thin wrapper over splify-ctl on
 // the router, so the dashboard, the inbound REST API and the outbound agent all
 // drive the exact same backend.
+//
+// Wrapped in a SplifyClient class: the declarators are memoised per method
+// (rpc.declare is cheap but was called on every single invocation before, and a
+// couple of call sites — notably lib/uci.ts — still reach for `declare()`
+// directly, so it stays public), and the splify-specific error surface
+// ("bridge not found") is centralised here instead of re-checked at each use.
 
 declare global {
   interface Window {
@@ -10,12 +16,6 @@ declare global {
     L: any
     ui: any
   }
-}
-
-function decl(method: string, params?: string[]) {
-  const rpc = window.luci_rpc
-  if (!rpc) throw new Error('LuCI RPC bridge not found (window.luci_rpc)')
-  return rpc.declare({ object: 'splify', method, params })
 }
 
 export type Sev = 'OK' | 'WARN' | 'FIXABLE' | 'FAIL'
@@ -51,25 +51,75 @@ export interface ApiInfo {
   enrolled: string; node_id: string; interval: string; allow_subnet: string
   agent_running: boolean; last_poll: string; last_result: string
 }
-
-export const rpc = {
-  status: (): Promise<Status> => decl('status')(),
-  events: (): Promise<{ events: EventRow[] }> => decl('events')(),
-  action: (name: string, iface = ''): Promise<{ code: number; stdout: string }> =>
-    decl('action', ['name', 'iface'])(name, iface),
-  // reveal=1 returns private keys → write-gated method (kept out of the read ACL).
-  exportCfg: (reveal = 0): Promise<any> => reveal ? decl('config_reveal')() : decl('config_export')(),
-  importCfg: (data: any): Promise<any> => decl('config_import', ['data'])(JSON.stringify(data)),
-  wgGet: (iface: string, reveal = 0): Promise<any> => reveal ? decl('wg_reveal', ['iface'])(iface) : decl('wg_get', ['iface'])(iface),
-  wgSet: (iface: string, data: any): Promise<any> => decl('wg_set', ['iface', 'data'])(iface, JSON.stringify(data)),
-  wgImport: (iface: string, conf: string): Promise<any> => decl('wg_import', ['iface', 'conf'])(iface, conf),
-  singboxGet: (iface: string): Promise<any> => decl('singbox_get', ['iface'])(iface),
-  singboxImport: (iface: string, uri: string): Promise<any> => decl('singbox_import', ['iface', 'conf'])(iface, uri),
-  apiGet: (): Promise<ApiInfo> => decl('api_get')(),
-  apiToken: (): Promise<{ token: string }> => decl('api_token')(),
-  apiSet: (data: any): Promise<any> => decl('api_set', ['data'])(JSON.stringify(data)),
-  tokenRegen: (): Promise<{ token: string }> => decl('token_regen')(),
-  connect: (data: any): Promise<any> =>
-    decl('connect', ['data'])(typeof data === 'string' ? data : JSON.stringify(data)),
-  enroll: (): Promise<any> => decl('enroll')(),
+// status + events in a single ubus round-trip (one doctor fork). Used by the
+// dashboard's initial load + refresh; falls back to status()+events() in
+// App.tsx if the running backend predates the `snapshot` method.
+export interface Snapshot {
+  status: Status
+  events: EventRow[]
 }
+
+export class SplifyClient {
+  /** The underlying LuCI rpc module (also exposed for lib/uci.ts' direct
+   *  uci.commit call, which has no splify equivalent). */
+  private readonly luciRpc: any
+  /** Memoised declarators keyed by "<method>|<params>" — rpc.declare itself is
+   *  idempotent but not free, and the previous object re-ran it per call. */
+  private readonly decls = new Map<string, (...args: any[]) => Promise<any>>()
+
+  constructor() {
+    const luciRpc = typeof window !== 'undefined' ? window.luci_rpc : undefined
+    if (!luciRpc) {
+      throw new Error('LuCI RPC bridge not found (window.luci_rpc)')
+    }
+    this.luciRpc = luciRpc
+  }
+
+  /** Public so lib/uci.ts can declare its own (uci.commit) call. */
+  declare(method: string, params?: string[]) {
+    const key = method + '|' + (params ? params.join(',') : '')
+    const cached = this.decls.get(key)
+    if (cached) return cached
+    const fn: (...args: any[]) => Promise<any> = this.luciRpc.declare({ object: 'splify', method, params })
+    this.decls.set(key, fn)
+    return fn
+  }
+
+  // ── read path ────────────────────────────────────────────────────────────
+  status(): Promise<Status> { return this.declare('status')() }
+  events(): Promise<{ events: EventRow[] }> { return this.declare('events')() }
+  /** One doctor process instead of two. Prefer this on the dashboard. */
+  snapshot(): Promise<Snapshot> { return this.declare('snapshot')() }
+
+  // ── config / wg / singbox ────────────────────────────────────────────────
+  // reveal=1 returns private keys → write-gated method (kept out of the read ACL).
+  exportCfg = (reveal = 0): Promise<any> =>
+    reveal ? this.declare('config_reveal')() : this.declare('config_export')()
+  importCfg = (data: any): Promise<any> =>
+    this.declare('config_import', ['data'])(JSON.stringify(data))
+  wgGet = (iface: string, reveal = 0): Promise<any> =>
+    reveal ? this.declare('wg_reveal', ['iface'])(iface) : this.declare('wg_get', ['iface'])(iface)
+  wgSet = (iface: string, data: any): Promise<any> =>
+    this.declare('wg_set', ['iface', 'data'])(iface, JSON.stringify(data))
+  wgImport = (iface: string, conf: string): Promise<any> =>
+    this.declare('wg_import', ['iface', 'conf'])(iface, conf)
+  singboxGet = (iface: string): Promise<any> =>
+    this.declare('singbox_get', ['iface'])(iface)
+  singboxImport = (iface: string, uri: string): Promise<any> =>
+    this.declare('singbox_import', ['iface', 'conf'])(iface, uri)
+
+  // ── api / agent ──────────────────────────────────────────────────────────
+  apiGet = (): Promise<ApiInfo> => this.declare('api_get')()
+  apiToken = (): Promise<{ token: string }> => this.declare('api_token')()
+  apiSet = (data: any): Promise<any> => this.declare('api_set', ['data'])(JSON.stringify(data))
+  tokenRegen = (): Promise<{ token: string }> => this.declare('token_regen')()
+  connect = (data: any): Promise<any> =>
+    this.declare('connect', ['data'])(typeof data === 'string' ? data : JSON.stringify(data))
+  enroll = (): Promise<any> => this.declare('enroll')()
+
+  // ── actions ──────────────────────────────────────────────────────────────
+  action = (name: string, iface = ''): Promise<{ code: number; stdout: string }> =>
+    this.declare('action', ['name', 'iface'])(name, iface)
+}
+
+export const rpc = new SplifyClient()

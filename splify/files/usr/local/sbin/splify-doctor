@@ -14,8 +14,22 @@
 # Almost every probe reuses a common.sh helper — this file is orchestration, not
 # new diagnostic logic. No `set -u`: OpenWrt's config_* helpers aren't nounset-safe.
 
-JSON=0; EVENTS=0
-case "${1:-}" in --json) JSON=1 ;; --events) EVENTS=1 ;; esac
+# Output modes:
+#   (none)     human-readable report (for SSH)
+#   --json     machine-readable diagnostics object (consumed by the LuCI panel)
+#   --events   failover timeline only (RAM ring buffer -> JSON array)
+#   --snapshot combined {"status":{...},"events":[...]} in ONE process — saves a
+#              second fork of doctor when the dashboard wants both (the read path
+#              used to issue two separate ubus calls: status + events). events is
+#              cheap on its own (it short-circuits before diagnostics), but
+#              snapshot still removes the rpcd round-trip and the re-source of
+#              common.sh. Internally sets JSON=1 and folds the events array in.
+JSON=0; EVENTS=0; SNAPSHOT=0
+case "${1:-}" in
+    --json)     JSON=1 ;;
+    --events)   EVENTS=1 ;;
+    --snapshot) JSON=1; SNAPSHOT=1 ;;
+esac
 
 # ---- result accumulators ---------------------------------------------------
 # checks: one record per line, tab-separated SEV<TAB>CATEGORY<TAB>MSG<TAB>FIX.
@@ -42,9 +56,10 @@ fi
 . /usr/local/lib/splify/common.sh
 
 # ---- failover event timeline (design §4.3) ---------------------------------
-# `splify-doctor --events` -> JSON array of the RAM ring buffer journal()
-# writes, newest first. Consumed by the LuCI dashboard timeline.
-if [ "$EVENTS" = 1 ]; then
+# emit_events: JSON array of the RAM ring buffer journal() writes, newest first.
+# Consumed by `splify-doctor --events` directly and folded into `--snapshot`.
+# Drawn out of the --events branch so snapshot reuses the identical formatting.
+emit_events() {
     printf '['
     { [ -s "$EVENTS_FILE" ] && sed '1!G;h;$!d' "$EVENTS_FILE"; } \
     | { _first=1
@@ -54,11 +69,233 @@ if [ "$EVENTS" = 1 ]; then
             printf '{"ts":%s,"kind":"%s","from":"%s","to":"%s","reason":"%s"}' \
                 "$_ts" "$(json_esc "$_kind")" "$(json_esc "$_from")" "$(json_esc "$_to")" "$(json_esc "$_reason")"
         done; }
-    printf ']\n'
+    printf ']'
+}
+
+# `splify-doctor --events` -> JSON array only. Still its own process (kept for
+# the ubus `events` method, splify-status and SSH users); exits before any
+# diagnostics run so it stays cheap (~0.07s on a 3.5s box).
+if [ "$EVENTS" = 1 ]; then
+    emit_events; printf '\n'
     exit 0
 fi
 
-STATE="$(read_state)"; ACTIVE="$(active_iface)"; ORDERED="$(endpoints_by_priority)"
+# ---- performance: pre-load firewall config into in-process lookup tables -----
+# The firewall-zone sanity probes (fw_zone_of_net, fw_zone_has_masq,
+# fw_has_forwarding, …) historically issued one `uci -q get firewall.@zone[i].x`
+# PER field PER zone — on a typical box that compiled to ~70 uci fork-execs and
+# dominated the ~3.5s doctor runtime (profiled: 94 uci calls, ~70 of them in the
+# firewall loops). We snapshot the whole firewall config ONCE here and rebuild
+# the same fw_* helpers to read from flat shell variables (zero-fork lookups),
+# leaving their observable behaviour identical. This is local to doctor so the
+# other 12 scripts that source common.sh keep their exact original helpers.
+#
+# Variable layout (set by _fw_load once):
+#   _FW_NZONES              — highest @zone index + 1
+#   _FW_ZONE_<i>_NAME       — zone name (e.g. "lan"), or empty
+#   _FW_ZONE_<i>_<KEY>      — any option (lowercased key): network, device,
+#                             masq, mtu_fix, input, output, forward, enabled,
+#                             family. `network`/`device` keep their list values
+#                             space-joined so callers can `for` over them.
+#   _FW_NFWDS               — highest @forwarding index + 1
+#   _FW_FORWARDING_<i>_<KEY> — src / dest / enabled / family
+# All multi-valued network/device options are space-joined in place of their
+# list form, mirroring what `uci -q get` returns for a list option.
+_fw_load() {
+    # one `uci show` + one awk pass over its output -> shell VAR='\''val'\'' lines.
+    # index()/substr parsing (no bracket-regex) — verified against busybox awk.
+    eval "$(uci show firewall 2>/dev/null | awk '
+        function store(sec, i, key, val) {
+            if (sec == "zone" && (key == "network" || key == "device")) {
+                prev = zonelist[i "_" key]
+                zonelist[i "_" key] = (prev == "" ? val : prev " " val)
+            } else {
+                print "_FW_" toupper(sec) "_" i "_" toupper(key) "=\047" val "\047"
+            }
+        }
+        {
+            if (index($0, "firewall.@zone[") != 1 && index($0, "firewall.@forwarding[") != 1) next
+            sec = (index($0, "firewall.@zone[") == 1) ? "zone" : "forwarding"
+            s = $0; sub(/^firewall\.@[a-z]+\[/, "", s)
+            bi = index(s, "]"); if (bi == 0) next
+            idx = substr(s, 1, bi-1) + 0
+            after = substr(s, bi+1)
+            if (substr(after, 1, 1) == "=") {
+                if (sec == "zone")           { if (idx > maxz) maxz = idx }
+                else if (sec == "forwarding") { if (idx > maxf) maxf = idx }
+                next
+            }
+            sub(/^\./, "", after)
+            eq = index(after, "=")
+            key = tolower(substr(after, 1, eq-1))
+            val = substr(after, eq+1)
+            sub(/^\047/, "", val); sub(/\047$/, "", val)
+            store(sec, idx, key, val)
+        }
+        END {
+            for (k in zonelist) {
+                split(k, a, "_"); i = a[1]; key = a[2]
+                print "_FW_ZONE_" i "_" toupper(key) "=\047" zonelist[k] "\047"
+            }
+            print "_FW_NZONES=" (maxz+1)
+            print "_FW_NFWDS=" (maxf+1)
+        }
+    ')"
+}
+_fw_load
+
+# zone option lookup (zero-fork): sets the caller's $_fw_val. Empty = unset,
+# matching `uci -q get` semantics. Callers use it inline (no command sub).
+# Variable-name prefix matches what _fw_load's awk emits ("_FW_<SECTION>_<i>_<KEY>").
+_fw_zget() { eval "_fw_val=\"\${_FW_ZONE_${1}_${2}}\""; }
+# forwarding option lookup. NOTE: section prefix is FORWARDING (the section
+# name), not the shorthand FWD — it must match _fw_load's awk store() exactly.
+_fw_fget() { eval "_fw_val=\"\${_FW_FORWARDING_${1}_${2}}\""; }
+
+# ---- nft set counts: keep the original set_count (no table-bulk cache) ------
+# Profiling on real hardware (14k-entry ipsum set, 73k nozapret): `nft list set`
+# for an interval set costs the same whether we call it per-set or parse it out
+# of a whole-`nft list table` dump, because the cost is nft EXPANDING the element
+# interval, not per-call overhead — and the awk re-parse a table-bulk approach
+# needs adds ~0.3s/lookup. So the honest win is the firewall UCI cache above and
+# the snapshot path (one doctor process instead of two), not nft batching.
+# Keep common.sh's set_count() unchanged and call it directly below.
+
+# Local, zero-fork re-implementations of the common.sh fw_* helpers used in the
+# endpoint firewall loop. Each mirrors its original's contract exactly (return
+# value, echoed value, "unset = default" semantics) so doctor's diagnostics are
+# byte-identical — only the uci access is replaced.
+fw_sec_active() {  # $1 = "@zone[i]" | "@forwarding[i]"
+    case "$1" in
+        @zone\[*\]) _idx="${1#@zone[}"; _idx="${_idx%]}" ;;
+        @forwarding\[*\]) _idx="${1#@forwarding[}"; _idx="${_idx%]}" ;;
+        *) return 1 ;;
+    esac
+    [ -n "$_idx" ] || return 1
+    case "$1" in
+        @zone\[*\])
+            _fw_zget "$_idx" ENABLED
+            [ -n "$_fw_val" ] && ! fw_bool "$_fw_val" && return 1
+            _fw_zget "$_idx" FAMILY
+            # family is matched case-insensitively (the original used `tr A-Z a-z`);
+            # we accept both cases here to avoid the extra fork.
+            case "$_fw_val" in
+                ''|ANY|any|BOTH|both|IPV4|ipv4|4) return 0 ;;
+                *) return 1 ;;
+            esac ;;
+        @forwarding\[*\])
+            _fw_fget "$_idx" ENABLED
+            [ -n "$_fw_val" ] && ! fw_bool "$_fw_val" && return 1
+            _fw_fget "$_idx" FAMILY
+            case "$_fw_val" in
+                ''|ANY|any|BOTH|both|IPV4|ipv4|4) return 0 ;;
+                *) return 1 ;;
+            esac ;;
+    esac
+    return 1
+}
+
+# Echo the firewall zone name covering logical iface $1; non-zero return if none.
+# Mirrors fw4: a zone matches via its `network` OR `device` list (also resolving
+# the network's own L3 device); disabled / ipv6-only zones are ignored.
+fw_zone_of_net() {
+    _want="$1"
+    _wantdev="$(uci -q get "network.$1.device" 2>/dev/null)"   # network's L3 device, if any
+    _i=0
+    while [ "$_i" -lt "$_FW_NZONES" ]; do
+        if fw_sec_active "@zone[$_i]"; then
+            # space-joined list values → iterate words directly
+            eval "_net=\"\${_FW_ZONE_${_i}_NETWORK}\"; _dev=\"\${_FW_ZONE_${_i}_DEVICE}\""
+            for _m in $_net $_dev; do
+                [ -n "$_m" ] || continue
+                if [ "$_m" = "$_want" ] || { [ -n "$_wantdev" ] && [ "$_m" = "$_wantdev" ]; }; then
+                    eval "printf '%s' \"\${_FW_ZONE_${_i}_NAME}\""
+                    return 0
+                fi
+            done
+        fi
+        _i=$((_i + 1))
+    done
+    return 1
+}
+
+# zone-name -> its index in the @zone[] array, or empty if absent / inactive.
+_fw_zone_idx_by_name() {
+    _i=0
+    while [ "$_i" -lt "$_FW_NZONES" ]; do
+        eval "_n=\"\${_FW_ZONE_${_i}_NAME}\""
+        [ "$_n" = "$1" ] && { echo "$_i"; return 0; }
+        _i=$((_i + 1))
+    done
+    return 1
+}
+
+# Is masquerading enabled on the (active) zone named $1?
+fw_zone_has_masq() {
+    _idx="$(_fw_zone_idx_by_name "$1")" || return 1
+    fw_sec_active "@zone[$_idx]" || return 1
+    eval "fw_bool \"\${_FW_ZONE_${_idx}_MASQ}\""
+}
+
+# Is MSS clamping (mtu_fix) enabled on the (active) zone named $1?
+fw_zone_has_mtu_fix() {
+    _idx="$(_fw_zone_idx_by_name "$1")" || return 1
+    fw_sec_active "@zone[$_idx]" || return 1
+    eval "fw_bool \"\${_FW_ZONE_${_idx}_MTU_FIX}\""
+}
+
+# Are zone $1's input/output/forward policies all ACCEPT?
+fw_zone_policies_open() {
+    _idx="$(_fw_zone_idx_by_name "$1")" || return 1
+    eval "_fwp_in=\"\${_FW_ZONE_${_idx}_INPUT}\"; _fwp_out=\"\${_FW_ZONE_${_idx}_OUTPUT}\"; _fwp_fwd=\"\${_FW_ZONE_${_idx}_FORWARD}\""
+    [ "$_fwp_in" = ACCEPT ] && [ "$_fwp_out" = ACCEPT ] && [ "$_fwp_fwd" = ACCEPT ]
+}
+
+# Is there an active (enabled, IPv4) forwarding src zone $1 -> dest zone $2?
+fw_has_forwarding() {
+    _i=0
+    while [ "$_i" -lt "$_FW_NFWDS" ]; do
+        if fw_sec_active "@forwarding[$_i]"; then
+            eval "_src=\"\${_FW_FORWARDING_${_i}_SRC}\"; _dest=\"\${_FW_FORWARDING_${_i}_DEST}\""
+            [ "$_src" = "$1" ] && [ "$_dest" = "$2" ] && return 0
+        fi
+        _i=$((_i + 1))
+    done
+    return 1
+}
+
+# Firewall zone carrying the LAN. Same resolution order as the original: the
+# networks bound to $LAN_IFACE by device, then $LAN_IFACE directly, then 'lan'.
+fw_lan_zone() {
+    for _ln in $(uci show network 2>/dev/null \
+            | sed -n "s/^network\.\([^.]*\)\.device='\{0,1\}${LAN_IFACE}'\{0,1\}\$/\1/p"); do
+        _lz="$(fw_zone_of_net "$_ln")" && { echo "$_lz"; return 0; }
+    done
+    _lz="$(fw_zone_of_net "$LAN_IFACE")" && { echo "$_lz"; return 0; }
+    _lz="$(fw_zone_of_net lan)"          && { echo "$_lz"; return 0; }
+    return 1
+}
+
+# ---- per-run endpoint memoization -------------------------------------------
+# active_iface()/endpoints_by_priority()/ep_type() each drive a full
+# config_foreach over the endpoint UCI sections; called per-endpoint in the loop
+# below they re-walk UCI several times for the same handful of ifaces. Pin the
+# two whole-list results once (ORDERED, PRIO_MAP) and memoize ep_type per iface.
+ORDERED="$(endpoints_by_priority)"
+_ep_type_of() {  # iface -> type, cached in _EP_TYPE_CACHE
+    case "$1" in
+        *" "*) ;;
+        *) eval "_t=\"\${_EP_TYPE_CACHE_$1}\"" 2>/dev/null
+           [ -n "$_t" ] && { printf '%s' "$_t"; return; } ;;
+    esac
+    _t="$(ep_type "$1")"
+    # iface names are validated to [A-Za-z0-9_] (valid_iface in splify-ctl and
+    # the section-name form here), so the cache var name is safe to build.
+    case "$1" in *[!A-Za-z0-9_]*) ;; *) eval "_EP_TYPE_CACHE_$1=\"\$_t\"" ;; esac
+    printf '%s' "$_t"
+}
+
+STATE="$(read_state)"; ACTIVE="$(active_iface)"
 case "$STATE" in vpn:*) PATH_KIND=vpn;; killswitch) PATH_KIND=killswitch;; zapret) PATH_KIND=zapret;; *) PATH_KIND=wan;; esac
 
 # ---- config sanity ---------------------------------------------------------
@@ -190,7 +427,7 @@ for _if in $ORDERED; do
     else
         add FAIL firewall "$_if: not in any firewall zone (fw4 will REJECT LAN->tunnel)" "add '$_if' to a firewall zone with masq=1"
     fi
-    EP_JSON="$EP_JSON{\"iface\":\"$(json_esc "$_if")\",\"type\":\"$(json_esc "$(ep_type "$_if")")\",\"priority\":\"$(json_esc "$(prio_of "$_if")")\",\"present\":$_present,\"handshake_age\":$_hs,\"rx\":$_rx,\"tx\":$_tx,\"health\":\"$_health\",\"zone\":\"$(json_esc "$_zone")\",\"masq\":$_masq,\"forwarding\":$_fwd},"
+    EP_JSON="$EP_JSON{\"iface\":\"$(json_esc "$_if")\",\"type\":\"$(json_esc "$(_ep_type_of "$_if")")\",\"priority\":\"$(json_esc "$(prio_of "$_if")")\",\"present\":$_present,\"handshake_age\":$_hs,\"rx\":$_rx,\"tx\":$_tx,\"health\":\"$_health\",\"zone\":\"$(json_esc "$_zone")\",\"masq\":$_masq,\"forwarding\":$_fwd},"
 done
 
 # ---- routing / killswitch --------------------------------------------------
@@ -398,7 +635,14 @@ SEV_NAME() { case "$1" in 0) echo OK;; 1) echo WARN;; 2) echo FIXABLE;; 3) echo 
 OVERALL="$(SEV_NAME "$WORST")"
 
 if [ "$JSON" = 1 ]; then
-    printf '{"overall":"%s",' "$OVERALL"
+    # --snapshot wraps the status object and folds in the events array so the
+    # dashboard gets both in a single ubus call (one doctor fork instead of two).
+    if [ "$SNAPSHOT" = 1 ]; then
+        printf '{"status":{'
+    else
+        printf '{'
+    fi
+    printf '"overall":"%s",' "$OVERALL"
     printf '"summary":{"mode":"%s","state":"%s","active_iface":"%s","killswitch":%s,"fail_count":%s,"lan_iface":"%s","lan_cidr":"%s","zapret_version":"%s"},' \
         "$(json_esc "$MODE")" "$(json_esc "$STATE")" "$(json_esc "$ACTIVE")" "${KILLSWITCH:-0}" "$(fail_get)" "$(json_esc "$LAN_IFACE")" "$(json_esc "$LAN_CIDR")" "$(json_esc "$ZAPRET_VERSION")"
     printf '"endpoints":[%s],' "${EP_JSON%,}"
@@ -411,7 +655,14 @@ if [ "$JSON" = 1 ]; then
         printf '{"severity":"%s","category":"%s","message":"%s","fix":"%s"}' \
             "$_s" "$(json_esc "$_cat")" "$(json_esc "$_m")" "$(json_esc "$_fix")"
     done
-    printf ']}\n'
+    printf ']}'
+    if [ "$SNAPSHOT" = 1 ]; then
+        printf ',"events":'
+        emit_events
+        printf '}\n'
+    else
+        printf '\n'
+    fi
 else
     echo "=== splify doctor ==="
     echo "overall : $OVERALL"
