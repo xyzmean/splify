@@ -75,8 +75,35 @@ RU_SET="splify_ru_subnets_v4"; RU_TABLE="inet fw4"; RU_MIN_COUNT="5000"
 DOMAINS_VPN_FILE="/etc/splify/vpn-domains.lst"
 DOMAINS_IGNORE_FILE="/etc/splify/ignore-domains.lst"
 
-ZAPRET_INIT="/etc/init.d/zapret"
-ZAPRET_NOZAPRET_SET="nozapret"; ZAPRET_NOZAPRET_TABLE="inet zapret"; ZAPRET_NOZAPRET_MIN="1000"
+# zapret version detection: support BOTH zapret1 and zapret2, preferring
+# zapret2 (newer). zapret1: /etc/init.d/zapret, /opt/zapret/nfq/nfqws, table
+# "inet zapret". zapret2: /etc/init.d/zapret2, /opt/zapret2/nfq2/nfqws2, table
+# "inet zapret2". Both expose a "nozapret" set splify repopulates; the table
+# name differs, so it is resolved at source-time, not hardcoded.
+# Detection order: init script presence wins (authoritative), else binary path,
+# else fall back to zapret1 (the historical default) so a missing install does
+# not change the resolved names spuriously — zapret_available() is the real
+# gate that decides whether to act on these vars at all.
+_zapret_detect_init() {
+    if [ -x /etc/init.d/zapret2 ]; then
+        ZAPRET_INIT="/etc/init.d/zapret2"
+        ZAPRET_NOZAPRET_TABLE="inet zapret2"
+    elif [ -x /etc/init.d/zapret ]; then
+        ZAPRET_INIT="/etc/init.d/zapret"
+        ZAPRET_NOZAPRET_TABLE="inet zapret"
+    elif [ -x /opt/zapret2/nfq2/nfqws2 ]; then
+        ZAPRET_INIT=""
+        ZAPRET_NOZAPRET_TABLE="inet zapret2"
+    elif [ -x /opt/zapret/nfq/nfqws ]; then
+        ZAPRET_INIT=""
+        ZAPRET_NOZAPRET_TABLE="inet zapret"
+    else
+        ZAPRET_INIT="/etc/init.d/zapret"
+        ZAPRET_NOZAPRET_TABLE="inet zapret"
+    fi
+}
+_zapret_detect_init
+ZAPRET_NOZAPRET_SET="nozapret"; ZAPRET_NOZAPRET_MIN="1000"
 ZAPRET_PRIVATES="10.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 100.64.0.0/10 224.0.0.0/4 240.0.0.0/4"
 
 # health probing (ping THROUGH the tunnel iface). count=2 so the first packet
@@ -820,9 +847,15 @@ health_ping() {
 }
 zapret_running()   { (ps w 2>/dev/null || ps 2>/dev/null) | grep -q '[n]fqws'; }
 zapret_available() {
-    [ -x "$ZAPRET_INIT" ] && return 0
-    [ -x /opt/zapret/nfq/nfqws ] && return 0
-    command -v nfqws >/dev/null 2>&1 && return 0
+    # init script (zapret1 OR zapret2)
+    [ -x /etc/init.d/zapret2 ] && return 0
+    [ -x /etc/init.d/zapret ]  && return 0
+    # binary path (both install layouts)
+    [ -x /opt/zapret2/nfq2/nfqws2 ] && return 0
+    [ -x /opt/zapret/nfq/nfqws ]    && return 0
+    # binary in PATH (nfqws2 for zapret2, nfqws for zapret1)
+    command -v nfqws2 >/dev/null 2>&1 && return 0
+    command -v nfqws  >/dev/null 2>&1 && return 0
     zapret_running && return 0
     return 1
 }

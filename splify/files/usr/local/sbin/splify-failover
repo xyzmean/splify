@@ -147,8 +147,10 @@ set_vpn() {   # $1 = healthy iface to carry policy-VPN traffic
     for _ip in $DOH_IPS; do pin_route "$_ip" "$_if" "$_src"; done
     ensure_ipsum
     ensure_ru
-    # start zapret FIRST so the inet zapret/nozapret set exists before we sync it
-    # (a sync against a not-yet-created set fails silently and leaves a stale set)
+    # start zapret FIRST so its nozapret set exists before we sync it (the
+    # table is "inet zapret" for zapret1 or "inet zapret2" for zapret2; both
+    # are resolved in common.sh — a sync against a not-yet-created set fails
+    # silently and leaves a stale set)
     ensure_zapret_running
     rebuild_nozapret 1
     write_state "vpn:$_if"; fail_reset
