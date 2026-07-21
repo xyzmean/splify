@@ -272,6 +272,7 @@ if [ -n "$DIRECT_CIDRS" ]; then
     done
 fi
 
+# shellcheck disable=SC2317
 check_device_routing() {
     config_get _ip "$1" ip ""
     config_get _dm "$1" mode "vpn"
