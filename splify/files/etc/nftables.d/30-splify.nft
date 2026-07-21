@@ -13,15 +13,3 @@ set splify_ipsum_v4 {
     auto-merge
     size 65536
 }
-
-# FACEIT game-server hosting-provider prefixes (OVH/Hetzner/GCP/i3D). Empty at
-# install; populated live by splify-update-faceit. The splify_faceit_queue_
-# postrouting chain (added by splify-apply when faceit_enabled + set non-empty)
-# queues UDP 27015-27036 + TCP {443,27015-27030} to these IPs into splify's own
-# nfqws (qnum=192), bypassing the packet unchanged if that daemon is absent.
-set splify_faceit_v4 {
-    type ipv4_addr
-    flags interval
-    auto-merge
-    size 65536
-}

@@ -1,40 +1,6 @@
 # История изменений
 
 ## Не выпущено
-- **FACEIT: обход блокировок игрового трафика отдельным nfqws** (новое) —
-  чинит подключение к FACEIT/CS2 на DPI-блокировках (ТСПУ, Ростелеком и др.) с
-  минимальным оверхедом на пинг; роутерный аналог пресета
-  `complex multidisorder (game filter)`:
-  - **архитектурно splify запускает свой собственный экземпляр nfqws** на
-    отдельном `qnum=192` (а не полагается на nfqws от zapret'а — тот применяет
-    desync только по своим `--filter-*` правилам и пропустил бы FACEIT
-    нетронутым). Это официально поддерживаемый паттерн zapret
-    (`init.d/custom.d.examples.linux/50-nfqws-ipset`), в духе того, как splify
-    уже запускает sing-box через procd;
-  - **ограничение IP-хостеров делается на уровне nft**, не через `--ipset` флаг
-    nfqws (последний upstream помечает как «VERY INEFFECTIVE»: каждый пакет всё
-    равно идёт в userspace). Цепочка `splify_faceit_queue_postrouting` ставит
-    `queue num 192 bypass` только для `ip daddr @splify_faceit_v4` на портах
-    UDP 27015-27036 (геймплей) и TCP {443, 27015-27030} (лобби/API);
-  - **`bypass` флаг на queue** — если nfqws от splify'я отсутствует или упал,
-    FACEIT-трафик **не дропается**, а идёт напрямую без изменений (критично для
-    игр: мёртвый демон никогда не рвёт матч);
-  - **списки IP обновляются автоматически**: раз в сутки `splify-update-faceit`
-    качает IPv4-диапазоны хостеров, у которых FACEIT арендует серверы (OVH,
-    Hetzner, Google Cloud, i3D.net — своего ASN у FACEIT нет) из
-    `rezmoss/cloud-provider-ip-addresses` (через jsDelivr зеркало) + i3D geofeed;
-  - **параметры desync настраиваются в LuCI** (вкладка «Списки» → «FACEIT»):
-    режим/cutoff/repeats для UDP и TCP отдельно, выбор хостеров. По умолчанию
-    UDP=`fake cutoff=d2 repeats=1` (минимум оверхеда ≈ Gv1, лучший пинг),
-    TCP=`fake,multidisorder cutoff=n3 repeats=6` (как OVH-TCP-блок в complex
-    multidisorder);
-  - **пакет zapret/nfqws — необязательная runtime-зависимость**, как sing-box:
-    сервис self-gates на наличие бинарника `nfqws` в PATH и на
-    `faceit_enabled`, поэтому включать init-скрипт всегда безопасно; до
-    установки zapret'а сервис просто тихо выходит, а трафик идёт напрямую;
-  - **не трогает `/etc/config/zapret`** — splify не владеет конфигом zapret'а
-    (та же принципиальная позиция, что и с firewall'ом). Даже если пользователь
-    удалит Gv через Zapret-Manager, FACEIT-обход продолжит работать.
 - **sing-box: второй бэкенд туннеля, импорт по ссылке `vless://`/`hysteria2://`**
   (новое) — рабочая реализация ранее заложенного seam (`type=wg|singbox`):
   - вкладка «sing-box» на «Главной»: вставляете ссылку-приглашение от вашего

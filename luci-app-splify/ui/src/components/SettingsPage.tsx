@@ -8,7 +8,7 @@ import { cn } from '@/lib/utils'
 import { notify } from '@/lib/notify'
 import {
   Settings2, ListChecks, Network, ShieldCheck, Globe, Activity, Save, Check as CheckIcon,
-  Plus, X as XIcon, Router, MonitorSmartphone, Loader2, Gamepad2,
+  Plus, X as XIcon, Router, MonitorSmartphone, Loader2,
 } from 'lucide-react'
 
 const field = 'w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring'
@@ -34,10 +34,6 @@ interface ListsForm {
   ru_enabled: boolean; ru_url: string
   vpn_domains_url: string; ignore_domains_url: string
   zapret_enabled: boolean
-  faceit_enabled: boolean; faceit_providers: string[]
-  faceit_udp_enabled: boolean; faceit_tcp_enabled: boolean
-  faceit_udp_mode: string; faceit_udp_cutoff: string; faceit_udp_repeats: string; faceit_udp_fake: string
-  faceit_tcp_mode: string; faceit_tcp_cutoff: string; faceit_tcp_repeats: string
 }
 interface ManualForm {
   vpn_cidr: string[]; direct_cidr: string[]; vpn_domain: string[]; direct_domain: string[]
@@ -144,10 +140,6 @@ export default function SettingsPage() {
   })
   const [lists, setLists] = useState<ListsForm>({
     ipsum_enabled: true, ipsum_url: '', ru_enabled: true, ru_url: '', vpn_domains_url: '', ignore_domains_url: '', zapret_enabled: true,
-    faceit_enabled: false, faceit_providers: ['ovh', 'hetzner', 'gcp', 'i3d'],
-    faceit_udp_enabled: true, faceit_tcp_enabled: true,
-    faceit_udp_mode: 'fake', faceit_udp_cutoff: 'd2', faceit_udp_repeats: '1', faceit_udp_fake: '',
-    faceit_tcp_mode: 'fake,multidisorder', faceit_tcp_cutoff: 'n3', faceit_tcp_repeats: '6',
   })
   const [manual, setManual] = useState<ManualForm>({ vpn_cidr: [], direct_cidr: [], vpn_domain: [], direct_domain: [] })
   const [endpoints, setEndpoints] = useState<EndpointRow[]>([])
@@ -177,17 +169,6 @@ export default function SettingsPage() {
         ru_enabled: g('ru_enabled', '1') === '1', ru_url: g('ru_url'),
         vpn_domains_url: g('vpn_domains_url'), ignore_domains_url: g('ignore_domains_url'),
         zapret_enabled: g('zapret_enabled', '1') === '1',
-        faceit_enabled: g('faceit_enabled', '0') === '1',
-        faceit_providers: g('faceit_providers', 'ovh hetzner gcp i3d').split(/\s+/).filter(Boolean),
-        faceit_udp_enabled: g('faceit_udp_enabled', '1') === '1',
-        faceit_tcp_enabled: g('faceit_tcp_enabled', '1') === '1',
-        faceit_udp_mode: g('faceit_udp_mode', 'fake'),
-        faceit_udp_cutoff: g('faceit_udp_cutoff', 'd2'),
-        faceit_udp_repeats: g('faceit_udp_repeats', '1'),
-        faceit_udp_fake: g('faceit_udp_fake', ''),
-        faceit_tcp_mode: g('faceit_tcp_mode', 'fake,multidisorder'),
-        faceit_tcp_cutoff: g('faceit_tcp_cutoff', 'n3'),
-        faceit_tcp_repeats: g('faceit_tcp_repeats', '6'),
       })
       setManual({
         vpn_cidr: arr(uci.get('global', 'vpn_cidr')), direct_cidr: arr(uci.get('global', 'direct_cidr')),
@@ -235,17 +216,6 @@ export default function SettingsPage() {
     g('ru_enabled', lists.ru_enabled); g('ru_url', lists.ru_url)
     g('vpn_domains_url', lists.vpn_domains_url); g('ignore_domains_url', lists.ignore_domains_url)
     g('zapret_enabled', lists.zapret_enabled)
-    g('faceit_enabled', lists.faceit_enabled)
-    g('faceit_providers', lists.faceit_providers.join(' '))
-    g('faceit_udp_enabled', lists.faceit_udp_enabled)
-    g('faceit_tcp_enabled', lists.faceit_tcp_enabled)
-    g('faceit_udp_mode', lists.faceit_udp_mode)
-    g('faceit_udp_cutoff', lists.faceit_udp_cutoff)
-    g('faceit_udp_repeats', lists.faceit_udp_repeats)
-    g('faceit_udp_fake', lists.faceit_udp_fake)
-    g('faceit_tcp_mode', lists.faceit_tcp_mode)
-    g('faceit_tcp_cutoff', lists.faceit_tcp_cutoff)
-    g('faceit_tcp_repeats', lists.faceit_tcp_repeats)
     g('vpn_cidr', manual.vpn_cidr); g('direct_cidr', manual.direct_cidr)
     g('vpn_domain', manual.vpn_domain); g('direct_domain', manual.direct_domain)
 
@@ -430,109 +400,6 @@ export default function SettingsPage() {
               <Section title="Обход DPI" icon={ShieldCheck}
                 right={<Switch on={lists.zapret_enabled} onClick={() => mark(setLists)({ ...lists, zapret_enabled: !lists.zapret_enabled })} />}>
                 <p className="text-xs text-muted-foreground">Использовать zapret. Пропускается автоматически, если zapret не установлен.</p>
-              </Section>
-
-              <Section title="FACEIT — обход блокировок игры" icon={Gamepad2}
-                desc="Чинит подключение к FACEIT/CS2 на DPI-блокировках (ТСПУ) с минимальным оверхедом на пинг. Списки IP хостеров обновляются ежедневно."
-                right={<Switch on={lists.faceit_enabled} onClick={() => mark(setLists)({ ...lists, faceit_enabled: !lists.faceit_enabled })} />}>
-                <p className="text-xs text-muted-foreground">
-                  Запускает отдельный nfqws (qnum 192) только для игрового трафика к выбранным хостерам. Требуется zapret/nfqws; если nfqws нет или упал — трафик идёт напрямую без изменений (bypass).
-                </p>
-                <Field label="Хостеры FACEIT" helpText="Список включает весь дата-центр хостера (не только FACEIT). Для ручных IP-переопределений редактируйте /etc/splify/faceit-user.lst — мерджится поверх, не перезаписывается cron'ом.">
-                  <div className="flex flex-wrap gap-2 pt-1">
-                    {(['ovh', 'hetzner', 'gcp', 'i3d'] as const).map((p) => {
-                      const on = lists.faceit_providers.includes(p)
-                      return (
-                        <button key={p} type="button" disabled={!lists.faceit_enabled}
-                          onClick={() => mark(setLists)({
-                            ...lists,
-                            faceit_providers: on
-                              ? lists.faceit_providers.filter((x) => x !== p)
-                              : [...lists.faceit_providers, p],
-                          })}
-                          className={cn('rounded-md border px-2.5 py-1 text-xs transition disabled:opacity-50',
-                            on ? 'border-success bg-success/10 text-success' : 'border-input bg-background text-muted-foreground')}>
-                          {p.toUpperCase()}
-                        </button>
-                      )
-                    })}
-                  </div>
-                </Field>
-
-                <div className="grid grid-cols-1 gap-3 pt-1 xl:grid-cols-2">
-                  <Section title="UDP (геймплей)" icon={Activity}>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-muted-foreground">Заворачивать UDP 27015-27036</span>
-                      <Switch on={lists.faceit_udp_enabled} disabled={!lists.faceit_enabled}
-                        onClick={() => mark(setLists)({ ...lists, faceit_udp_enabled: !lists.faceit_udp_enabled })} />
-                    </div>
-                    <div className="grid grid-cols-3 gap-2">
-                      <Field label="Режим">
-                        <select className={field} disabled={!lists.faceit_enabled || !lists.faceit_udp_enabled}
-                          value={lists.faceit_udp_mode}
-                          onChange={(e) => mark(setLists)({ ...lists, faceit_udp_mode: e.target.value })}>
-                          <option value="fake">fake</option>
-                          <option value="fake,multisplit">fake,multisplit</option>
-                          <option value="none">выкл (только фильтр)</option>
-                        </select>
-                      </Field>
-                      <Field label="cutoff" helpText="d2 = лучший пинг">
-                        <select className={field} disabled={!lists.faceit_enabled || !lists.faceit_udp_enabled}
-                          value={lists.faceit_udp_cutoff}
-                          onChange={(e) => mark(setLists)({ ...lists, faceit_udp_cutoff: e.target.value })}>
-                          <option value="d1">d1</option>
-                          <option value="d2">d2</option>
-                          <option value="n2">n2</option>
-                          <option value="n3">n3</option>
-                          <option value="n4">n4</option>
-                        </select>
-                      </Field>
-                      <Field label="repeats" helpText="1 = минимум, 10 = максимум">
-                        <input className={field} disabled={!lists.faceit_enabled || !lists.faceit_udp_enabled}
-                          value={lists.faceit_udp_repeats}
-                          onChange={(e) => mark(setLists)({ ...lists, faceit_udp_repeats: e.target.value })} />
-                      </Field>
-                    </div>
-                    <Field label="Путь к fake bin" helpText="Пусто = zero-filled default (не требует файла). Например: /opt/zapret/files/fake/quic_initial_dbankcloud_ru.bin">
-                      <input className={field} disabled={!lists.faceit_enabled || !lists.faceit_udp_enabled}
-                        value={lists.faceit_udp_fake}
-                        onChange={(e) => mark(setLists)({ ...lists, faceit_udp_fake: e.target.value })} />
-                    </Field>
-                  </Section>
-
-                  <Section title="TCP (лобби/API)" icon={Activity}>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-muted-foreground">Заворачивать TCP 443, 27015-27030</span>
-                      <Switch on={lists.faceit_tcp_enabled} disabled={!lists.faceit_enabled}
-                        onClick={() => mark(setLists)({ ...lists, faceit_tcp_enabled: !lists.faceit_tcp_enabled })} />
-                    </div>
-                    <div className="grid grid-cols-3 gap-2">
-                      <Field label="Режим">
-                        <select className={field} disabled={!lists.faceit_enabled || !lists.faceit_tcp_enabled}
-                          value={lists.faceit_tcp_mode}
-                          onChange={(e) => mark(setLists)({ ...lists, faceit_tcp_mode: e.target.value })}>
-                          <option value="fake,multidisorder">fake,multidisorder</option>
-                          <option value="fake,multisplit">fake,multisplit</option>
-                          <option value="fake">fake</option>
-                        </select>
-                      </Field>
-                      <Field label="cutoff">
-                        <select className={field} disabled={!lists.faceit_enabled || !lists.faceit_tcp_enabled}
-                          value={lists.faceit_tcp_cutoff}
-                          onChange={(e) => mark(setLists)({ ...lists, faceit_tcp_cutoff: e.target.value })}>
-                          <option value="n2">n2</option>
-                          <option value="n3">n3</option>
-                          <option value="n5">n5</option>
-                        </select>
-                      </Field>
-                      <Field label="repeats">
-                        <input className={field} disabled={!lists.faceit_enabled || !lists.faceit_tcp_enabled}
-                          value={lists.faceit_tcp_repeats}
-                          onChange={(e) => mark(setLists)({ ...lists, faceit_tcp_repeats: e.target.value })} />
-                      </Field>
-                    </div>
-                  </Section>
-                </div>
               </Section>
             </>
           )}

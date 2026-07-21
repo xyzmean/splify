@@ -24,27 +24,6 @@ config splify 'global'
 	option ru_enabled '1'
 	option ru_url 'https://github.com/xyzmean/radb-tools/releases/download/latest/ru_cn_final.lst'
 
-	# faceit: игровой DPI-обход через отдельный nfqws (qnum=192). Чинит подключение
-	# к FACEIT/CS2 на DPI-блокировках (ТСПУ) с минимальным оверхедом на пинг —
-	# роутерный аналог пресета complex multidisorder. Требует zapret/nfqws в PATH;
-	# если nfqws нет или упал — трафик идёт напрямую без изменений (bypass).
-	# Списки IP хостеров (OVH/Hetzner/GCP/i3D) обновляются ежедневно по cron.
-	option faceit_enabled '0'
-	option faceit_providers 'ovh hetzner gcp i3d'
-	option faceit_udp_enabled '1'
-	option faceit_tcp_enabled '1'
-	# desync: cutoff d2 ~ Gv1 (минимум оверхеда, лучший пинг); repeats 1 vs 10.
-	option faceit_udp_mode 'fake'
-	option faceit_udp_cutoff 'd2'
-	option faceit_udp_repeats '1'
-	option faceit_udp_fake ''
-	option faceit_tcp_mode 'fake,multidisorder'
-	option faceit_tcp_cutoff 'n3'
-	option faceit_tcp_repeats '6'
-	# путь к файлу ручных IP-переопределений (мерджится поверх списка хостеров,
-	# никогда не перезаписывается cron'ом). Пусто = /etc/splify/faceit-user.lst.
-	option faceit_user_file ''
-
 	# optional downloadable DOMAIN lists -> tagged at dnsmasq resolve time
 	option vpn_domains_url ''
 	option ignore_domains_url ''

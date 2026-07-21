@@ -42,30 +42,6 @@ config_get_bool   RU_ENABLED      global ru_enabled      1
 config_get        RU_URL          global ru_url          ''
 config_get        VPN_DOMAINS_URL    global vpn_domains_url    ''
 config_get        IGNORE_DOMAINS_URL global ignore_domains_url ''
-
-# FACEIT DPI bypass (own nfqws on FACEIT_QNUM, gated on zapret/nfqws presence at
-# runtime). Disabled by default: it is a deliberate specialist setup that
-# launches an extra nfqws instance dedicated to FACEIT game traffic, so an opt-in
-# mirrors the api/agent_enabled convention rather than the always-on ipsum/ru.
-config_get_bool   FACEIT_ENABLED       global faceit_enabled       0
-config_get        FACEIT_PROVIDERS     global faceit_providers     'ovh hetzner gcp i3d'
-config_get_bool   FACEIT_UDP_ENABLED   global faceit_udp_enabled   1
-config_get_bool   FACEIT_TCP_ENABLED   global faceit_tcp_enabled   1
-# desync knobs (research: cutoff=d2 ~ Gv1 = minimal handshake overhead, best
-# ping; repeats=10 ~ Gv2-4 = robustness on aggressive DPI at a handshake burst cost).
-config_get        FACEIT_UDP_MODE      global faceit_udp_mode      'fake'
-config_get        FACEIT_UDP_CUTOFF    global faceit_udp_cutoff    'd2'
-config_get        FACEIT_UDP_REPEATS   global faceit_udp_repeats   '1'
-# Path to a fake-UDP bin (e.g. zapret's quic_initial_dbankcloud_ru.bin). Empty
-# = use nfqws's built-in zero-filled default (--dpi-desync-fake-unknown-udp
-# needs no bin file, per upstream docs).
-config_get        FACEIT_UDP_FAKE      global faceit_udp_fake      ''
-config_get        FACEIT_TCP_MODE      global faceit_tcp_mode      'fake,multidisorder'
-config_get        FACEIT_TCP_CUTOFF    global faceit_tcp_cutoff    'n3'
-config_get        FACEIT_TCP_REPEATS   global faceit_tcp_repeats   '6'
-# Optional override path for the operator's own additions (default
-# /etc/splify/faceit-user.lst). Empty -> use the built-in default.
-config_get        FACEIT_USER_FILE     global faceit_user_file     "$FACEIT_USER_FILE"
 config_get        VPN_CIDRS       global vpn_cidr        ''
 config_get        DIRECT_CIDRS    global direct_cidr     ''
 config_get        VPN_DOMAINS     global vpn_domain      ''
@@ -95,24 +71,6 @@ IPSUM_MIN_COUNT="5000"; IPSUM_FALLBACK_SKIP="1"
 RU_FILE="/etc/splify/ru_subnets.lst"
 RU_NFT_FILE="/etc/splify/ru-set.nft"
 RU_SET="splify_ru_subnets_v4"; RU_TABLE="inet fw4"; RU_MIN_COUNT="5000"
-
-# FACEIT game-server hosting-provider prefixes (OVH/Hetzner/GCP/i3D) — daily
-# fetched into FACEIT_FILE, live-loaded into FACEIT_SET (the set definition lives
-# in 30-splify.nft; FACEIT_NFT_FILE is the flush/add-element replay source for
-# failover/fw4-reload, OUTSIDE /etc/nftables.d/ so fw4 does not auto-include it).
-# FACEIT_QNUM / FACEIT_FWMARK are chosen to NEVER collide with zapret's own
-# nfqws (default qnum=200, fwmark 0x40000000 processed / 0x20000000 mark).
-FACEIT_FILE="/etc/splify/faceit.lst"
-FACEIT_NFT_FILE="/etc/splify/faceit-set.nft"
-FACEIT_SET="splify_faceit_v4"; FACEIT_TABLE="inet fw4"; FACEIT_MIN_COUNT="100"
-FACEIT_QNUM="192"; FACEIT_FWMARK="0x40010000"
-# Operator-owned additions/overrides, merged INTO the provider-derived set on
-# every refresh (and NEVER overwritten by it). Lets an operator (a) add a
-# FACEIT server IP not yet in any provider's BGP set, (b) narrow the broad
-# whole-ASN collateral by maintaining their own /32 list and disabling the
-# provider fetch, or (c) cover a provider rezmoss/i3D doesn't list. One bare
-# IPv4/CIDR per line, '#' comments allowed (validated via clean_ip_list).
-FACEIT_USER_FILE="/etc/splify/faceit-user.lst"
 
 DOMAINS_VPN_FILE="/etc/splify/vpn-domains.lst"
 DOMAINS_IGNORE_FILE="/etc/splify/ignore-domains.lst"

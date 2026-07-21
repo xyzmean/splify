@@ -30,8 +30,7 @@ reload_service() {
     ( export SPLIFY_WAIT_LOCK=1
       /usr/local/sbin/splify-update-ipsum
       /usr/local/sbin/splify-update-ru
-      /usr/local/sbin/splify-update-domains
-      /usr/local/sbin/splify-update-faceit ) >/dev/null 2>&1 &
+      /usr/local/sbin/splify-update-domains ) >/dev/null 2>&1 &
 }
 
 service_triggers() {
