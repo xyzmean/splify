@@ -10,6 +10,9 @@
 
     wget -O - https://raw.githubusercontent.com/xyzmean/splify/main/install.sh | sh
 
+## Если нужна помощь)
+    https://t.me/+R94Mex2A_7JlNGYy
+
 ## Быстрый старт
 
 1. Создайте VPN-туннель: **Сеть → Интерфейсы** (WireGuard или AmneziaWG).
