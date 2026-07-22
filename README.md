@@ -15,15 +15,41 @@
 Хотите сразу рабочий туннель без ручного создания интерфейса? `easyinstall.sh`
 делает всё то же, что `install.sh`, **плюс**:
 
-- регистрирует анонимное устройство Cloudflare WARP (через `api.cloudflareclient.com`),
+- регистрирует анонимное устройство Cloudflare WARP,
 - поднимает туннель `warp0` как AmneziaWG с встроенной обфускацией против DPI
-  (Jc/Jmin/Jmax/H1–H4/I1/S1/S2),
+  (Jc/Jmin/Jmax/H1–H4/I1/S1/S2) — именно обфускация позволяет туннелю пройти
+  там, где обычный WireGuard блокируется по сигнатурам,
 - регистрирует `warp0` первым endpoint'ом splify и включает маршрутизацию.
 
-    wget -O - https://raw.githubusercontent.com/xyzmean/splify/main/easyinstall.sh | sh
+### Если Cloudflare API заблокирован вашим провайдером
 
-Требуются `curl` и `jq` (`apk add curl jq`, если их нет). Логику регистрации
-WARP позаимствовали у [warp-config-generator-vercel](https://github.com/nellimonix/warp-config-generator-vercel).
+Регистрация идёт через `api.cloudflareclient.com`, который некоторые ISP
+блокируют. В этом случае поднимите Vercel-прокси (1 минута) и передайте его URL
+через `WORKER_URL`:
+
+1. [vercel.com](https://vercel.com) → **Add New… → Project** (Import Git или
+   Create Blank). Положите в корень файлы из
+   [`contrib/warp-api-proxy-vercel/`](contrib/warp-api-proxy-vercel)
+   (`api/[...path].js` и `package.json`).
+2. **Deploy**. Скопируйте URL вида `https://<app>.vercel.app`.
+   Проверьте: `curl https://<app>.vercel.app/api/` → `warp-api-proxy (vercel) ok`.
+3. Запустите установку:
+
+       wget -O - https://raw.githubusercontent.com/xyzmean/splify/main/easyinstall.sh \
+         | WORKER_URL="https://<app>.vercel.app" sh
+
+> Почему Vercel, а не CF Worker? Worker на `*.workers.dev` упирается в
+> Cloudflare error 1015 (rate-limit на shared egress IP), а Vercel ходит в
+> интернет с AWS-диапазонов и лимита не ловит. CF Worker-вариант тоже есть —
+> [`contrib/warp-api-proxy.worker.js`](contrib/warp-api-proxy.worker.js) — но он
+> работает только там, где Cloudflare не применяет rate-limit.
+
+Если API не заблокирован — `WORKER_URL` не нужен, `easyinstall.sh` обратится к
+Cloudflare напрямую.
+
+Логику регистрации (формат запроса wgcf) позаимствовали у
+[wgcf](https://github.com/ViRb3/wgcf). Зависимости `curl` и `jq` ставятся
+автоматически, если их нет.
 
 ## Если нужна помощь)
     https://t.me/+R94Mex2A_7JlNGYy

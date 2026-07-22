@@ -3,27 +3,51 @@
 #
 # Does everything install.sh does (splify + luci-app-splify + i18n + AmneziaWG
 # kernel module/tools), AND on top:
-#   - registers a Cloudflare WARP device (anonymous, via api.cloudflareclient.com
-#     — same flow as nellimonix/warp-config-generator-vercel),
+#   - registers a Cloudflare WARP device (anonymous, registration flow from
+#     nellimonix/warp-config-generator-vercel). Registration goes through a CF
+#     Worker proxy (WORKER_URL) because api.cloudflareclient.com is blocked by
+#     some ISPs while *.workers.dev is not — see contrib/warp-api-proxy.worker.js.
 #   - brings up a single `warp0` interface as AmneziaWG (proto amneziawg) with
-#     the WARP endpoint + the AWG obfuscation knobs baked in, so the tunnel is
-#     obfuscated against DPI out of the box,
+#     the WARP endpoint + the AWG obfuscation knobs baked in. The obfuscation
+#     (Jc/Jmin/Jmax/H1–H4/I1/S1/S2) is what pierces DPI blocking on the UDP
+#     tunnel — a plain WireGuard handshake gets dropped, an AWG one passes.
 #   - registers warp0 as the first splify endpoint and enables routing.
 #
 # After it finishes you have a working obfuscated WARP tunnel + splify routing,
 # no manual tunnel creation needed. Re-runnable: skips steps already done.
+#
+# Worker proxy: registration needs a CF Worker that reverse-proxies
+# api.cloudflareclient.com (the API is blocked on some ISPs). Deploy the Worker
+# from contrib/warp-api-proxy.worker.js (1 min on dash.cloudflare.com) and pass
+# its URL either way:
+#   WORKER_URL="https://warp-api-proxy.<acct>.workers.dev" sh easyinstall.sh
+#   wget -O - …/easyinstall.sh | WORKER_URL="https://…" sh
+# Without WORKER_URL the script tries api.cloudflareclient.com directly and
+# falls back gracefully if that is blocked.
 #
 #   wget -O - https://raw.githubusercontent.com/xyzmean/splify/main/easyinstall.sh | sh
 set -eu
 
 REPO="xyzmean/splify"
 API="https://api.github.com/repos/$REPO/releases/latest"
-CF_BASE="https://api.cloudflareclient.com/v0i1909051800"
+# Cloudflare WARP registration API — version + UA/headers match the wgcf tool
+# (github.com/ViRb3/wgcf): path v0a1922, User-Agent okhttp/3.12.1 and the
+# CF-Client-Version header. Cloudflare keys its rate-limit policy partly on
+# these, so they must be sent verbatim.
+CF_API_VERSION="v0a1922"
+CF_DIRECT="https://api.cloudflareclient.com"
 CF_UA="okhttp/3.12.1"
-# WARP endpoint — Cloudflare's anycast WireGuard ingress. engage.cloudflareclient.com
-# resolves to 162.159.192.x/193.x; the port chooses the transport. 2408 is the
-# most DPI-resistant of the stock options.
-WARP_EP="engage.cloudflareclient.com:2408"
+CF_CLIENT_VER="a-6.3-1922"
+# Reverse proxy to api.cloudflareclient.com — bypasses ISP blocking of the
+# registration API. Use the Vercel variant (contrib/warp-api-proxy-vercel): a
+# CF Worker on *.workers.dev hits Cloudflare error 1015 (rate-limit on shared
+# egress IP), while Vercel's AWS egress does not. Empty = try direct.
+# The proxy prefixes /v0a1922 itself, so WORKER_URL requests use short paths.
+WORKER_URL="${WORKER_URL:-}"
+# WARP UDP endpoint for the tunnel itself. AWG obfuscation on the handshake is
+# what makes it reachable where plain WireGuard is DPI-blocked. 162.159.195.1 is
+# a stable anycast WARP ingress; :500 is a widely-open port.
+WARP_EP="162.159.195.1:500"
 WARP_IFACE="warp0"
 TMP="$(mktemp -d /tmp/splify.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
@@ -53,8 +77,14 @@ err()  { printf '\033[1;31mОшибка:\033[0m %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" = "0" ] || err "запустите от root."
 command -v apk   >/dev/null 2>&1 || err "нужен OpenWrt 24.10+/25.12+ с менеджером apk."
 command -v wget  >/dev/null 2>&1 || err "не найден wget."
-command -v curl  >/dev/null 2>&1 || err "не найден curl (нужен для регистрации WARP). 'apk add curl')."
-command -v jq    >/dev/null 2>&1 || err "не найден jq (нужен для парсинга ответа WARP). 'apk add jq')."
+# curl + jq are needed for WARP registration; install them if missing (they are
+# not part of a minimal OpenWrt image, but apk pulls them quickly).
+for _dep in curl jq; do
+  if ! command -v "$_dep" >/dev/null 2>&1; then
+    say "Ставлю зависимость: $_dep…"
+    apk add "$_dep" >/dev/null 2>&1 || err "не удалось установить $_dep (apk add $_dep)."
+  fi
+done
 
 # ──────────────────────────── 2. install splify packages ───────────────────
 install_splify() {
@@ -114,39 +144,69 @@ install_awg() {
 }
 
 # ──────────────────────────── 4. register Cloudflare WARP ───────────────────
-# 1:1 of nellimonix/warp-config-generator-vercel registration flow.
-# Returns the WG config pieces via stdout globals (set in the caller's scope).
+# Registration flow mirrors wgcf (github.com/ViRb3/wgcf): POST /v0a1922/reg with
+# okhttp/3.12.1 UA + CF-Client-Version header. Registration goes through a
+# reverse proxy (WORKER_URL) when set — direct api.cloudflareclient.com is
+# blocked on some ISPs, and a CF Worker on *.workers.dev hits error 1015
+# (rate-limit on shared egress), so the Vercel proxy is the working path.
+# wgcf does NOT send a PATCH warp_enabled — the Register response already
+# carries config.peers[0].public_key and the interface addresses. Sets
+# WARP_PEER/WARP_V4/WARP_V6 in the caller's scope.
+#
+# Registration URL: proxy short-path (/api/reg via Vercel catch-all, which
+# prepends /v0a1922) or direct full-path with the version baked in.
+reg_url() {
+  if [ -n "$WORKER_URL" ]; then
+    # Vercel catch-all: /api/<path> → upstream /v0a1922/<path>
+    printf '%s/api/%s' "${WORKER_URL%/}" "$1"
+  else
+    printf '%s/%s/%s' "$CF_DIRECT" "$CF_API_VERSION" "$1"
+  fi
+}
+
 register_warp() {
   say "Регистрирую устройство Cloudflare WARP…"
+  [ -n "$WORKER_URL" ] \
+    && say "Через прокси: $WORKER_URL" \
+    || warn "WORKER_URL не задан — пробую api.cloudflareclient.com напрямую (может быть заблокирован)."
+
   # X25519 keypair — `awg genkey`/`wg genkey` produce the exact base64 format
-  # the WARP API expects (same curve as tweetnacl in the reference generator).
+  # the WARP API expects (same curve as wgcf/tweetnacl).
   if command -v awg >/dev/null 2>&1; then GEN=awg; else GEN=wg; fi
   PRIV="$("$GEN" genkey)"
   PUB="$(printf '%s\n' "$PRIV" | "$GEN" pubkey)"
-  TOS="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  TOS="$(date -u +%Y-%m-%dT%H:%M:%S.000000000Z)"
 
-  # Step A — register the device. UA okhttp/3.12.1 is required by Cloudflare.
+  # Register the device (wgcf format). UA + CF-Client-Version are required.
   REG="$TMP/reg.json"
-  curl -fsSL -X POST "$CF_BASE/reg" \
+  curl -fsSL --max-time 30 -X POST "$(reg_url reg)" \
     -H "User-Agent: $CF_UA" \
+    -H "CF-Client-Version: $CF_CLIENT_VER" \
     -H "Content-Type: application/json" \
-    -d "{\"install_id\":\"\",\"tos\":\"$TOS\",\"key\":\"$PUB\",\"fcm_token\":\"\",\"type\":\"ios\",\"locale\":\"en_US\"}" \
-    -o "$REG" || err "регистрация WARP не удалась (Cloudflare API недоступен?)."
+    -H "Accept: application/json" \
+    -d "{\"key\":\"$PUB\",\"install_id\":\"\",\"fcm_token\":\"\",\"model\":\"PC\",\"locale\":\"en_US\",\"tos\":\"$TOS\",\"type\":\"Android\"}" \
+    -o "$REG" \
+    || err "регистрация WARP не удалась. Если API заблокирован вашим провайдером — задайте WORKER_URL (см. contrib/warp-api-proxy-vercel)."
 
   REG_ID="$(jq -r '.result.id'    "$REG")"
   REG_TOK="$(jq -r '.result.token' "$REG")"
   [ -n "$REG_ID" ] && [ "$REG_ID" != "null" ] || err "WARP: нет result.id в ответе."
   [ -n "$REG_TOK" ] && [ "$REG_TOK" != "null" ] || err "WARP: нет result.token в ответе."
 
-  # Step B — enable WARP on the device. Response carries the peer pubkey and
-  # the assigned client addresses.
+  # The Register response already carries the peer pubkey + addresses. wgcf does
+  # not send a separate PATCH warp_enabled. Re-fetch the full device record via
+  # GET /reg/{id} to be sure we have config.* (some API versions omit it from
+  # the POST response) — authenticated with the registration token.
   WARP="$TMP/warp.json"
-  curl -fsSL -X PATCH "$CF_BASE/reg/$REG_ID" \
-    -H "User-Agent: $CF_UA" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $REG_TOK" \
-    -d '{"warp_enabled":true}' \
-    -o "$WARP" || err "включение WARP не удалось."
+  if ! curl -fsSL --max-time 30 -X GET "$(reg_url "reg/$REG_ID")" \
+        -H "User-Agent: $CF_UA" \
+        -H "CF-Client-Version: $CF_CLIENT_VER" \
+        -H "Accept: application/json" \
+        -H "Authorization: Bearer $REG_TOK" \
+        -o "$WARP" 2>/dev/null; then
+    # GET failed — fall back to whatever the POST returned (it may have config).
+    cp "$REG" "$WARP"
+  fi
 
   WARP_PEER="$(jq -r '.result.config.peers[0].public_key'        "$WARP")"
   WARP_V4="$(jq -r '.result.config.interface.addresses.v4'        "$WARP")"

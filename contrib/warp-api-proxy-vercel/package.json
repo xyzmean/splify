@@ -1,0 +1,7 @@
+{
+  "name": "warp-api-proxy-vercel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reverse proxy to api.cloudflareclient.com — bypasses WARP registration API blocking / rate-limit",
+  "type": "module"
+}
