@@ -162,9 +162,6 @@ export default function StatusDashboard(p: Props) {
                 {t('Mode')} <b className="text-foreground">{s.mode || '?'}</b> · {t('Kill switch')} <b className="text-foreground">{String(s.killswitch) === '1' ? t('on') : t('off')}</b>
                 {s.zapret_version && <> · DPI: <b className="text-foreground">{s.zapret_version}</b></>}
               </div>
-              <Hint className="mt-1">
-                {String(s.killswitch) === '1' ? t('Kill switch hint') : t('DPI bypass hint')}
-              </Hint>
             </div>
           </div>
 
@@ -462,13 +459,13 @@ function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: 
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-stretch gap-1.5">{chain}</div>
+      <div className="flex flex-wrap items-center justify-center gap-1.5">{chain}</div>
 
       {/* Резервы — отдельной строкой, чтобы не сливаться с активным путём.
           Показываем, что ВООБЩЕ настроено и в каком порядке встанет, если
           активная ветка упадёт. Текст «глухой» подсказки объясняет, что это. */}
       {reserves.length > 0 || hasZapret ? (
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-wrap items-center justify-center gap-1.5">
           <span className="text-xs text-muted-foreground">{t('Reserves by priority')}:</span>
           {reserves.map((e) => (
             <span key={e.iface} className={cn(
