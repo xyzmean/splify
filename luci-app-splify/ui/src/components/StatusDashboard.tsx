@@ -379,114 +379,123 @@ function Hint({ children, className }: { children: React.ReactNode; className?: 
   return <p className={cn('text-xs text-muted-foreground', className)}>{children}</p>
 }
 
-function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: number; tx: number }> }) {
-  const s = status.summary
-  const state = s.state || ''
-  const eps = status.endpoints || []
+// Путь трафика показан как три класса трафика, идущие параллельно прямо
+// сейчас (а не «одна активная линия + резервы»). В каждой карточке — куда
+// фактически уходит свой класс: заблокированные сайты (список ipsum),
+// российский/нейтральный трафик (всегда напрямую, он в nozapret-исключении) и
+// всё прочее (зависит от режима и наличия туннеля/zapret). Это честнее старой
+// линейной цепочки, которая скрывала, что при активном VPN часть трафика
+// параллельно идёт напрямую, а zapret реально работает, а не «спит в резерве».
+type Tone = 'success' | 'warning' | 'destructive' | 'neutral'
 
-  // Узел пути. `active` — подсвечивает реально идущую через него ветку
-  // (success ring); `dead` — недоступный туннель (деструктивный цвет); прочие
-  // «спят» (нейтральный фон). Активным бывает ровно один узел цепочки.
-  const Node = ({ title, sub, active, dead }: { title: string; sub?: React.ReactNode; active?: boolean; dead?: boolean }) => (
-    <div className={cn(
-      'flex min-w-[88px] flex-col justify-center rounded-lg border px-3 py-2 text-center',
-      active && 'border-success bg-success/10 ring-2 ring-success/30',
-      dead && 'border-destructive text-destructive',
-      !active && !dead && 'bg-muted/40',
-    )}>
-      <div className="text-sm font-semibold">{title}</div>
+const TONE: Record<Tone, { box: string; label: string }> = {
+  success:    { box: 'border-success bg-success/10 ring-2 ring-success/30',                    label: 'text-success' },
+  warning:    { box: 'border-warning bg-warning/10 ring-1 ring-warning/30',                    label: 'text-warning' },
+  destructive:{ box: 'border-destructive bg-destructive/10 ring-2 ring-destructive/30',        label: 'text-destructive' },
+  neutral:    { box: 'border-border bg-muted/40',                                              label: 'text-muted-foreground' },
+}
+
+function DestPill({ label, sub, tone }: { label: React.ReactNode; sub?: React.ReactNode; tone: Tone }) {
+  const tn = TONE[tone]
+  return (
+    <div className={cn('flex flex-col items-center justify-center rounded-lg px-3 py-2 text-center', tn.box)}>
+      <div className={cn('text-sm font-semibold', tn.label)}>{label}</div>
       {sub != null && sub !== '' && <div className="mt-0.5 text-xs text-muted-foreground">{sub}</div>}
     </div>
   )
-  // Яркая стрелка для активной ветки, бледная — для сна/резерва.
-  const Arrow = ({ dim }: { dim?: boolean }) => (
-    <ArrowRight className={cn('size-4 self-center', dim ? 'text-muted-foreground/30' : 'text-muted-foreground/70')} />
+}
+
+function PathCard({ title, dest, sub, tone }: {
+  title: string; dest: React.ReactNode; sub?: React.ReactNode; tone: Tone
+}) {
+  return (
+    <div className="flex flex-col items-center gap-1.5 rounded-lg border bg-card/40 p-3">
+      <div className="text-center text-xs font-medium text-muted-foreground">{title}</div>
+      <ArrowRight className="size-4 rotate-90 text-muted-foreground/60" />
+      <DestPill label={dest} sub={sub} tone={tone} />
+    </div>
   )
+}
+
+function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: number; tx: number }> }) {
+  const s = status.summary
+  const state = s.state || ''
+  const mode = s.mode || ''
+  const eps = status.endpoints || []
 
   const activeEp = eps.find((e) => state === 'vpn:' + e.iface)
-  const hasZapret = (status.lists || []).some((l) => l.name === 'nozapret') || state === 'zapret'
+  // zapret «работает», если в lists есть запись nozapret с enabled (его presence
+  // в статусе выражается именно так) ИЛИ мы прямо в состоянии zapret.
+  const zapretInstalled = (status.lists || []).some((l) => l.name === 'nozapret' && l.enabled)
+  const zapretLabel = s.zapret_version || 'zapret'
 
-  // Резервы = все туннели КРОМЕ активного (по приоритету), плюс zapret и WAN
-  // как нижние ступени. На экран выводятся компактным списком бейджей, без
-  // стрелок — чтобы не путать с реально активной цепочкой выше.
-  const reserves = eps
-    .filter((e) => e !== activeEp)
-    .sort((a, b) => (Number(a.priority) || 999) - (Number(b.priority) || 999))
+  const isVpn = !!activeEp
+  const isZapretState = state === 'zapret'
+  const killed = state === 'killswitch'
 
   const rateOf = (iface: string) => rates[iface] || { rx: 0, tx: 0 }
-  const liveSub = (e: typeof eps[number]) => {
-    if (!e.present) return t('none')
-    const r = rateOf(e.iface)
-    return <span className="whitespace-nowrap"><span className="text-success">↓{fmtRate(r.rx)}</span> <span className="text-info">↑{fmtRate(r.tx)}</span></span>
+  const vpnSub = activeEp ? (
+    <span className="whitespace-nowrap">
+      <span className="text-success">↓{fmtRate(rateOf(activeEp.iface).rx)}</span>{' '}
+      <span className="text-info">↑{fmtRate(rateOf(activeEp.iface).tx)}</span>
+    </span>
+  ) : undefined
+
+  // ── Карточка ① «Заблокированные сайты» (список ipsum) ──
+  // При живом VPN — через туннель; при падении VPN — zapret; без zapret — открытый WAN.
+  let card1: { dest: React.ReactNode; sub?: React.ReactNode; tone: Tone }
+  if (killed) {
+    card1 = { dest: t('Blocked — kill switch'), tone: 'destructive' }
+  } else if (isVpn) {
+    card1 = { dest: `#${activeEp!.priority || '?'} ${activeEp!.iface}`, sub: vpnSub, tone: 'success' }
+  } else if (isZapretState) {
+    card1 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'warning' }
+  } else if (zapretInstalled) {
+    card1 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'warning' }
+  } else {
+    card1 = { dest: t('Open (WAN)'), sub: t('Direct (WAN)'), tone: 'neutral' }
   }
 
-  // ── активная цепочка (ровно один реальный маршрут LAN → … → Интернет) ──
-  let chain: React.ReactNode
-  if (state === 'killswitch') {
-    chain = <>
-      <Node title="LAN" sub={s.lan_iface} />
-      <Arrow />
-      <div className="flex min-w-[88px] flex-col justify-center rounded-lg border border-destructive bg-destructive/10 px-3 py-2 text-center ring-2 ring-destructive/30">
-        <div className="text-sm font-semibold">{t('Blocked — kill switch')}</div>
-      </div>
-      <Arrow />
-      <Node title={t('Internet')} sub={t('none')} dead />
-    </>
-  } else if (activeEp) {
-    chain = <>
-      <Node title="LAN" sub={s.lan_iface} />
-      <Arrow />
-      <Node title={`#${activeEp.priority || '?'} ${activeEp.iface}`} sub={liveSub(activeEp)} active />
-      <Arrow />
-      <Node title={t('Internet')} sub={t('via VPN')} active />
-    </>
-  } else if (state === 'zapret') {
-    chain = <>
-      <Node title="LAN" sub={s.lan_iface} />
-      <Arrow />
-      <Node title={s.zapret_version || 'zapret'} sub={t('DPI bypass (zapret)')} active />
-      <Arrow />
-      <Node title={t('Internet')} sub={t('Direct (WAN)')} active />
-    </>
+  // ── Карточка ② «Российский / нейтральный трафик» ──
+  // RU/приватные сети всегда в nozapret (или direct-исключении в full) → всегда
+  // идут напрямую через WAN. kill switch глушит и их.
+  const card2: { dest: React.ReactNode; sub?: React.ReactNode; tone: Tone } = killed
+    ? { dest: t('Blocked — kill switch'), tone: 'destructive' }
+    : { dest: t('Direct (WAN)'), sub: t('via WAN'), tone: 'success' }
+
+  // ── Карточка ③ «Прочий трафик» ──
+  // full + VPN → через туннель; blocklist/split → напрямую; падение VPN → zapret.
+  let card3: { dest: React.ReactNode; sub?: React.ReactNode; tone: Tone }
+  if (killed) {
+    card3 = { dest: t('Blocked — kill switch'), tone: 'destructive' }
+  } else if (mode === 'full' && isVpn) {
+    card3 = { dest: `#${activeEp!.priority || '?'} ${activeEp!.iface}`, sub: t('via VPN'), tone: 'success' }
+  } else if (isZapretState) {
+    card3 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'warning' }
+  } else if (mode === 'blocklist' || mode === 'split') {
+    card3 = { dest: t('Direct (WAN)'), sub: t('via WAN'), tone: 'neutral' }
+  } else if (zapretInstalled) {
+    card3 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'warning' }
   } else {
-    // wan или неизвестное — рисуем как «напрямую», без активного туннеля.
-    chain = <>
-      <Node title="LAN" sub={s.lan_iface} />
-      <Arrow />
-      <Node title={t('Internet')} sub={t('Direct (WAN)')} active />
-    </>
+    card3 = { dest: t('Open (WAN)'), sub: t('Direct (WAN)'), tone: 'neutral' }
   }
+
+  const cards = [
+    { title: t('Blocked sites'),   ...card1 },
+    { title: t('RU / neutral'),    ...card2 },
+    { title: t('Other traffic'),   ...card3 },
+  ]
 
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-center gap-1.5">{chain}</div>
-
-      {/* Резервы — отдельной строкой, чтобы не сливаться с активным путём.
-          Показываем, что ВООБЩЕ настроено и в каком порядке встанет, если
-          активная ветка упадёт. Текст «глухой» подсказки объясняет, что это. */}
-      {reserves.length > 0 || hasZapret ? (
-        <div className="flex flex-wrap items-center justify-center gap-1.5">
-          <span className="text-xs text-muted-foreground">{t('Reserves by priority')}:</span>
-          {reserves.map((e) => (
-            <span key={e.iface} className={cn(
-              'inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs',
-              e.present ? 'border-border bg-muted/40' : 'border-destructive/50 text-destructive',
-            )}>
-              #{e.priority || '?'} {e.iface}{!e.present && ` (${t('none')})`}
-            </span>
-          ))}
-          {hasZapret && state !== 'zapret' && (
-            <span className="inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-0.5 text-xs">
-              {s.zapret_version || 'zapret'}
-            </span>
-          )}
-          {state !== 'wan' && state !== 'killswitch' && (
-            <span className="inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-0.5 text-xs">WAN</span>
-          )}
-        </div>
-      ) : (
-        <p className="text-xs text-muted-foreground">{t('No reserves — all configured tunnels are down.')}</p>
-      )}
+    <div className="space-y-2">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        {cards.map((c) => (
+          <PathCard key={c.title} title={c.title} dest={c.dest} sub={c.sub} tone={c.tone} />
+        ))}
+      </div>
+      <p className="text-center text-xs text-muted-foreground">
+        LAN:{' '}{s.lan_iface || '—'}{' → '}{t('Internet')}
+      </p>
     </div>
   )
 }

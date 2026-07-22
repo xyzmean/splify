@@ -67,18 +67,19 @@ const RU: Record<string, string> = {
   'No tunnels yet, so all LAN traffic currently goes through plain WAN.':
     'Туннелей пока нет, поэтому весь трафик LAN сейчас идёт через обычный WAN.',
 
-  // ── Путь трафика (Chain) ─────────────────────────────────────────────
+  // ── Путь трафика (классы трафика) ────────────────────────────────────
   'Traffic path': 'Путь трафика',
   'Internet': 'Интернет',
+  'Blocked sites': 'Заблокированные сайты',
+  'RU / neutral': 'Российский / нейтральный',
+  'Other traffic': 'Прочий трафик',
   'via VPN': 'через VPN',
+  'via WAN': 'через WAN',
   'Direct (WAN)': 'напрямую (WAN)',
+  'Open (WAN)': 'открыто (WAN)',
   'DPI bypass (zapret)': 'обход DPI (zapret)',
   'Blocked — kill switch': 'заблокировано — kill switch',
-  'No active tunnel — direct WAN (traffic exposed)': 'Нет активного туннеля — прямой WAN (трафик открыт)',
-  'Reserves by priority': 'Резервы по приоритету',
   'none': 'нет',
-  'No reserves — all configured tunnels are down.':
-    'Резервов нет — все настроенные туннели недоступны.',
 
   // ── Туннели ──────────────────────────────────────────────────────────
   'Tunnels (failover)': 'Туннели (failover)',
