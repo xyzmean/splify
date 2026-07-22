@@ -10,6 +10,21 @@
 
     wget -O - https://raw.githubusercontent.com/xyzmean/splify/main/install.sh | sh
 
+## Автонастройка с WARP «из коробки» (easyinstall)
+
+Хотите сразу рабочий туннель без ручного создания интерфейса? `easyinstall.sh`
+делает всё то же, что `install.sh`, **плюс**:
+
+- регистрирует анонимное устройство Cloudflare WARP (через `api.cloudflareclient.com`),
+- поднимает туннель `warp0` как AmneziaWG с встроенной обфускацией против DPI
+  (Jc/Jmin/Jmax/H1–H4/I1/S1/S2),
+- регистрирует `warp0` первым endpoint'ом splify и включает маршрутизацию.
+
+    wget -O - https://raw.githubusercontent.com/xyzmean/splify/main/easyinstall.sh | sh
+
+Требуются `curl` и `jq` (`apk add curl jq`, если их нет). Логику регистрации
+WARP позаимствовали у [warp-config-generator-vercel](https://github.com/nellimonix/warp-config-generator-vercel).
+
 ## Если нужна помощь)
     https://t.me/+R94Mex2A_7JlNGYy
 
