@@ -60,6 +60,32 @@ for s in splify splify-agent; do
   fi
 done
 
+# 7) AmneziaWG — без него splify не сможет поднять WG/AWG-туннели. Внешний
+# установщик awg-openwrt ставит kmod-amneziawg + amneziawg-tools + LuCI.
+# Запускаем ТИХО: -n (не создавать авто-интерфейс awg1 — splify сам ведёт
+# туннели через Сеть → Интерфейсы) и -e (пропустить интерактивный запрос про
+# ru-локализацию, который повис бы на `wget … | sh`, где stdin — не терминал).
+# Сбои не фатальны: splify работает и без AWG (просто туннели не поднимутся).
+if apk info -e kmod-amneziawg >/dev/null 2>&1; then
+  say "AmneziaWG уже установлен."
+else
+  say "AmneziaWG не найден — устанавливаю поддержку…"
+  if wget -qO "$TMP/awg-install.sh" \
+      "https://raw.githubusercontent.com/Slava-Shchipunov/awg-openwrt/refs/heads/master/amneziawg-install.sh"; then
+    sh "$TMP/awg-install.sh" -n -e \
+      || say "AmneziaWG: установка не удалась (не критично, splify работает)."
+    # Русская локализация для LuCI-страниц AmneziaWG ставится отдельно: она
+    # есть не во всех версиях OpenWrt, поэтому мягко — отсутствие пакета
+    # не должно рвать установку.
+    say "AmneziaWG: русская локализация…"
+    apk add luci-i18n-amneziawg-ru >/dev/null 2>&1 \
+      || say "luci-i18n-amneziawg-ru недоступен для этой версии OpenWrt — пропускаю."
+  else
+    say "Не удалось скачать установщик AmneziaWG — пропускаю."
+  fi
+fi
+
 say "Готово! Дальше:"
 printf '  1. Создайте VPN-туннель: Сеть → Интерфейсы (WireGuard/AmneziaWG).\n'
 printf '  2. Откройте Сервисы → splify → Главная и нажмите «Включить».\n'
+printf '     (поддержка AmneziaWG с русским переводом установлена автоматически)\n'

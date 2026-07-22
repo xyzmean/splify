@@ -413,3 +413,294 @@ msgstr "Трафик"
 
 msgid "WireGuard / AmneziaWG"
 msgstr "WireGuard / AmneziaWG"
+
+# ── переработанная панель «Путь трафика» и подсказки (UI v2) ──────────────
+
+msgid "Status"
+msgstr "Состояние"
+
+msgid "Remote control"
+msgstr "Удалённое управление"
+
+msgid "Loading splify…"
+msgstr "Загрузка splify…"
+
+msgid "Error:"
+msgstr "Ошибка:"
+
+msgid "Kill switch"
+msgstr "Kill switch"
+
+msgid "Tunnel"
+msgstr "Туннель"
+
+msgid "handshake"
+msgstr "handshake"
+
+msgid "RX"
+msgstr "Приём"
+
+msgid "TX"
+msgstr "Передача"
+
+msgid "Failures"
+msgstr "Сбоев"
+
+msgid "Lists OK"
+msgstr "Списки OK"
+
+msgid "Enable"
+msgstr "Включить"
+
+msgid "Disable"
+msgstr "Выключить"
+
+msgid "Turn off split routing? All LAN traffic will go via WAN until the service re-enables it."
+msgstr "Выключить split-маршрутизацию? Весь трафик LAN пойдёт через WAN, пока служба не включится снова."
+
+msgid "Split routing enabled"
+msgstr "Split-маршрутизация включена"
+
+msgid "Split routing disabled"
+msgstr "Split-маршрутизация выключена"
+
+msgid "Refresh"
+msgstr "Обновить"
+
+msgid "Apply"
+msgstr "Применить"
+
+msgid "Restart"
+msgstr "Перезапустить"
+
+msgid "Lists"
+msgstr "Списки"
+
+msgid "Configuration applied"
+msgstr "Конфигурация применена"
+
+msgid "Service restarted"
+msgstr "Служба перезапущена"
+
+msgid "ipsum updated"
+msgstr "ipsum обновлён"
+
+msgid "ru/cn updated"
+msgstr "ru/cn обновлён"
+
+msgid "domains updated"
+msgstr "домены обновлены"
+
+msgid "Emergency disable"
+msgstr "Аварийно отключить"
+
+msgid "Disable split routing now? All LAN traffic will exit via WAN until the service re-enables it (or you stop it)."
+msgstr "Отключить split-маршрутизацию сейчас? Весь трафик LAN выйдет через WAN, пока служба не включит её снова."
+
+msgid "Let’s connect the first tunnel"
+msgstr "Подключим первый туннель"
+
+msgid "No tunnels yet, so all LAN traffic currently goes through plain WAN."
+msgstr "Туннелей пока нет, поэтому весь трафик LAN сейчас идёт через обычный WAN."
+
+msgid "Traffic path"
+msgstr "Путь трафика"
+
+msgid "Internet"
+msgstr "Интернет"
+
+msgid "via VPN"
+msgstr "через VPN"
+
+msgid "Direct (WAN)"
+msgstr "напрямую (WAN)"
+
+msgid "DPI bypass (zapret)"
+msgstr "обход DPI (zapret)"
+
+msgid "Blocked — kill switch"
+msgstr "заблокировано — kill switch"
+
+msgid "Reserves by priority"
+msgstr "Резервы по приоритету"
+
+msgid "No reserves — all configured tunnels are down."
+msgstr "Резервов нет — все настроенные туннели недоступны."
+
+msgid "Tunnels (failover)"
+msgstr "Туннели (failover)"
+
+msgid "online"
+msgstr "онлайн"
+
+msgid "Prio"
+msgstr "Прио"
+
+msgid "Handshake"
+msgstr "Handshake"
+
+msgid "Health"
+msgstr "Health"
+
+msgid "Zone"
+msgstr "Зона"
+
+msgid "Masq"
+msgstr "Masq"
+
+msgid "Masquerade (masq) hides LAN behind the tunnel IP"
+msgstr "Masquerade (masq) прячет LAN за IP-адресом туннеля"
+
+msgid "LAN fwd"
+msgstr "LAN-fwd"
+
+msgid "Forwarding lan → tunnel is required for traffic to reach the tunnel"
+msgstr "Форвардинг lan → туннель нужен, чтобы трафик дошёл до туннеля"
+
+msgid "Diagnostics"
+msgstr "Диагностика"
+
+msgid "No problems detected."
+msgstr "Проблем не обнаружено."
+
+msgid "Fix"
+msgstr "Исправить"
+
+msgid "Create/repair the firewall zone for “%s” (accept-all + masquerading + lan↔tunnel↔wan forwarding) and reload the firewall?"
+msgstr "Создать/починить firewall-зону для «%s» (accept-all + masquerade + форвардинг lan↔туннель↔wan) и перезагрузить firewall?"
+
+msgid "Firewall fixed for %s"
+msgstr "Firewall починен для %s"
+
+msgid "Could not fix firewall for %s"
+msgstr "Не удалось починить firewall для %s"
+
+msgid "Firewall fix error:"
+msgstr "Ошибка firewall-fix:"
+
+msgid "Event history"
+msgstr "История событий"
+
+msgid "No failover events recorded yet."
+msgstr "Событий переключения пока не зафиксировано."
+
+msgid "DPI bypass hint"
+msgstr "обход блокировок провайдера на уровне пакетов (DPI)"
+
+msgid "Kill switch hint"
+msgstr "сбрасывать трафик вместо утечки в WAN, когда все туннели упали"
+
+msgid "Failover hint"
+msgstr "автопереключение на резервный туннель при сбое"
+
+msgid "AmneziaWG / WireGuard settings"
+msgstr "Параметры AmneziaWG / WireGuard"
+
+msgid "key set"
+msgstr "ключ задан"
+
+msgid "no key"
+msgstr "без ключа"
+
+msgid "Save and reconnect"
+msgstr "Сохранить и переподключить"
+
+msgid "Saving…"
+msgstr "Сохраняю…"
+
+msgid "Endpoint (server)"
+msgstr "Endpoint (сервер)"
+
+msgid "port"
+msgstr "порт"
+
+msgid "AllowedIPs (comma-separated)"
+msgstr "AllowedIPs (через запятую)"
+
+msgid "Interface addresses"
+msgstr "Адреса интерфейса"
+
+msgid "Public key of the peer"
+msgstr "Public key пира"
+
+msgid "Persistent keepalive"
+msgstr "Persistent keepalive"
+
+msgid "AmneziaWG obfuscation — counters"
+msgstr "Обфускация AmneziaWG — счётчики"
+
+msgid "Junk packets (AWG 1.5): I1–I5, J1–J3"
+msgstr "Junk-пакеты (AWG 1.5): I1–I5, J1–J3"
+
+msgid "collapse ▲"
+msgstr "свернуть ▲"
+
+msgid "expand ▼"
+msgstr "развернуть ▼"
+
+msgid "Private key of the interface"
+msgstr "Приватный ключ интерфейса"
+
+msgid "Show"
+msgstr "Показать"
+
+msgid "Leave empty to keep the current key."
+msgstr "Оставьте поле пустым, чтобы не менять текущий ключ."
+
+msgid "Import .conf (AmneziaWG / WireGuard)"
+msgstr "Импорт .conf (AmneziaWG / WireGuard)"
+
+msgid "Import and reconnect"
+msgstr "Импортировать и переподключить"
+
+msgid "Importing…"
+msgstr "Импортирую…"
+
+msgid "Connected"
+msgstr "Подключено"
+
+msgid "Agent"
+msgstr "Агент"
+
+msgid "running"
+msgstr "работает"
+
+msgid "starting"
+msgstr "запускается"
+
+msgid "Last poll"
+msgstr "Последний опрос"
+
+msgid "Node name"
+msgstr "Имя ноды"
+
+msgid "Save name"
+msgstr "Сохранить имя"
+
+msgid "Connect to the control panel"
+msgstr "Подключить к панели"
+
+msgid "Connect"
+msgstr "Подключить"
+
+msgid "Connecting…"
+msgstr "Подключаю…"
+
+msgid "Re-register"
+msgstr "Перерегистрировать"
+
+msgid "Outbound agent (CGNAT / down tunnel)"
+msgstr "Исходящий агент (CGNAT / упавший туннель)"
+
+msgid "Save addresses"
+msgstr "Сохранить адреса"
+
+msgid "Inbound REST API (LAN / WG)"
+msgstr "Входящий REST API (LAN / WG)"
+
+msgid "Change"
+msgstr "Сменить"
+
+msgid "Retry"
+msgstr "Повторить"
+

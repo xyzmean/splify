@@ -7,6 +7,7 @@ import ApiPanel from '@/components/ApiPanel'
 // stays in place so the feature can be re-enabled when it is finished.
 // import SingboxPanel from '@/components/SingboxPanel'
 import { cn } from '@/lib/utils'
+import { t } from '@/lib/i18n'
 import { Activity, Radio, ShieldCheck } from 'lucide-react'
 
 type Tab = 'status' | 'wg' | 'api'
@@ -14,9 +15,9 @@ type Tab = 'status' | 'wg' | 'api'
 // Same left-rail navigation as the settings view — the two pages must read as
 // one system, and Argon has no second-level horizontal tab row to mimic.
 const NAV: { id: Tab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-  { id: 'status', label: 'Состояние', icon: Activity },
-  { id: 'wg', label: 'AmneziaWG', icon: ShieldCheck },
-  { id: 'api', label: 'Удалённое управление', icon: Radio },
+  { id: 'status', label: t('Status'), icon: Activity },
+  { id: 'wg', label: t('AmneziaWG'), icon: ShieldCheck },
+  { id: 'api', label: t('Remote control'), icon: Radio },
 ]
 
 export default function App() {
@@ -84,9 +85,9 @@ export default function App() {
         <div className="min-w-0 flex-1 space-y-4">
           {tab === 'status' && (
             loading && !status ? (
-              <div className="p-8 text-center text-muted-foreground animate-pulse">Загрузка splify…</div>
+              <div className="p-8 text-center text-muted-foreground animate-pulse">{t('Loading splify…')}</div>
             ) : error && !status ? (
-              <div className="p-8 text-center text-destructive">Ошибка: {error}</div>
+              <div className="p-8 text-center text-destructive">{t('Error:')} {error}</div>
             ) : (
               <StatusDashboard
                 status={status} events={events} wgIfaces={wgIfaces}

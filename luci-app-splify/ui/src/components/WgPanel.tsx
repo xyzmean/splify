@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { notify } from '@/lib/notify'
+import { t } from '@/lib/i18n'
 import { Settings2, FileDown, Eye, KeyRound } from 'lucide-react'
 
 // Small numeric obfuscation knobs (rendered as a compact grid).
@@ -132,46 +133,46 @@ export default function WgPanel() {
     <div className="space-y-4">
       <Card>
         <CardHeader className="flex-row flex-wrap items-center gap-3 space-y-0 p-4 pb-2">
-          <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><Settings2 className="size-4" />Параметры AmneziaWG / WireGuard</CardTitle>
+          <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><Settings2 className="size-4" />{t('AmneziaWG / WireGuard settings')}</CardTitle>
           {names.length > 1 && (
             <select className={cn(field, 'w-auto')} value={iface} onChange={(e) => pick(e.target.value)}>
               {names.map((n) => <option key={n} value={n}>{n}</option>)}
             </select>
           )}
           <Badge variant="secondary">{cur.proto}</Badge>
-          <Badge variant={cur.has_private_key ? 'secondary' : 'outline'}>{cur.has_private_key ? 'ключ задан' : 'без ключа'}</Badge>
+          <Badge variant={cur.has_private_key ? 'secondary' : 'outline'}>{cur.has_private_key ? t('key set') : t('no key')}</Badge>
           <div className="flex-1" />
-          <Button size="sm" disabled={!!busy} onClick={save}>{busy === 'save' ? 'Сохраняю…' : 'Сохранить и переподключить'}</Button>
+          <Button size="sm" disabled={!!busy} onClick={save}>{busy === 'save' ? t('Saving…') : t('Save and reconnect')}</Button>
         </CardHeader>
         <CardContent className="space-y-4 p-4 pt-2">
           {/* endpoint / peer block */}
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            <div><span className={lbl}>Endpoint (сервер)</span>
+            <div><span className={lbl}>{t('Endpoint (server)')}</span>
               <div className="flex gap-2">
                 <input className={field} value={form.endpoint_host || ''} onChange={(e) => set('endpoint_host', e.target.value)} placeholder="45.144.53.1" />
-                <input className={cn(field, 'w-24')} value={form.endpoint_port || ''} onChange={(e) => set('endpoint_port', e.target.value)} placeholder="порт" />
+                <input className={cn(field, 'w-24')} value={form.endpoint_port || ''} onChange={(e) => set('endpoint_port', e.target.value)} placeholder={t('port')} />
               </div>
             </div>
-            <div><span className={lbl}>AllowedIPs (через запятую)</span>
+            <div><span className={lbl}>{t('AllowedIPs (comma-separated)')}</span>
               <input className={field} value={form.allowed_ips || ''} onChange={(e) => set('allowed_ips', e.target.value)} placeholder="0.0.0.0/0" />
             </div>
-            <div><span className={lbl}>Адреса интерфейса</span>
+            <div><span className={lbl}>{t('Interface addresses')}</span>
               <input className={field} value={form.addresses || ''} onChange={(e) => set('addresses', e.target.value)} placeholder="10.8.0.2/24" />
             </div>
             <div><span className={lbl}>DNS</span>
               <input className={field} value={form.dns || ''} onChange={(e) => set('dns', e.target.value)} placeholder="8.8.8.8, 8.8.4.4" />
             </div>
-            <div><span className={lbl}>Persistent keepalive</span>
+            <div><span className={lbl}>{t('Persistent keepalive')}</span>
               <input className={cn(field, 'w-32')} value={form.keepalive || ''} onChange={(e) => set('keepalive', e.target.value)} placeholder="25" />
             </div>
-            <div><span className={lbl}>Public key пира</span>
+            <div><span className={lbl}>{t('Public key of the peer')}</span>
               <input className={cn(field, 'font-mono text-xs')} value={peer.public_key || ''} readOnly />
             </div>
           </div>
 
           {/* obfuscation numeric knobs */}
           <div>
-            <span className={lbl}>Обфускация AmneziaWG — счётчики</span>
+            <span className={lbl}>{t('AmneziaWG obfuscation — counters')}</span>
             <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6">
               {NUM_KEYS.map((k) => (
                 <div key={k}><span className={lbl}>{k}</span>
@@ -184,8 +185,8 @@ export default function WgPanel() {
           {/* junk packets I1-I5 / J1-J3 (long) */}
           <div className="rounded-lg border bg-muted/30 p-3">
             <button type="button" onClick={() => setShowJunk((v) => !v)} className="flex w-full items-center justify-between text-left text-sm font-medium">
-              <span>Junk-пакеты (AWG 1.5): I1–I5, J1–J3</span>
-              <span className="text-xs text-muted-foreground">{showJunk ? 'свернуть ▲' : 'развернуть ▼'}</span>
+              <span>{t('Junk packets (AWG 1.5): I1–I5, J1–J3')}</span>
+              <span className="text-xs text-muted-foreground">{showJunk ? t('collapse ▲') : t('expand ▼')}</span>
             </button>
             {showJunk && (
               <div className="mt-3 space-y-2">
@@ -203,29 +204,29 @@ export default function WgPanel() {
 
           {/* private key */}
           <div>
-            <span className={lbl}><KeyRound className="mr-1 inline size-3.5" />Приватный ключ интерфейса</span>
+            <span className={lbl}><KeyRound className="mr-1 inline size-3.5" />{t('Private key of the interface')}</span>
             <div className="flex gap-2">
               <input className={cn(field, 'font-mono text-xs')} type={revealed ? 'text' : 'password'}
                 value={revealed ? (form.private_key || '') : (cur.has_private_key ? '••••••••••••••••' : (form.private_key || ''))}
                 onChange={(e) => set('private_key', e.target.value)}
                 readOnly={!revealed && cur.has_private_key}
                 placeholder={cur.has_private_key ? '(не менять)' : 'не задан'} />
-              {!revealed && cur.has_private_key && <Button size="sm" variant="outline" onClick={reveal}><Eye className="size-4" />Показать</Button>}
+              {!revealed && cur.has_private_key && <Button size="sm" variant="outline" onClick={reveal}><Eye className="size-4" />{t('Show')}</Button>}
             </div>
-            <p className="mt-1 text-xs text-muted-foreground">Оставьте поле пустым, чтобы не менять текущий ключ.</p>
+            <p className="mt-1 text-xs text-muted-foreground">{t('Leave empty to keep the current key.')}</p>
           </div>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader className="p-4 pb-2">
-          <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><FileDown className="size-4" />Импорт .conf (AmneziaWG / WireGuard)</CardTitle>
+          <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><FileDown className="size-4" />{t('Import .conf (AmneziaWG / WireGuard)')}</CardTitle>
         </CardHeader>
         <CardContent className="p-4 pt-2">
           <p className="mb-2 text-xs text-muted-foreground">Вставьте файл клиента (как выгружает AmneziaVPN / wg-quick). Секции [Interface] и [Peer] — включая I1–I5 / J1–J3 — будут применены к {iface}.</p>
           <textarea className={cn(field, 'min-h-[160px] font-mono text-xs')} value={conf} onChange={(e) => setConf(e.target.value)}
             placeholder={'[Interface]\nPrivateKey = …\nJc = 4\nI1 = <b 0xf1…>\n[Peer]\nPublicKey = …\nEndpoint = host:port\nAllowedIPs = 0.0.0.0/0'} />
-          <div className="mt-2"><Button size="sm" disabled={!!busy} onClick={importConf}>{busy === 'import' ? 'Импортирую…' : 'Импортировать и переподключить'}</Button></div>
+          <div className="mt-2"><Button size="sm" disabled={!!busy} onClick={importConf}>{busy === 'import' ? t('Importing…') : t('Import and reconnect')}</Button></div>
         </CardContent>
       </Card>
     </div>

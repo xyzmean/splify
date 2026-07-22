@@ -9,6 +9,7 @@ import {
 } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
 import { notify } from '@/lib/notify'
+import { t } from '@/lib/i18n'
 import {
   ShieldCheck, AlertTriangle, Ban, Globe, RefreshCw, Play, RotateCw, Power,
   Download, Wrench, ArrowRight, Check as CheckIcon, X as XIcon, Minus, Rocket,
@@ -113,14 +114,16 @@ export default function StatusDashboard(p: Props) {
     const m = /^([A-Za-z0-9_.-]+):/.exec(c.message || '')
     if (!m) return
     const iface = m[1]
-    if (!window.confirm(`Создать/починить firewall-зону для «${iface}» (accept-all + masquerade + форвардинг lan↔туннель↔wan) и перезагрузить firewall?`)) return
+    if (!window.confirm(t('Create/repair the firewall zone for “%s” (accept-all + masquerading + lan↔tunnel↔wan forwarding) and reload the firewall?').replace('%s', iface))) return
     p.setBusy('fw_fix')
     try {
       const res = await rpc.action('fw_fix', iface)
-      notify((res?.code === 0 ? `Firewall починен для ${iface}` : `Не удалось починить firewall для ${iface}`) + (res?.stdout ? ': ' + res.stdout : ''), res?.code === 0 ? 'info' : 'warning')
+      const okMsg = t('Firewall fixed for %s').replace('%s', iface)
+      const errMsg = t('Could not fix firewall for %s').replace('%s', iface)
+      notify((res?.code === 0 ? okMsg : errMsg) + (res?.stdout ? ': ' + res.stdout : ''), res?.code === 0 ? 'info' : 'warning')
       p.refresh()
     } catch (e: any) {
-      notify('Ошибка firewall-fix: ' + (e?.message || e), 'error')
+      notify(t('Firewall fix error:') + ' ' + (e?.message || e), 'error')
     } finally {
       p.setBusy('')
     }
@@ -156,19 +159,22 @@ export default function StatusDashboard(p: Props) {
             <div className="min-w-0">
               <div className="truncate text-sm font-semibold tracking-tight">{path.title}</div>
               <div className="mt-0.5 text-xs text-muted-foreground">
-                Режим <b className="text-foreground">{s.mode || '?'}</b> · Kill switch <b className="text-foreground">{String(s.killswitch) === '1' ? 'вкл' : 'выкл'}</b>
+                {t('Mode')} <b className="text-foreground">{s.mode || '?'}</b> · {t('Kill switch')} <b className="text-foreground">{String(s.killswitch) === '1' ? t('on') : t('off')}</b>
                 {s.zapret_version && <> · DPI: <b className="text-foreground">{s.zapret_version}</b></>}
               </div>
+              <Hint className="mt-1">
+                {String(s.killswitch) === '1' ? t('Kill switch hint') : t('DPI bypass hint')}
+              </Hint>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
-            <MiniStat label="Туннель" value={activeEp ? activeEp.iface : '—'}
-              sub={activeEp ? 'handshake ' + fmtAge(activeEp.handshake_age) : undefined} />
-            <MiniStat label="Приём" value={fmtRate(totRx)} />
-            <MiniStat label="Передача" value={fmtRate(totTx)} />
-            <MiniStat label="Сбоев" value={String(s.fail_count ?? '?')} tone={(s.fail_count ?? 0) > 0 ? SEV.WARN.text : undefined} />
-            <MiniStat label="Списки OK" value={`${okLists}/${enabledLists.length}`} tone={okLists < enabledLists.length ? SEV.WARN.text : undefined} />
+            <MiniStat label={t('Tunnel')} value={activeEp ? activeEp.iface : '—'}
+              sub={activeEp ? t('handshake') + ' ' + fmtAge(activeEp.handshake_age) : undefined} />
+            <MiniStat label={t('RX')} value={fmtRate(totRx)} />
+            <MiniStat label={t('TX')} value={fmtRate(totTx)} />
+            <MiniStat label={t('Failures')} value={String(s.fail_count ?? '?')} tone={(s.fail_count ?? 0) > 0 ? SEV.WARN.text : undefined} />
+            <MiniStat label={t('Lists OK')} value={`${okLists}/${enabledLists.length}`} tone={okLists < enabledLists.length ? SEV.WARN.text : undefined} />
           </div>
 
           <div className="flex items-center gap-2">
@@ -179,9 +185,9 @@ export default function StatusDashboard(p: Props) {
                 ? 'border-destructive text-destructive hover:bg-destructive/10'
                 : 'bg-success text-white hover:bg-success/90'}
               onClick={() => run(isOn ? 'off' : 'on',
-                isOn ? 'Выключить split-маршрутизацию? Весь трафик LAN пойдёт через WAN, пока служба не включится снова.' : undefined,
-                isOn ? 'Split-маршрутизация выключена' : 'Split-маршрутизация включена')}>
-              <Power className="size-4" />{isOn ? 'Выключить' : 'Включить'}
+                isOn ? t('Turn off split routing? All LAN traffic will go via WAN until the service re-enables it.') : undefined,
+                isOn ? t('Split routing disabled') : t('Split routing enabled'))}>
+              <Power className="size-4" />{isOn ? t('Disable') : t('Enable')}
             </Button>
           </div>
         </CardContent>
@@ -191,23 +197,23 @@ export default function StatusDashboard(p: Props) {
       <Card>
         <CardContent className="flex flex-wrap items-center gap-2 p-3">
           <Button size="sm" variant="outline" disabled={!!p.busy} onClick={p.refresh}>
-            <RefreshCw className="size-4" />Обновить
+            <RefreshCw className="size-4" />{t('Refresh')}
           </Button>
-          <ActBtn a="apply" label="Применить" icon={Play} variant="default" toast="Конфигурация применена" />
-          <ActBtn a="restart" label="Перезапустить" icon={RotateCw} variant="secondary" toast="Служба перезапущена" />
+          <ActBtn a="apply" label={t('Apply')} icon={Play} variant="default" toast={t('Configuration applied')} />
+          <ActBtn a="restart" label={t('Restart')} icon={RotateCw} variant="secondary" toast={t('Service restarted')} />
 
           <div className="flex items-center gap-1 rounded-lg border bg-muted/40 px-1 py-1">
-            <span className="px-1.5 text-xs text-muted-foreground">Списки</span>
-            <ActBtn a="update_ipsum" label="ipsum" icon={Download} variant="ghost" toast="ipsum обновлён" />
-            <ActBtn a="update_ru" label="ru/cn" icon={Download} variant="ghost" toast="ru/cn обновлён" />
-            <ActBtn a="update_domains" label="домены" icon={Download} variant="ghost" toast="домены обновлены" />
+            <span className="px-1.5 text-xs text-muted-foreground">{t('Lists')}</span>
+            <ActBtn a="update_ipsum" label="ipsum" icon={Download} variant="ghost" toast={t('ipsum updated')} />
+            <ActBtn a="update_ru" label="ru/cn" icon={Download} variant="ghost" toast={t('ru/cn updated')} />
+            <ActBtn a="update_domains" label="домены" icon={Download} variant="ghost" toast={t('domains updated')} />
           </div>
 
           <div className="flex-1" />
 
-          <ActBtn a="disable" label="Аварийно отключить" icon={Power} variant="destructive"
-            confirm="Отключить split-маршрутизацию сейчас? Весь трафик LAN выйдет через WAN, пока служба не включит её снова."
-            toast="Split-маршрутизация отключена" />
+          <ActBtn a="disable" label={t('Emergency disable')} icon={Power} variant="destructive"
+            confirm={t('Disable split routing now? All LAN traffic will exit via WAN until the service re-enables it (or you stop it).')}
+            toast={t('Split routing disabled')} />
         </CardContent>
       </Card>
 
@@ -215,8 +221,8 @@ export default function StatusDashboard(p: Props) {
       {firstRun && (
         <Card className="border border-dashed border-warning bg-warning/5">
           <CardContent className="p-5">
-            <h4 className="mb-2 flex items-center gap-2 font-semibold"><Rocket className="size-4 text-warning" />Подключим первый туннель</h4>
-            <p className="mb-2 text-sm text-muted-foreground">Туннелей пока нет, поэтому весь трафик LAN сейчас идёт через обычный WAN.</p>
+            <h4 className="mb-2 flex items-center gap-2 font-semibold"><Rocket className="size-4 text-warning" />{t("Let's connect the first tunnel")}</h4>
+            <p className="mb-2 text-sm text-muted-foreground">{t('No tunnels yet, so all LAN traffic currently goes through plain WAN.')}</p>
             <ol className="ml-5 list-decimal space-y-1 text-sm">
               <li>Создайте интерфейс WireGuard/AmneziaWG в <a className="text-primary underline-offset-4 hover:underline" href={window.L?.url('admin/network/network')}>Сеть → Интерфейсы</a> (splify не управляет ключами).</li>
               <li>Добавьте его на вкладке <a className="text-primary underline-offset-4 hover:underline" href={window.L?.url('admin/services/splify/settings')}>Дополнительно</a> в «Туннели» с приоритетом, затем «Сохранить и применить».</li>
@@ -227,19 +233,21 @@ export default function StatusDashboard(p: Props) {
       )}
 
       {/* ── Routing chain (full width) ───────────────────────── */}
-      <Section title="Путь трафика" icon={Activity}>
+      <Section title={t('Traffic path')} icon={Activity}>
         <Chain status={status} rates={rates} />
       </Section>
 
       {/* ── Tunnels + Lists side by side ─────────────────────── */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <Section title={`Туннели (failover) · ${onlineTun}/${eps.length} онлайн`} icon={Network}>
+        <Section title={`${t('Tunnels (failover)')} · ${onlineTun}/${eps.length} ${t('online')}`} icon={Network}>
+          <Hint className="mb-2">{t('Failover hint')}.</Hint>
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Туннель</TableHead><TableHead>Прио</TableHead><TableHead>Handshake</TableHead>
-                <TableHead>Трафик</TableHead><TableHead>Health</TableHead><TableHead>Зона</TableHead>
-                <TableHead>Masq</TableHead><TableHead>LAN-fwd</TableHead>
+                <TableHead>{t('Tunnel')}</TableHead><TableHead>{t('Prio')}</TableHead><TableHead>{t('Handshake')}</TableHead>
+                <TableHead>{t('Traffic')}</TableHead><TableHead>{t('Health')}</TableHead><TableHead>{t('Zone')}</TableHead>
+                <TableHead title={t('Masquerade (masq) hides LAN behind the tunnel IP')}>{t('Masq')}</TableHead>
+                <TableHead title={t('Forwarding lan → tunnel is required for traffic to reach the tunnel')}>{t('LAN fwd')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -286,10 +294,10 @@ export default function StatusDashboard(p: Props) {
 
       {/* ── Diagnostics + Events side by side ────────────────── */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <Section title={checks.length ? `Диагностика · ${checks.length}` : 'Диагностика'} icon={Stethoscope}>
+        <Section title={checks.length ? `${t('Diagnostics')} · ${checks.length}` : t('Diagnostics')} icon={Stethoscope}>
           {checks.length === 0 ? (
             <p className="flex items-center gap-2 font-medium text-success">
-              <CheckIcon className="size-4" />Проблем не обнаружено.
+              <CheckIcon className="size-4" />{t('No problems detected.')}
             </p>
           ) : (
             <div className="space-y-2">
@@ -302,7 +310,7 @@ export default function StatusDashboard(p: Props) {
                   </div>
                   {c.category === 'firewall' && !/in the shared |device wildcard|non-tunnel networks/.test(c.message) && /^([A-Za-z0-9_.-]+):/.test(c.message) && (
                     <Button size="sm" variant="outline" className="border-primary text-primary" disabled={!!p.busy} onClick={() => fixFirewall(c)}>
-                      <Wrench className="size-4" />Исправить
+                      <Wrench className="size-4" />{t('Fix')}
                     </Button>
                   )}
                   {c.category === 'firewall' && (
@@ -316,9 +324,9 @@ export default function StatusDashboard(p: Props) {
           )}
         </Section>
 
-        <Section title="История событий" icon={History}>
+        <Section title={t('Event history')} icon={History}>
           {events.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Событий переключения пока не зафиксировано.</p>
+            <p className="text-sm text-muted-foreground">{t('No failover events recorded yet.')}</p>
           ) : (
             <Table>
               <TableBody>
@@ -367,12 +375,24 @@ function Section({ title, icon: Icon, children }: { title: string; icon: React.C
   )
 }
 
+// Маленькая подсказка под/рядом с термином — для рядового пользователя.
+// Текст мелким «глухим» цветом, чтобы не отвлекать опытных, но объяснять
+// суть (DPI, kill switch, masq и т.п.).
+function Hint({ children, className }: { children: React.ReactNode; className?: string }) {
+  return <p className={cn('text-xs text-muted-foreground', className)}>{children}</p>
+}
+
 function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: number; tx: number }> }) {
   const s = status.summary
   const state = s.state || ''
+  const eps = status.endpoints || []
+
+  // Узел пути. `active` — подсвечивает реально идущую через него ветку
+  // (success ring); `dead` — недоступный туннель (деструктивный цвет); прочие
+  // «спят» (нейтральный фон). Активным бывает ровно один узел цепочки.
   const Node = ({ title, sub, active, dead }: { title: string; sub?: React.ReactNode; active?: boolean; dead?: boolean }) => (
     <div className={cn(
-      'flex min-w-[84px] flex-col justify-center rounded-lg border px-3 py-2 text-center',
+      'flex min-w-[88px] flex-col justify-center rounded-lg border px-3 py-2 text-center',
       active && 'border-success bg-success/10 ring-2 ring-success/30',
       dead && 'border-destructive text-destructive',
       !active && !dead && 'bg-muted/40',
@@ -381,23 +401,95 @@ function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: 
       {sub != null && sub !== '' && <div className="mt-0.5 text-xs text-muted-foreground">{sub}</div>}
     </div>
   )
-  const Arrow = () => <ArrowRight className="size-4 self-center text-muted-foreground/50" />
+  // Яркая стрелка для активной ветки, бледная — для сна/резерва.
+  const Arrow = ({ dim }: { dim?: boolean }) => (
+    <ArrowRight className={cn('size-4 self-center', dim ? 'text-muted-foreground/30' : 'text-muted-foreground/70')} />
+  )
+
+  const activeEp = eps.find((e) => state === 'vpn:' + e.iface)
   const hasZapret = (status.lists || []).some((l) => l.name === 'nozapret') || state === 'zapret'
 
-  return (
-    <div className="flex flex-wrap items-stretch gap-1.5">
+  // Резервы = все туннели КРОМЕ активного (по приоритету), плюс zapret и WAN
+  // как нижние ступени. На экран выводятся компактным списком бейджей, без
+  // стрелок — чтобы не путать с реально активной цепочкой выше.
+  const reserves = eps
+    .filter((e) => e !== activeEp)
+    .sort((a, b) => (Number(a.priority) || 999) - (Number(b.priority) || 999))
+
+  const rateOf = (iface: string) => rates[iface] || { rx: 0, tx: 0 }
+  const liveSub = (e: typeof eps[number]) => {
+    if (!e.present) return t('none')
+    const r = rateOf(e.iface)
+    return <span className="whitespace-nowrap"><span className="text-success">↓{fmtRate(r.rx)}</span> <span className="text-info">↑{fmtRate(r.tx)}</span></span>
+  }
+
+  // ── активная цепочка (ровно один реальный маршрут LAN → … → Интернет) ──
+  let chain: React.ReactNode
+  if (state === 'killswitch') {
+    chain = <>
       <Node title="LAN" sub={s.lan_iface} />
-      {(status.endpoints || []).map((e) => {
-        const active = state === 'vpn:' + e.iface
-        const r = rates[e.iface] || { rx: 0, tx: 0 }
-        const sub = !e.present ? 'недоступен' : active ? <span className="whitespace-nowrap"><span className="text-success">↓{fmtRate(r.rx)}</span> <span className="text-info">↑{fmtRate(r.tx)}</span></span> : e.handshake_age >= 0 && e.handshake_age < 999999 ? '⇄ ' + fmtAge(e.handshake_age) : ''
-        return <span key={e.iface} className="contents"><Arrow /><Node title={`#${e.priority || '?'} ${e.iface}`} sub={sub} active={active} dead={!e.present} /></span>
-      })}
-      {hasZapret && <><Arrow /><Node title={s.zapret_version || "zapret"} sub="обход DPI" active={state === 'zapret'} /></>}
       <Arrow />
-      {state === 'killswitch'
-        ? <div className="flex min-w-[84px] flex-col justify-center rounded-lg border border-destructive bg-destructive/10 px-3 py-2 text-center ring-2 ring-destructive/30"><div className="text-sm font-semibold">заблокировано</div><div className="mt-0.5 text-xs text-muted-foreground">kill switch</div></div>
-        : <Node title="WAN" sub="напрямую" active={state === 'wan'} />}
+      <div className="flex min-w-[88px] flex-col justify-center rounded-lg border border-destructive bg-destructive/10 px-3 py-2 text-center ring-2 ring-destructive/30">
+        <div className="text-sm font-semibold">{t('Blocked — kill switch')}</div>
+      </div>
+      <Arrow />
+      <Node title={t('Internet')} sub={t('none')} dead />
+    </>
+  } else if (activeEp) {
+    chain = <>
+      <Node title="LAN" sub={s.lan_iface} />
+      <Arrow />
+      <Node title={`#${activeEp.priority || '?'} ${activeEp.iface}`} sub={liveSub(activeEp)} active />
+      <Arrow />
+      <Node title={t('Internet')} sub={t('via VPN')} active />
+    </>
+  } else if (state === 'zapret') {
+    chain = <>
+      <Node title="LAN" sub={s.lan_iface} />
+      <Arrow />
+      <Node title={s.zapret_version || 'zapret'} sub={t('DPI bypass (zapret)')} active />
+      <Arrow />
+      <Node title={t('Internet')} sub={t('Direct (WAN)')} active />
+    </>
+  } else {
+    // wan или неизвестное — рисуем как «напрямую», без активного туннеля.
+    chain = <>
+      <Node title="LAN" sub={s.lan_iface} />
+      <Arrow />
+      <Node title={t('Internet')} sub={t('Direct (WAN)')} active />
+    </>
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-stretch gap-1.5">{chain}</div>
+
+      {/* Резервы — отдельной строкой, чтобы не сливаться с активным путём.
+          Показываем, что ВООБЩЕ настроено и в каком порядке встанет, если
+          активная ветка упадёт. Текст «глухой» подсказки объясняет, что это. */}
+      {reserves.length > 0 || hasZapret ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-muted-foreground">{t('Reserves by priority')}:</span>
+          {reserves.map((e) => (
+            <span key={e.iface} className={cn(
+              'inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs',
+              e.present ? 'border-border bg-muted/40' : 'border-destructive/50 text-destructive',
+            )}>
+              #{e.priority || '?'} {e.iface}{!e.present && ` (${t('none')})`}
+            </span>
+          ))}
+          {hasZapret && state !== 'zapret' && (
+            <span className="inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-0.5 text-xs">
+              {s.zapret_version || 'zapret'}
+            </span>
+          )}
+          {state !== 'wan' && state !== 'killswitch' && (
+            <span className="inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-0.5 text-xs">WAN</span>
+          )}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">{t('No reserves — all configured tunnels are down.')}</p>
+      )}
     </div>
   )
 }

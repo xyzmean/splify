@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { notify } from '@/lib/notify'
+import { t } from '@/lib/i18n'
 import { Plug, Radio, KeyRound, Eye, EyeOff, RefreshCw, Tag } from 'lucide-react'
 
 const field = 'w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring'
@@ -105,7 +106,7 @@ export default function ApiPanel() {
   if (!info && loadError) return (
     <Card><CardContent className="flex items-center justify-between gap-3 p-6 text-destructive">
       <span>Не удалось загрузить настройки API: {loadError}</span>
-      <Button size="sm" variant="outline" onClick={() => load()}>Повторить</Button>
+      <Button size="sm" variant="outline" onClick={() => load()}>{t('Retry')}</Button>
     </CardContent></Card>
   )
   if (!info) return <Card><CardContent className="p-6 text-muted-foreground">Загрузка…</CardContent></Card>
@@ -117,21 +118,21 @@ export default function ApiPanel() {
     <div className="space-y-4">
       {/* connection status — KPI blocks */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <StatTile label="Подключено" value={<OkBadge ok={enrolled}>{enrolled ? 'да' : 'нет'}</OkBadge>} />
-        <StatTile label="Агент" value={<OkBadge ok={info.agent_running}>{info.agent_running ? 'работает' : agentOn ? 'запускается' : 'выкл'}</OkBadge>} />
+        <StatTile label={t('Connected')} value={<OkBadge ok={enrolled}>{enrolled ? t('on') : t('off')}</OkBadge>} />
+        <StatTile label={t('Agent')} value={<OkBadge ok={info.agent_running}>{info.agent_running ? t('running') : agentOn ? t('starting') : t('off')}</OkBadge>} />
         <StatTile label="Node ID" value={<code className="text-sm">{info.node_id || '—'}</code>} />
-        <StatTile label="Последний опрос" value={<span className="text-sm font-medium">{fmtUnix(info.last_poll)}</span>}
+        <StatTile label={t('Last poll')} value={<span className="text-sm font-medium">{fmtUnix(info.last_poll)}</span>}
           sub={info.last_result || undefined} />
       </div>
 
       {/* node name (node_id) */}
       <Card>
-        <CardHeader className="p-4 pb-2"><CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><Tag className="size-4" />Имя ноды</CardTitle></CardHeader>
+        <CardHeader className="p-4 pb-2"><CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><Tag className="size-4" />{t('Node name')}</CardTitle></CardHeader>
         <CardContent className="p-4 pt-2">
           <p className="mb-2 text-xs text-muted-foreground">Под этим именем роутер виден в панели. Латиница/цифры и <code>. _ -</code>, без пробелов, до 64 символов. Задайте его <b>до подключения</b> — это самое простое.</p>
           <div className="flex gap-2">
             <input className={cn(field, 'max-w-xs')} value={nodeId} onChange={(e) => setNodeId(e.target.value)} placeholder="office-rt1" />
-            <Button size="sm" variant="outline" disabled={!!busy} onClick={saveNode}>{busy === 'node' ? 'Сохраняю…' : 'Сохранить имя'}</Button>
+            <Button size="sm" variant="outline" disabled={!!busy} onClick={saveNode}>{busy === 'node' ? t('Saving…') : t('Save name')}</Button>
           </div>
           {enrolled && <p className="mt-2 text-xs text-warning">Нода уже подключена. После смены имени нажмите «Перерегистрировать» — в панели появится новая запись с новым именем, старую можно удалить.</p>}
         </CardContent>
@@ -139,14 +140,14 @@ export default function ApiPanel() {
 
       {/* connect via connection JSON */}
       <Card>
-        <CardHeader className="p-4 pb-2"><CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><Plug className="size-4" />Подключить к панели</CardTitle></CardHeader>
+        <CardHeader className="p-4 pb-2"><CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><Plug className="size-4" />{t('Connect to the control panel')}</CardTitle></CardHeader>
         <CardContent className="p-4 pt-2">
           <p className="mb-2 text-xs text-muted-foreground">Вставьте «JSON подключения» из панели управления (внешний + внутренний адрес и ключ доступа). Роутер сгенерирует свой ключ связи и зарегистрируется.</p>
           <textarea className={cn(field, 'min-h-[90px] font-mono text-xs')} value={connJson} onChange={(e) => setConnJson(e.target.value)}
             placeholder={'{"internal":"http://10.8.0.1:8080","external":"https://vpn.example.net:8443","access_key":"…"}'} />
           <div className="mt-2 flex gap-2">
-            <Button size="sm" disabled={!!busy} onClick={connect}>{busy === 'connect' ? 'Подключаю…' : 'Подключить'}</Button>
-            {enrolled && info.has_access_key && <Button size="sm" variant="outline" disabled={!!busy} onClick={enroll}>Перерегистрировать</Button>}
+            <Button size="sm" disabled={!!busy} onClick={connect}>{busy === 'connect' ? t('Connecting…') : t('Connect')}</Button>
+            {enrolled && info.has_access_key && <Button size="sm" variant="outline" disabled={!!busy} onClick={enroll}>{t('Re-register')}</Button>}
           </div>
         </CardContent>
       </Card>
@@ -154,7 +155,7 @@ export default function ApiPanel() {
       {/* outbound agent */}
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0 p-4 pb-2">
-          <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><Radio className="size-4" />Исходящий агент (CGNAT / упавший туннель)</CardTitle>
+          <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><Radio className="size-4" />{t('Outbound agent (CGNAT / down tunnel)')}</CardTitle>
           <Switch on={agentOn} disabled={!!busy} onClick={() => toggle('agent_enabled', !agentOn)} />
         </CardHeader>
         <CardContent className="p-4 pt-2">
@@ -167,14 +168,14 @@ export default function ApiPanel() {
               <input className={cn(field, 'w-32')} value={interval} onChange={(e) => setIntervalV(e.target.value)} placeholder="60" /></div>
           </div>
           <p className="mt-2 text-xs text-muted-foreground">Внутренний адрес пробуется первым (приватно, через туннель); внешний — резерв по WAN, когда туннель недоступен.</p>
-          <div className="mt-3"><Button size="sm" variant="outline" disabled={!!busy} onClick={() => saveSettings()}>{busy === 'save' ? 'Сохраняю…' : 'Сохранить адреса'}</Button></div>
+          <div className="mt-3"><Button size="sm" variant="outline" disabled={!!busy} onClick={() => saveSettings()}>{busy === 'save' ? t('Saving…') : t('Save addresses')}</Button></div>
         </CardContent>
       </Card>
 
       {/* inbound REST */}
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0 p-4 pb-2">
-          <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><KeyRound className="size-4" />Входящий REST API (LAN / WG)</CardTitle>
+          <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><KeyRound className="size-4" />{t('Inbound REST API (LAN / WG)')}</CardTitle>
           <Switch on={restOn} disabled={!!busy} onClick={() => toggle('enabled', !restOn)} />
         </CardHeader>
         <CardContent className="p-4 pt-2">
@@ -184,12 +185,12 @@ export default function ApiPanel() {
               <div className="flex gap-2">
                 <input className={cn(field, 'font-mono text-xs')} type={showToken ? 'text' : 'password'} value={showToken ? revealedToken : (info.has_token ? '••••••••••••••••' : '')} readOnly />
                 <Button size="sm" variant="outline" onClick={toggleToken}>{showToken ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</Button>
-                <Button size="sm" variant="outline" disabled={!!busy} onClick={regen}><RefreshCw className="size-4" />Сменить</Button>
+                <Button size="sm" variant="outline" disabled={!!busy} onClick={regen}><RefreshCw className="size-4" />{t('Change')}</Button>
               </div></div>
             <div><span className={lbl}>Ограничение по подсети (префикс, опц.)</span>
               <div className="flex gap-2">
                 <input className={field} value={allow} onChange={(e) => setAllow(e.target.value)} placeholder="10.8.0." />
-                <Button size="sm" variant="outline" disabled={!!busy} onClick={() => saveSettings()}>Сохранить</Button>
+                <Button size="sm" variant="outline" disabled={!!busy} onClick={() => saveSettings()}>{t('Apply')}</Button>
               </div></div>
           </div>
         </CardContent>
