@@ -156,7 +156,7 @@ export default function ApiPanel() {
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0 p-4 pb-2">
           <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><Radio className="size-4" />{t('Outbound agent (CGNAT / down tunnel)')}</CardTitle>
-          <Switch on={agentOn} disabled={!!busy} onClick={() => toggle('agent_enabled', !agentOn)} />
+          <Switch on={agentOn} disabled={!!busy} onClick={() => toggle('agent_enabled', !agentOn)} aria-label={t('Toggle outbound agent')} />
         </CardHeader>
         <CardContent className="p-4 pt-2">
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -176,7 +176,7 @@ export default function ApiPanel() {
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0 p-4 pb-2">
           <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal"><KeyRound className="size-4" />{t('Inbound REST API (LAN / WG)')}</CardTitle>
-          <Switch on={restOn} disabled={!!busy} onClick={() => toggle('enabled', !restOn)} />
+          <Switch on={restOn} disabled={!!busy} onClick={() => toggle('enabled', !restOn)} aria-label={t('Toggle inbound REST API')} />
         </CardHeader>
         <CardContent className="p-4 pt-2">
           <p className="mb-3 text-xs text-muted-foreground">Доступен по адресу <code>/cgi-bin/splify-api</code> с авторизацией по токену. Не открывайте его в публичный интернет — он для LAN / WG-сети.</p>
@@ -184,7 +184,7 @@ export default function ApiPanel() {
             <div><span className={lbl}>Токен доступа</span>
               <div className="flex gap-2">
                 <input className={cn(field, 'font-mono text-xs')} type={showToken ? 'text' : 'password'} value={showToken ? revealedToken : (info.has_token ? '••••••••••••••••' : '')} readOnly />
-                <Button size="sm" variant="outline" onClick={toggleToken}>{showToken ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</Button>
+                <Button size="sm" variant="outline" onClick={toggleToken} aria-label={showToken ? t('Hide token') : t('Show token')} title={showToken ? t('Hide token') : t('Show token')}>{showToken ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</Button>
                 <Button size="sm" variant="outline" disabled={!!busy} onClick={regen}><RefreshCw className="size-4" />{t('Change')}</Button>
               </div></div>
             <div><span className={lbl}>Ограничение по подсети (префикс, опц.)</span>
@@ -213,9 +213,9 @@ function StatTile({ label, value, sub }: { label: string; value: React.ReactNode
 function OkBadge({ ok, children }: { ok: boolean; children: React.ReactNode }) {
   return <Badge className={ok ? 'border-transparent bg-success text-white' : 'border-transparent bg-muted-foreground/40 text-white'}>{children}</Badge>
 }
-function Switch({ on, onClick, disabled }: { on: boolean; onClick: () => void; disabled?: boolean }) {
+function Switch({ on, onClick, disabled, 'aria-label': ariaLabel }: { on: boolean; onClick: () => void; disabled?: boolean; 'aria-label'?: string }) {
   return (
-    <button onClick={onClick} disabled={disabled}
+    <button onClick={onClick} disabled={disabled} aria-label={ariaLabel} role="switch" aria-checked={on}
       className={cn('relative h-6 w-11 rounded-full transition disabled:opacity-50', on ? 'bg-success' : 'bg-muted-foreground/30')}>
       <span className={cn('absolute left-0.5 top-0.5 size-5 rounded-full bg-white transition-transform', on && 'translate-x-5')} />
     </button>
