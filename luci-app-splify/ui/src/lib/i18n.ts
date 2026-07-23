@@ -152,6 +152,10 @@ const RU: Record<string, string> = {
   'Inbound REST API (LAN / WG)': 'Входящий REST API (LAN / WG)',
   'Change': 'Сменить',
   'Retry': 'Повторить',
+
+  // ── SettingsPage ─────────────────────────────────────────────────────
+  'Delete': 'Удалить',
+  'Add': 'Добавить',
 }
 
 /**
