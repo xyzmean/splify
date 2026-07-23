@@ -152,6 +152,10 @@ const RU: Record<string, string> = {
   'Inbound REST API (LAN / WG)': 'Входящий REST API (LAN / WG)',
   'Change': 'Сменить',
   'Retry': 'Повторить',
+  'Show token': 'Показать токен',
+  'Hide token': 'Скрыть токен',
+  'Toggle outbound agent': 'Переключить исходящего агента',
+  'Toggle inbound REST API': 'Переключить входящий REST API',
 
   // ── SettingsPage ─────────────────────────────────────────────────────
   'Delete': 'Удалить',
