@@ -188,31 +188,47 @@ register_warp() {
     -o "$REG" \
     || err "регистрация WARP не удалась. Если API заблокирован вашим провайдером — задайте WORKER_URL (см. contrib/warp-api-proxy-vercel)."
 
-  REG_ID="$(jq -r '.result.id'    "$REG")"
-  REG_TOK="$(jq -r '.result.token' "$REG")"
-  [ -n "$REG_ID" ] && [ "$REG_ID" != "null" ] || err "WARP: нет result.id в ответе."
-  [ -n "$REG_TOK" ] && [ "$REG_TOK" != "null" ] || err "WARP: нет result.token в ответе."
+  REG_ID="$(jq -r '.id'    "$REG")"
+  REG_TOK="$(jq -r '.token' "$REG")"
+  [ -n "$REG_ID" ] && [ "$REG_ID" != "null" ] || err "WARP: нет id в ответе."
+  [ -n "$REG_TOK" ] && [ "$REG_TOK" != "null" ] || err "WARP: нет token в ответе."
 
-  # The Register response already carries the peer pubkey + addresses. wgcf does
-  # not send a separate PATCH warp_enabled. Re-fetch the full device record via
-  # GET /reg/{id} to be sure we have config.* (some API versions omit it from
-  # the POST response) — authenticated with the registration token.
+  # The Register response already carries config.* in v0a1922 (wgcf format) —
+  # peer pubkey, interface addresses and endpoint are all there. Re-fetch the
+  # full device record via GET /reg/{id} only as a fallback if the POST response
+  # somehow lacked config.* (older API versions); authenticated with the token.
   WARP="$TMP/warp.json"
-  if ! curl -fsSL --max-time 30 -X GET "$(reg_url "reg/$REG_ID")" \
-        -H "User-Agent: $CF_UA" \
-        -H "CF-Client-Version: $CF_CLIENT_VER" \
-        -H "Accept: application/json" \
-        -H "Authorization: Bearer $REG_TOK" \
-        -o "$WARP" 2>/dev/null; then
-    # GET failed — fall back to whatever the POST returned (it may have config).
+  if ! jq -e '.config.peers[0].public_key' "$REG" >/dev/null 2>&1; then
+    if ! curl -fsSL --max-time 30 -X GET "$(reg_url "reg/$REG_ID")" \
+          -H "User-Agent: $CF_UA" \
+          -H "CF-Client-Version: $CF_CLIENT_VER" \
+          -H "Accept: application/json" \
+          -H "Authorization: Bearer $REG_TOK" \
+          -o "$WARP" 2>/dev/null; then
+      cp "$REG" "$WARP"
+    fi
+  else
     cp "$REG" "$WARP"
   fi
 
-  WARP_PEER="$(jq -r '.result.config.peers[0].public_key'        "$WARP")"
-  WARP_V4="$(jq -r '.result.config.interface.addresses.v4'        "$WARP")"
-  WARP_V6="$(jq -r '.result.config.interface.addresses.v6 // ""'  "$WARP")"
+  WARP_PEER="$(jq -r '.config.peers[0].public_key'               "$WARP")"
+  WARP_V4="$(jq -r '.config.interface.addresses.v4'               "$WARP")"
+  WARP_V6="$(jq -r '.config.interface.addresses.v6 // ""'         "$WARP")"
   [ -n "$WARP_PEER" ] && [ "$WARP_PEER" != "null" ] || err "WARP: нет peer public_key в ответе."
   [ -n "$WARP_V4" ]   && [ "$WARP_V4"   != "null" ] || err "WARP: нет client IPv4 в ответе."
+
+  # WARP addresses come WITHOUT a prefix length (e.g. "172.16.0.2") — WireGuard
+  # needs CIDR. Append /32 for IPv4 and /128 for IPv6 if none is present.
+  case "$WARP_V4" in
+    */*) : ;;
+    *)   WARP_V4="$WARP_V4/32" ;;
+  esac
+  if [ -n "$WARP_V6" ]; then
+    case "$WARP_V6" in
+      */*) : ;;
+      *)   WARP_V6="$WARP_V6/128" ;;
+    esac
+  fi
 
   say "WARP зарегистрирован: $WARP_V4${WARP_V6:+, $WARP_V6}"
 }
