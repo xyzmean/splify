@@ -249,10 +249,10 @@ create_warp_iface() {
   uci -q set "network.$WARP_IFACE=interface"
   uci set "network.$WARP_IFACE.proto=amneziawg"
   uci set "network.$WARP_IFACE.private_key=$PRIV"
-  uci -q delete "network.$WARP_IFACE.addresses"
+  uci -q delete "network.$WARP_IFACE.addresses" || true
   uci add_list "network.$WARP_IFACE.addresses=$WARP_V4"
   [ -n "$WARP_V6" ] && uci add_list "network.$WARP_IFACE.addresses=$WARP_V6"
-  uci -q delete "network.$WARP_IFACE.dns"
+  uci -q delete "network.$WARP_IFACE.dns" || true
   uci add_list "network.$WARP_IFACE.dns=1.1.1.1"
   uci set "network.$WARP_IFACE.mtu=1280"
   # splify owns routing (marks + table 200); never let netifd pull AllowedIPs
@@ -275,10 +275,10 @@ create_warp_iface() {
 
   # ── peer (the WARP server) — single section, replace any prior ──
   _pt="amneziawg_$WARP_IFACE"
-  while [ -n "$(uci -q get "network.@${_pt}[0]")" ]; do uci -q delete "network.@${_pt}[0]"; done
+  while [ -n "$(uci -q get "network.@${_pt}[0]")" ]; do uci -q delete "network.@${_pt}[0]" || true; done
   uci add network "$_pt" >/dev/null
   uci set "network.@${_pt}[-1].public_key=$WARP_PEER"
-  uci -q delete "network.@${_pt}[-1].allowed_ips"
+  uci -q delete "network.@${_pt}[-1].allowed_ips" || true
   uci add_list "network.@${_pt}[-1].allowed_ips=0.0.0.0/0"
   uci add_list "network.@${_pt}[-1].allowed_ips=::/0"
   uci set "network.@${_pt}[-1].endpoint_host=${WARP_EP%:*}"
