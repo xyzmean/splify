@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useMemo, useRef } from 'react'
 import type { Status, EventRow, Check, Sev } from '@/lib/rpc'
 import { rpc } from '@/lib/rpc'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -66,7 +66,38 @@ export default function StatusDashboard(p: Props) {
   const { status, events } = p
   const ratesRef = useRef<RateSample>({})
 
-  if (!status || !status.summary) {
+  // ⚡ Bolt: Memoize derived state and rate calculations.
+  // This prevents expensive array operations (filtering/reducing) on every re-render
+  // (e.g. when 'busy' state changes) and fixes a bug where ratesFor would artificially
+  // drop to 0 if re-evaluated between status polls.
+  const derived = useMemo(() => {
+    if (!status || !status.summary) return null
+    const s = status.summary
+    const now = Date.now()
+    const eps = status.endpoints || []
+    const rates: Record<string, { rx: number; tx: number }> = {}
+    eps.forEach((e) => { rates[e.iface] = ratesFor(e, now, ratesRef.current) })
+
+    const overall = status.overall || 'FAIL'
+    const path = pathLabel(s.state || '')
+    const HeroIcon = stateIcon(s.state || '')
+    const isOn = /^vpn:/.test(s.state) || s.state === 'zapret' || s.state === 'killswitch'
+
+    // ── KPI aggregates for the stat blocks ──────────────────────
+    const activeEp = eps.find((e) => s.state === 'vpn:' + e.iface)
+    const totRx = eps.reduce((a, e) => a + (rates[e.iface]?.rx || 0), 0)
+    const totTx = eps.reduce((a, e) => a + (rates[e.iface]?.tx || 0), 0)
+    const onlineTun = eps.filter((e) => e.present).length
+    const lists = status.lists || []
+    const enabledLists = lists.filter((l) => l.enabled)
+    const okLists = enabledLists.filter((l) => l.ok).length
+
+    return { s, eps, rates, overall, path, HeroIcon, isOn, activeEp, totRx, totTx, onlineTun, lists, enabledLists, okLists }
+  }, [status])
+
+  const derivedProps = derived
+
+  if (!derivedProps) {
     return (
       <Card>
         <CardContent className="p-8 text-center text-destructive">
@@ -76,25 +107,7 @@ export default function StatusDashboard(p: Props) {
     )
   }
 
-  const s = status.summary
-  const now = Date.now()
-  const eps = status.endpoints || []
-  const rates: Record<string, { rx: number; tx: number }> = {}
-  eps.forEach((e) => { rates[e.iface] = ratesFor(e, now, ratesRef.current) })
-
-  const overall = status.overall || 'FAIL'
-  const path = pathLabel(s.state || '')
-  const HeroIcon = stateIcon(s.state || '')
-  const isOn = /^vpn:/.test(s.state) || s.state === 'zapret' || s.state === 'killswitch'
-
-  // ── KPI aggregates for the stat blocks ──────────────────────
-  const activeEp = eps.find((e) => s.state === 'vpn:' + e.iface)
-  const totRx = eps.reduce((a, e) => a + (rates[e.iface]?.rx || 0), 0)
-  const totTx = eps.reduce((a, e) => a + (rates[e.iface]?.tx || 0), 0)
-  const onlineTun = eps.filter((e) => e.present).length
-  const lists = status.lists || []
-  const enabledLists = lists.filter((l) => l.enabled)
-  const okLists = enabledLists.filter((l) => l.ok).length
+  const { s, eps, rates, overall, path, HeroIcon, isOn, activeEp, totRx, totTx, onlineTun, lists, enabledLists, okLists } = derivedProps
 
   async function run(action: string, confirmMsg?: string, toast?: string) {
     if (confirmMsg && !window.confirm(confirmMsg)) return
@@ -144,7 +157,7 @@ export default function StatusDashboard(p: Props) {
     )
   }
 
-  const checks = (status.checks || []).filter((c) => c.severity !== 'OK')
+  const checks = (status!.checks || []).filter((c) => c.severity !== 'OK')
   const firstRun = eps.length === 0
 
   return (
@@ -230,7 +243,7 @@ export default function StatusDashboard(p: Props) {
 
       {/* ── Routing chain (full width) ───────────────────────── */}
       <Section title={t('Traffic path')} icon={Activity}>
-        <Chain status={status} rates={rates} />
+        <Chain status={status!} rates={rates} />
       </Section>
 
       {/* ── Tunnels + Lists side by side ─────────────────────── */}
