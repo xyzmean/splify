@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useRef, useMemo } from 'react'
 import type { Status, EventRow, Check, Sev } from '@/lib/rpc'
 import { rpc } from '@/lib/rpc'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -66,6 +66,35 @@ export default function StatusDashboard(p: Props) {
   const { status, events } = p
   const ratesRef = useRef<RateSample>({})
 
+  // ── KPI aggregates for the stat blocks ──────────────────────
+  // ⚡ Bolt Optimization: Memoized expensive array operations to avoid redundant
+  // O(n) calculations on every render (e.g., when 'busy' state changes).
+  const { rates, activeEp, totRx, totTx, onlineTun, enabledLists, okLists } = useMemo(() => {
+    if (!status || !status.summary) {
+      return { rates: {}, activeEp: undefined, totRx: 0, totTx: 0, onlineTun: 0, enabledLists: [], okLists: 0 }
+    }
+
+    const s = status.summary
+    const eps = status.endpoints || []
+    const lists = status.lists || []
+
+    const now = Date.now()
+    const rts: Record<string, { rx: number; tx: number }> = {}
+    eps.forEach((e) => { rts[e.iface] = ratesFor(e, now, ratesRef.current) })
+
+    const enLists = lists.filter((l) => l.enabled)
+
+    return {
+      rates: rts,
+      activeEp: eps.find((e) => s.state === 'vpn:' + e.iface),
+      totRx: eps.reduce((a, e) => a + (rts[e.iface]?.rx || 0), 0),
+      totTx: eps.reduce((a, e) => a + (rts[e.iface]?.tx || 0), 0),
+      onlineTun: eps.filter((e) => e.present).length,
+      enabledLists: enLists,
+      okLists: enLists.filter((l) => l.ok).length,
+    }
+  }, [status])
+
   if (!status || !status.summary) {
     return (
       <Card>
@@ -77,24 +106,12 @@ export default function StatusDashboard(p: Props) {
   }
 
   const s = status.summary
-  const now = Date.now()
-  const eps = status.endpoints || []
-  const rates: Record<string, { rx: number; tx: number }> = {}
-  eps.forEach((e) => { rates[e.iface] = ratesFor(e, now, ratesRef.current) })
-
   const overall = status.overall || 'FAIL'
   const path = pathLabel(s.state || '')
   const HeroIcon = stateIcon(s.state || '')
   const isOn = /^vpn:/.test(s.state) || s.state === 'zapret' || s.state === 'killswitch'
-
-  // ── KPI aggregates for the stat blocks ──────────────────────
-  const activeEp = eps.find((e) => s.state === 'vpn:' + e.iface)
-  const totRx = eps.reduce((a, e) => a + (rates[e.iface]?.rx || 0), 0)
-  const totTx = eps.reduce((a, e) => a + (rates[e.iface]?.tx || 0), 0)
-  const onlineTun = eps.filter((e) => e.present).length
+  const eps = status.endpoints || []
   const lists = status.lists || []
-  const enabledLists = lists.filter((l) => l.enabled)
-  const okLists = enabledLists.filter((l) => l.ok).length
 
   async function run(action: string, confirmMsg?: string, toast?: string) {
     if (confirmMsg && !window.confirm(confirmMsg)) return
