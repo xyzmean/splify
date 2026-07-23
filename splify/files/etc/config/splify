@@ -37,12 +37,17 @@ config splify 'global'
 
 # one section per failover tunnel. iface = an existing amneziawg/wireguard
 # interface you created normally in LuCI. Lowest priority number wins.
-config endpoint
-	option iface 'wg0'
-	option priority '1'
+#
+# EXAMPLE (kept commented so a fresh install ships NO phantom endpoint whose
+# iface doesn't exist in /etc/config/network — easyinstall registers the real
+# warp0 it creates; uncomment and create the iface in Network → Interfaces to
+# add a manual one).
+#config endpoint
+#	option iface 'wg0'
+#	option priority '1'
 	# type: транспорт туннеля. wg = WireGuard/AmneziaWG (работает).
 	#       singbox = sing-box (VLESS/Hysteria) — пока заглушка, в планах.
-	option type 'wg'
+#	option type 'wg'
 
 # per-device override (optional): pin a LAN host to vpn or direct
 #config device

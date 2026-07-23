@@ -140,6 +140,19 @@ install_awg() {
       err "Не удалось скачать установщик AmneziaWG (нет WARP без него)."
     fi
   fi
+  # Load the kernel module NOW. awg-install.sh installs the kmod package but
+  # never calls modprobe, and OpenWrt's /etc/init.d/kmod only loads modules at
+  # boot — so on a fresh install the module is on disk but not in the kernel,
+  # `ifup warp0` silently fails (no handshake → looks dead → the firewall-zone
+  # step "hangs"), and the operator must reboot. modprobe pulls amneziawg + all
+  # its deps into the running kernel right away; it's a no-op if already loaded,
+  # so this also covers a pre-installed-but-unloaded kmod. Verified on OpenWrt
+  # 25.12 (kmod-amneziawg 6.12.87): handshakes pass in the same session, no reboot.
+  if ! lsmod 2>/dev/null | grep -q '^amneziawg '; then
+    modprobe amneziawg 2>/dev/null \
+      || insmod "/lib/modules/$(uname -r)/amneziawg.ko" 2>/dev/null \
+      || warn "amneziawg: не удалось загрузить kmod — может потребоваться перезагрузка."
+  fi
   # `awg` binary comes from amneziawg-tools (pulled by the installer above).
   command -v awg >/dev/null 2>&1 || command -v wg >/dev/null 2>&1 \
     || err "не найден awg/wg — невозможно сгенерировать ключи WARP."
@@ -291,12 +304,32 @@ create_warp_iface() {
 
 # ──────────────────────────── 6. register endpoint in splify ────────────────
 register_in_splify() {
+  # Drop phantom endpoints: any endpoint section whose iface does NOT exist in
+  # /etc/config/network. The package's default config used to ship a live
+  # `config endpoint iface wg0` example, so a fresh install paired it with the
+  # warp0 this script adds — two endpoints in the list, but wg0 has no real
+  # interface (failover keeps probing a device that never comes up). Re-running
+  # this also cleans up already-broken installs. Iterate with a manual counter
+  # because deleting @endpoint[i] shifts the rest down (don't advance i on delete).
+  _ei=0
+  while [ -n "$(uci -q get "splify.@endpoint[$_ei]" 2>/dev/null)" ]; do
+    _ei_if="$(uci -q get "splify.@endpoint[$_ei].iface" 2>/dev/null)"
+    if [ -n "$_ei_if" ] && [ -z "$(uci -q get "network.$_ei_if" 2>/dev/null)" ]; then
+      say "Удаляю фантомный endpoint $_ei_if (нет такого интерфейса в network)."
+      uci -q delete "splify.@endpoint[$_ei]" || true
+    else
+      _ei=$((_ei + 1))
+    fi
+  done
+  uci commit splify
+
   # Add a `config endpoint` section pointing at warp0, if none exists yet.
   if grep -q "option iface '$WARP_IFACE'" /etc/config/splify 2>/dev/null; then
     say "endpoint $WARP_IFACE уже зарегистрирован в splify."
   else
     say "Регистрирую $WARP_IFACE как endpoint splify (приоритет 1)…"
-    # Append via a heredoc to /etc/config/splify — same shape as the default wg0.
+    # Append via a heredoc to /etc/config/splify — a fresh endpoint section
+    # (the package's default example is commented out now, so warp0 is the only one).
     cat >>/etc/config/splify <<EOF
 
 config endpoint
