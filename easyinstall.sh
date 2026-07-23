@@ -43,7 +43,9 @@ CF_CLIENT_VER="a-6.3-1922"
 # CF Worker on *.workers.dev hits Cloudflare error 1015 (rate-limit on shared
 # egress IP), while Vercel's AWS egress does not. Empty = try direct.
 # The proxy prefixes /v0a1922 itself, so WORKER_URL requests use short paths.
-WORKER_URL="${WORKER_URL:-}"
+# Default points at the project's public Vercel deploy (xyzmean/wgcli); override
+# with your own WORKER_URL env to use a private proxy.
+WORKER_URL="${WORKER_URL:-https://wgcli.vercel.app}"
 # WARP UDP endpoint for the tunnel itself. AWG obfuscation on the handshake is
 # what makes it reachable where plain WireGuard is DPI-blocked. 162.159.195.1 is
 # a stable anycast WARP ingress; :500 is a widely-open port.
@@ -311,12 +313,34 @@ EOF
   /etc/init.d/splify restart 2>/dev/null || true
 }
 
+# ──────────────────────────── 7. firewall zone ──────────────────────────────
+# splify owns routing (marks + table 200) but NOT the firewall — yet fw4 still
+# runs every LAN->tunnel packet through the firewall and REJECTs it unless the
+# tunnel iface is in a zone (with masq + lan<->zone + zone->wan forwarding).
+# Without this the tunnel "looks dead". splify-firewall fix creates that zone
+# idempotently, modelling it on a known-good AmneziaWG zone (accept + masq +
+# mtu_fix). It refuses to touch shared WAN/LAN zones, so it's safe.
+setup_firewall() {
+  if [ ! -x /usr/local/sbin/splify-firewall ]; then
+    warn "splify-firewall не найден — создайте зону для $WARP_IFACE вручную (masq + lan→зона)."
+    return 0
+  fi
+  say "Создаю firewall-зону для $WARP_IFACE…"
+  if /usr/local/sbin/splify-firewall check "$WARP_IFACE" >/dev/null 2>&1; then
+    say "Firewall-зона для $WARP_IFACE уже настроена."
+  else
+    /usr/local/sbin/splify-firewall fix "$WARP_IFACE" \
+      || warn "splify-firewall fix не удался — проверьте зону для $WARP_IFACE в Сеть → Firewall."
+  fi
+}
+
 # ──────────────────────────── main ──────────────────────────────────────────
 install_splify
 install_awg
 register_warp
 create_warp_iface
 register_in_splify
+setup_firewall
 
 say "Готово! Настроен обфусцированный WARP-туннель $WARP_IFACE + splify routing."
 printf '  • Туннель:   %s (AmneziaWG + WARP, endpoint %s)\n' "$WARP_IFACE" "$WARP_EP"
