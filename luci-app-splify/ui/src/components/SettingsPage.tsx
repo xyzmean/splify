@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
 import { notify } from '@/lib/notify'
+import { t } from '@/lib/i18n'
 import {
   Settings2, ListChecks, Network, ShieldCheck, Globe, Activity, Save, Check as CheckIcon,
   Plus, X as XIcon, Router, MonitorSmartphone, Loader2,
@@ -43,9 +44,10 @@ interface DeviceRow { sid: string; ip: string; mode: string; isNew?: boolean }
 
 const newId = () => '_new_' + Math.random().toString(36).slice(2)
 
-function Switch({ on, onClick, disabled }: { on: boolean; onClick: () => void; disabled?: boolean }) {
+function Switch({ on, onClick, disabled, 'aria-label': ariaLabel }: { on: boolean; onClick: () => void; disabled?: boolean; 'aria-label'?: string }) {
   return (
     <button type="button" onClick={onClick} disabled={disabled}
+      role="switch" aria-checked={on} aria-label={ariaLabel}
       className={cn('relative h-6 w-11 shrink-0 rounded-full transition disabled:opacity-50', on ? 'bg-success' : 'bg-muted-foreground/30')}>
       <span className={cn('absolute left-0.5 top-0.5 size-5 rounded-full bg-white transition-transform', on && 'translate-x-5')} />
     </button>
@@ -111,10 +113,11 @@ function ListEditor({ values, onChange, placeholder }: { values: string[]; onCha
               }} />
             {isLast
               ? <Button type="button" size="icon" variant="secondary" className="bg-success text-white hover:bg-success/90"
+                  aria-label={t('Add')} title={t('Add')}
                   onClick={(e) => { const input = (e.currentTarget.previousSibling as HTMLInputElement); if (input?.value.trim()) { add(input.value); input.value = '' } }}>
                   <Plus className="size-4" />
                 </Button>
-              : <Button type="button" size="icon" variant="destructive" onClick={() => remove(i)}>
+              : <Button type="button" size="icon" variant="destructive" onClick={() => remove(i)} aria-label={t('Delete')} title={t('Delete')}>
                   <XIcon className="size-4" />
                 </Button>}
           </div>
@@ -335,7 +338,7 @@ export default function SettingsPage() {
                     <div className="text-sm font-medium">Блокировать трафик, если туннель недоступен</div>
                     <div className="text-xs text-muted-foreground">Когда все туннели недоступны — блокировать VPN-трафик, а не выпускать его в WAN.</div>
                   </div>
-                  <Switch on={general.killswitch} onClick={() => mark(setGeneral)({ ...general, killswitch: !general.killswitch })} />
+                  <Switch on={general.killswitch} onClick={() => mark(setGeneral)({ ...general, killswitch: !general.killswitch })} aria-label={t('Блокировать трафик, если туннель недоступен')} />
                 </div>
               </Section>
 
@@ -371,7 +374,7 @@ export default function SettingsPage() {
           {tab === 'lists' && (
             <>
               <Section title="ipsum — список IP для VPN" icon={ListChecks}
-                right={<Switch on={lists.ipsum_enabled} onClick={() => mark(setLists)({ ...lists, ipsum_enabled: !lists.ipsum_enabled })} />}>
+                right={<Switch on={lists.ipsum_enabled} onClick={() => mark(setLists)({ ...lists, ipsum_enabled: !lists.ipsum_enabled })} aria-label={t('ipsum — список IP для VPN')} />}>
                 <Field label="URL списка ipsum">
                   <input className={field} disabled={!lists.ipsum_enabled} value={lists.ipsum_url}
                     onChange={(e) => mark(setLists)({ ...lists, ipsum_url: e.target.value })} />
@@ -379,7 +382,7 @@ export default function SettingsPage() {
               </Section>
 
               <Section title="ru/cn — список напрямую" icon={ListChecks}
-                right={<Switch on={lists.ru_enabled} onClick={() => mark(setLists)({ ...lists, ru_enabled: !lists.ru_enabled })} />}>
+                right={<Switch on={lists.ru_enabled} onClick={() => mark(setLists)({ ...lists, ru_enabled: !lists.ru_enabled })} aria-label={t('ru/cn — список напрямую')} />}>
                 <Field label="URL списка ru/cn">
                   <input className={field} disabled={!lists.ru_enabled} value={lists.ru_url}
                     onChange={(e) => mark(setLists)({ ...lists, ru_url: e.target.value })} />
@@ -398,7 +401,7 @@ export default function SettingsPage() {
               </Section>
 
               <Section title="Обход DPI" icon={ShieldCheck}
-                right={<Switch on={lists.zapret_enabled} onClick={() => mark(setLists)({ ...lists, zapret_enabled: !lists.zapret_enabled })} />}>
+                right={<Switch on={lists.zapret_enabled} onClick={() => mark(setLists)({ ...lists, zapret_enabled: !lists.zapret_enabled })} aria-label={t('Обход DPI')} />}>
                 <p className="text-xs text-muted-foreground">Использовать zapret. Пропускается автоматически, если zapret не установлен.</p>
               </Section>
             </>
@@ -460,7 +463,7 @@ export default function SettingsPage() {
                           </select>
                         </TableCell>
                         <TableCell>
-                          <Button size="icon" variant="destructive" onClick={() => mark(setEndpoints)(endpoints.filter((_, j) => j !== i))}>
+                          <Button size="icon" variant="destructive" onClick={() => mark(setEndpoints)(endpoints.filter((_, j) => j !== i))} aria-label={t('Delete')} title={t('Delete')}>
                             <XIcon className="size-4" />
                           </Button>
                         </TableCell>
@@ -498,7 +501,7 @@ export default function SettingsPage() {
                           </select>
                         </TableCell>
                         <TableCell>
-                          <Button size="icon" variant="destructive" onClick={() => mark(setDevices)(devices.filter((_, j) => j !== i))}>
+                          <Button size="icon" variant="destructive" onClick={() => mark(setDevices)(devices.filter((_, j) => j !== i))} aria-label={t('Delete')} title={t('Delete')}>
                             <XIcon className="size-4" />
                           </Button>
                         </TableCell>
