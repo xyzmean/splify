@@ -464,20 +464,19 @@ function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: 
     : { dest: t('Direct (WAN)'), sub: t('via WAN'), tone: 'success' }
 
   // ── Карточка ③ «Прочий трафик» ──
-  // full + VPN → через туннель; blocklist/split → напрямую; падение VPN → zapret.
+  // full + VPN → через туннель. Иначе трафик выходит через WAN, но, в отличие
+  // от RU/нейтрального (карточка ②, который лежит в nozapret), «прочий» НЕ в
+  // nozapret — поэтому zapret обрабатывает его (DPI-обход). Без zapret —
+  // действительно напрямую.
   let card3: { dest: React.ReactNode; sub?: React.ReactNode; tone: Tone }
   if (killed) {
     card3 = { dest: t('Blocked — kill switch'), tone: 'destructive' }
   } else if (mode === 'full' && isVpn) {
     card3 = { dest: `#${activeEp!.priority || '?'} ${activeEp!.iface}`, sub: t('via VPN'), tone: 'success' }
-  } else if (isZapretState) {
-    card3 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'warning' }
-  } else if (mode === 'blocklist' || mode === 'split') {
-    card3 = { dest: t('Direct (WAN)'), sub: t('via WAN'), tone: 'neutral' }
-  } else if (zapretInstalled) {
+  } else if (zapretInstalled || isZapretState) {
     card3 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'warning' }
   } else {
-    card3 = { dest: t('Open (WAN)'), sub: t('Direct (WAN)'), tone: 'neutral' }
+    card3 = { dest: t('Direct (WAN)'), sub: t('via WAN'), tone: 'neutral' }
   }
 
   const cards = [
