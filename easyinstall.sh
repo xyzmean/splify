@@ -247,42 +247,43 @@ create_warp_iface() {
 
   say "Создаю интерфейс $WARP_IFACE (AmneziaWG + WARP)…"
   uci -q set "network.$WARP_IFACE=interface"
-  uci set "network.$WARP_IFACE.proto='amneziawg'"
-  uci set "network.$WARP_IFACE.private_key='$PRIV'"
+  uci set "network.$WARP_IFACE.proto=amneziawg"
+  uci set "network.$WARP_IFACE.private_key=$PRIV"
   uci -q delete "network.$WARP_IFACE.addresses"
-  uci add_list "network.$WARP_IFACE.addresses='$WARP_V4'"
-  [ -n "$WARP_V6" ] && uci add_list "network.$WARP_IFACE.addresses='$WARP_V6'"
+  uci add_list "network.$WARP_IFACE.addresses=$WARP_V4"
+  [ -n "$WARP_V6" ] && uci add_list "network.$WARP_IFACE.addresses=$WARP_V6"
   uci -q delete "network.$WARP_IFACE.dns"
-  uci add_list "network.$WARP_IFACE.dns='1.1.1.1'"
-  uci set "network.$WARP_IFACE.mtu='1280'"
+  uci add_list "network.$WARP_IFACE.dns=1.1.1.1"
+  uci set "network.$WARP_IFACE.mtu=1280"
   # splify owns routing (marks + table 200); never let netifd pull AllowedIPs
   # into the main table — matches the wg-import default.
-  uci set "network.$WARP_IFACE.route_allowed_ips='0'"
+  uci set "network.$WARP_IFACE.route_allowed_ips=0"
 
   # ── AWG obfuscation knobs (lowercase option names, as splify-ctl emits) ──
-  uci set "network.$WARP_IFACE.awg_jc='$AWG_JC'"
-  uci set "network.$WARP_IFACE.awg_jmin='$AWG_JMIN'"
-  uci set "network.$WARP_IFACE.awg_jmax='$AWG_JMAX'"
-  uci set "network.$WARP_IFACE.awg_h1='$AWG_H1'"
-  uci set "network.$WARP_IFACE.awg_h2='$AWG_H2'"
-  uci set "network.$WARP_IFACE.awg_h3='$AWG_H3'"
-  uci set "network.$WARP_IFACE.awg_h4='$AWG_H4'"
-  uci set "network.$WARP_IFACE.awg_s1='$AWG_S1'"
-  uci set "network.$WARP_IFACE.awg_s2='$AWG_S2'"
+  uci set "network.$WARP_IFACE.awg_jc=$AWG_JC"
+  uci set "network.$WARP_IFACE.awg_jmin=$AWG_JMIN"
+  uci set "network.$WARP_IFACE.awg_jmax=$AWG_JMAX"
+  uci set "network.$WARP_IFACE.awg_h1=$AWG_H1"
+  uci set "network.$WARP_IFACE.awg_h2=$AWG_H2"
+  uci set "network.$WARP_IFACE.awg_h3=$AWG_H3"
+  uci set "network.$WARP_IFACE.awg_h4=$AWG_H4"
+  uci set "network.$WARP_IFACE.awg_s1=$AWG_S1"
+  uci set "network.$WARP_IFACE.awg_s2=$AWG_S2"
   # I1 is huge — read from the staging file, not a heredoc-in-uci.
-  uci set "network.$WARP_IFACE.awg_i1='$(cat "$TMP/i1")'"
+  _i1="$(cat "$TMP/i1")"
+  uci set "network.$WARP_IFACE.awg_i1=$_i1"
 
   # ── peer (the WARP server) — single section, replace any prior ──
   _pt="amneziawg_$WARP_IFACE"
   while [ -n "$(uci -q get "network.@${_pt}[0]")" ]; do uci -q delete "network.@${_pt}[0]"; done
   uci add network "$_pt" >/dev/null
-  uci set "network.@${_pt}[-1].public_key='$WARP_PEER'"
+  uci set "network.@${_pt}[-1].public_key=$WARP_PEER"
   uci -q delete "network.@${_pt}[-1].allowed_ips"
-  uci add_list "network.@${_pt}[-1].allowed_ips='0.0.0.0/0'"
-  uci add_list "network.@${_pt}[-1].allowed_ips='::/0'"
-  uci set "network.@${_pt}[-1].endpoint_host='${WARP_EP%:*}'"
-  uci set "network.@${_pt}[-1].endpoint_port='${WARP_EP##*:}'"
-  uci set "network.@${_pt}[-1].persistent_keepalive='25'"
+  uci add_list "network.@${_pt}[-1].allowed_ips=0.0.0.0/0"
+  uci add_list "network.@${_pt}[-1].allowed_ips=::/0"
+  uci set "network.@${_pt}[-1].endpoint_host=${WARP_EP%:*}"
+  uci set "network.@${_pt}[-1].endpoint_port=${WARP_EP##*:}"
+  uci set "network.@${_pt}[-1].persistent_keepalive=25"
 
   uci commit network
   ifup "$WARP_IFACE" >/dev/null 2>&1 || warn "ifup $WARP_IFACE не удался — проверьте в LuCI."
