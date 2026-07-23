@@ -191,28 +191,27 @@ export default function StatusDashboard(p: Props) {
       </Card>
 
       {/* ── Toolbar (carded, so it reads as one control block) ── */}
-      <Card>
-        <CardContent className="flex flex-wrap items-center gap-2 p-3">
-          <Button size="sm" variant="outline" disabled={!!p.busy} onClick={p.refresh}>
-            <RefreshCw className="size-4" />{t('Refresh')}
-          </Button>
-          <ActBtn a="apply" label={t('Apply')} icon={Play} variant="default" toast={t('Configuration applied')} />
-          <ActBtn a="restart" label={t('Restart')} icon={RotateCw} variant="secondary" toast={t('Service restarted')} />
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card/50 p-2 shadow-sm">
+        <Button size="sm" variant="outline" className="border-dashed bg-transparent hover:bg-muted" disabled={!!p.busy} onClick={p.refresh}>
+          <RefreshCw className="size-4" />{t('Refresh')}
+        </Button>
+        <ActBtn a="apply" label={t('Apply')} icon={Play} variant="default" className="shadow-sm" toast={t('Configuration applied')} />
+        <ActBtn a="restart" label={t('Restart')} icon={RotateCw} variant="secondary" className="shadow-sm" toast={t('Service restarted')} />
 
-          <div className="flex items-center gap-1 rounded-lg border bg-muted/40 px-1 py-1">
-            <span className="px-1.5 text-xs text-muted-foreground">{t('Lists')}</span>
-            <ActBtn a="update_ipsum" label="ipsum" icon={Download} variant="ghost" toast={t('ipsum updated')} />
-            <ActBtn a="update_ru" label="ru/cn" icon={Download} variant="ghost" toast={t('ru/cn updated')} />
-            <ActBtn a="update_domains" label="домены" icon={Download} variant="ghost" toast={t('domains updated')} />
-          </div>
+        <div className="ml-2 flex items-center gap-1 rounded-lg bg-muted/50 p-1">
+          <span className="px-2 text-xs font-medium text-muted-foreground">{t('Lists')}</span>
+          <ActBtn a="update_ipsum" label="ipsum" icon={Download} variant="ghost" className="h-7 px-2 text-xs" toast={t('ipsum updated')} />
+          <ActBtn a="update_ru" label="ru/cn" icon={Download} variant="ghost" className="h-7 px-2 text-xs" toast={t('ru/cn updated')} />
+          <ActBtn a="update_domains" label="домены" icon={Download} variant="ghost" className="h-7 px-2 text-xs" toast={t('domains updated')} />
+        </div>
 
-          <div className="flex-1" />
+        <div className="flex-1" />
 
-          <ActBtn a="disable" label={t('Emergency disable')} icon={Power} variant="destructive"
-            confirm={t('Disable split routing now? All LAN traffic will exit via WAN until the service re-enables it (or you stop it).')}
-            toast={t('Split routing disabled')} />
-        </CardContent>
-      </Card>
+        <ActBtn a="disable" label={t('Emergency disable')} icon={Power} variant="destructive"
+          className="shadow-sm"
+          confirm={t('Disable split routing now? All LAN traffic will exit via WAN until the service re-enables it (or you stop it).')}
+          toast={t('Split routing disabled')} />
+      </div>
 
       {/* ── First-run helper ─────────────────────────────────── */}
       {firstRun && (
@@ -389,18 +388,18 @@ function Hint({ children, className }: { children: React.ReactNode; className?: 
 type Tone = 'success' | 'warning' | 'destructive' | 'neutral'
 
 const TONE: Record<Tone, { box: string; label: string }> = {
-  success:    { box: 'border-success bg-success/10 ring-2 ring-success/30',                    label: 'text-success' },
-  warning:    { box: 'border-warning bg-warning/10 ring-1 ring-warning/30',                    label: 'text-warning' },
-  destructive:{ box: 'border-destructive bg-destructive/10 ring-2 ring-destructive/30',        label: 'text-destructive' },
-  neutral:    { box: 'border-border bg-muted/40',                                              label: 'text-muted-foreground' },
+  success:    { box: 'bg-success/10 border-success/30 text-success',                    label: 'text-success' },
+  warning:    { box: 'bg-warning/10 border-warning/30 text-warning',                    label: 'text-warning' },
+  destructive:{ box: 'bg-destructive/10 border-destructive/30 text-destructive',        label: 'text-destructive' },
+  neutral:    { box: 'bg-muted border-border text-muted-foreground',                    label: 'text-muted-foreground' },
 }
 
 function DestPill({ label, sub, tone }: { label: React.ReactNode; sub?: React.ReactNode; tone: Tone }) {
   const tn = TONE[tone]
   return (
-    <div className={cn('flex flex-col items-center justify-center rounded-lg px-3 py-2 text-center', tn.box)}>
-      <div className={cn('text-sm font-semibold', tn.label)}>{label}</div>
-      {sub != null && sub !== '' && <div className="mt-0.5 text-xs text-muted-foreground">{sub}</div>}
+    <div className={cn('flex flex-col items-center justify-center rounded-lg border px-4 py-2.5 text-center transition-colors', tn.box)}>
+      <div className="text-sm font-semibold">{label}</div>
+      {sub != null && sub !== '' && <div className="mt-1 text-[11px] opacity-80">{sub}</div>}
     </div>
   )
 }
@@ -409,9 +408,11 @@ function PathCard({ title, dest, sub, tone }: {
   title: string; dest: React.ReactNode; sub?: React.ReactNode; tone: Tone
 }) {
   return (
-    <div className="flex flex-col items-center gap-1.5 rounded-lg border bg-card/40 p-3">
-      <div className="text-center text-xs font-medium text-muted-foreground">{title}</div>
-      <ArrowRight className="size-4 rotate-90 text-muted-foreground/60" />
+    <div className="flex flex-col justify-between gap-3 rounded-xl border bg-card p-4 shadow-sm">
+      <div className="flex items-center justify-between text-xs font-medium text-muted-foreground">
+        <span>{title}</span>
+        <ArrowRight className="size-4 text-muted-foreground/50" />
+      </div>
       <DestPill label={dest} sub={sub} tone={tone} />
     </div>
   )
