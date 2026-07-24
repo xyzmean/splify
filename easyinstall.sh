@@ -182,7 +182,7 @@ find_best_endpoint() {
   _candidates=$(awk -v prefixes="$_prefixes" 'BEGIN {
       srand();
       n = split(prefixes, arr, " ");
-      for (i=0; i<20; i++) {
+      for (i=0; i<100; i++) {
           idx = int(rand() * n) + 1;
           last = int(rand() * 256);
           print arr[idx] last;
@@ -214,7 +214,8 @@ find_best_endpoint() {
     say "Выбран эндпоинт: $_best_ip (colo: $_best_colo, ping: ${_best_ping}ms)"
     WARP_EP="${_best_ip}:4500"
   else
-    warn "Не удалось подобрать эндпоинт. Используем стандартный."
+    warn "Не удалось найти подходящий эндпоинт среди 100 проверенных."
+    warn "Часть ресурсов может не работать! Устанавливаем эндпоинт по умолчанию."
     WARP_EP="engage.cloudflareclient.com:4500"
   fi
 }
