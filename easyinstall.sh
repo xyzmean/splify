@@ -175,6 +175,50 @@ reg_url() {
   fi
 }
 
+find_best_endpoint() {
+  say "Подбираем лучший WARP эндпоинт (исключая DME)…"
+  _prefixes="188.114.96. 188.114.97. 188.114.98. 188.114.99. 162.159.192. 162.159.193. 162.159.195. 8.34.146. 8.39.214. 8.39.204. 8.6.112. 8.35.211. 8.39.125. 8.47.69."
+  
+  _candidates=$(awk -v prefixes="$_prefixes" 'BEGIN {
+      srand();
+      n = split(prefixes, arr, " ");
+      for (i=0; i<20; i++) {
+          idx = int(rand() * n) + 1;
+          last = int(rand() * 256);
+          print arr[idx] last;
+      }
+  }')
+  
+  _pings="$TMP/warp_pings"
+  for ip in $_candidates; do
+    (
+      if trace_data=$(curl -s --connect-timeout 2 -H "Host: trace.cloudflare.com" "http://${ip}/cdn-cgi/trace"); then
+        colo=$(echo "$trace_data" | awk -F'=' '$1=="colo"{print $2}')
+        case "$colo" in
+          DME) exit 0 ;;
+          "")  exit 0 ;;
+        esac
+        # get ping
+        ping_time=$(ping -c 1 -W 1 "$ip" | awk -F'/' 'END {print $4}')
+        [ -n "$ping_time" ] && echo "$ping_time $ip $colo" >> "$_pings"
+      fi
+    ) &
+  done
+  wait
+  
+  if [ -s "$_pings" ]; then
+    _best=$(sort -n "$_pings" | head -n 1)
+    _best_ping=$(echo "$_best" | awk '{print $1}')
+    _best_ip=$(echo "$_best" | awk '{print $2}')
+    _best_colo=$(echo "$_best" | awk '{print $3}')
+    say "Выбран эндпоинт: $_best_ip (colo: $_best_colo, ping: ${_best_ping}ms)"
+    WARP_EP="${_best_ip}:4500"
+  else
+    warn "Не удалось подобрать эндпоинт. Используем стандартный."
+    WARP_EP="engage.cloudflareclient.com:4500"
+  fi
+}
+
 register_warp() {
   say "Регистрирую устройство Cloudflare WARP…"
   [ -n "$WORKER_URL" ] \
@@ -370,6 +414,8 @@ sleep 3
 install_awg
 sleep 3
 register_warp
+sleep 3
+find_best_endpoint
 sleep 3
 create_warp_iface
 sleep 3
