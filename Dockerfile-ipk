@@ -1,0 +1,67 @@
+# Build the splify .apk packages in the OpenWrt SDK.
+#
+# Both packages are PKGARCH:=all (pure shell + LuCI files, nothing compiles), so
+# any SDK arch yields identical .apk — we use x86_64.
+#
+# The slow part is unavoidable ONCE: a targeted `make package/<p>/compile` still
+# builds the runtime DEPENDS, and +kmod-nft-core drags in a full kernel build
+# (~15 min). The trick is to do that in a CACHE-STABLE layer, BEFORE our source
+# is copied, so it is keyed only on the SDK + this Dockerfile — not on our
+# scripts or the release version. With buildx gha cache the kernel/deps are built
+# once ever; every release after restores that layer and only recompiles our two
+# data-only packages (seconds).
+ARG SDK=ghcr.io/openwrt/sdk:x86_64-23.05.5
+FROM ${SDK}
+
+WORKDIR /builder
+
+# External feeds + the heavy dependency build. Cache-stable: nothing here depends
+# on our repo source or the release version, so this layer (kernel + kmods +
+# nftables/curl/dnsmasq/ip-full/luci-base) is built once and reused.
+RUN ./scripts/feeds update luci packages base \
+ && ./scripts/feeds install nftables curl dnsmasq-full ip-full kmod-nft-core luci-base \
+ && make defconfig \
+ && make -j"$(nproc)" V=s \
+        package/nftables/compile \
+        package/curl/compile \
+        package/dnsmasq/compile \
+        package/iproute2/compile \
+        package/luci-base/compile
+
+# Our local feed — changes here (every fix) only invalidate the cheap layers
+# below; the dependency/kernel layer above stays cached.
+COPY --chown=buildbot:buildbot splify          feed/splify
+COPY --chown=buildbot:buildbot luci-app-splify feed/luci-app-splify
+
+# Drop the freshly-built UI bundles (produced by `npm run build` in CI) into the
+# feed's htdocs. The committed bundles were removed from git (git-ignored) to
+# force a single source of truth: src/ -> vite build -> here. build-id.txt is
+# stamped below; favicon.svg/icons.svg come from ui/public via the vite build.
+# This layer is cheap (small text files) and keyed on the bundle content.
+COPY --chown=buildbot:buildbot luci-app-splify/ui/dist/splify-index.js \
+                          luci-app-splify/ui/dist/splify-settings.js \
+                          luci-app-splify/ui/dist/splify-x.js \
+                          luci-app-splify/ui/dist/splify-index.css \
+                          luci-app-splify/ui/dist/favicon.svg \
+                          luci-app-splify/ui/dist/icons.svg \
+     feed/luci-app-splify/htdocs/luci-static/resources/splify/
+
+RUN echo "src-link splify /builder/feed" >> feeds.conf.default \
+ && ./scripts/feeds update splify \
+ && ./scripts/feeds install -p splify splify luci-app-splify
+
+# Stamp the release version and build only our two packages. Deps are already in
+# build_dir/staging_dir from the cached layer, so make skips them.
+# Cache-busting: the view loaders are STABLE shims that read build-id.txt with
+# cache:'no-store' at page load, so only two things carry the version — the
+# build-id file itself, and the ?v= on the chunk import INSIDE the bundles
+# (a bundle and its chunk must always be the same-release pair).
+ARG VERSION=0.0.0
+RUN sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=${VERSION}/" \
+        feed/splify/Makefile feed/luci-app-splify/Makefile \
+ && printf '%s\n' "${VERSION}" \
+        > feed/luci-app-splify/htdocs/luci-static/resources/splify/build-id.txt \
+ && sed -i -E "s/\?v=[0-9]+\.[0-9]+\.[0-9]+/?v=${VERSION}/g" \
+        feed/luci-app-splify/htdocs/luci-static/resources/splify/splify-index.js \
+        feed/luci-app-splify/htdocs/luci-static/resources/splify/splify-settings.js \
+ && make V=s package/splify/compile package/luci-app-splify/compile
