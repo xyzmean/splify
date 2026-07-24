@@ -75,14 +75,40 @@ err()  { printf '\033[1;31mОшибка:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ──────────────────────────── 1. environment checks ────────────────────────
 [ "$(id -u)" = "0" ] || err "запустите от root."
-command -v apk   >/dev/null 2>&1 || err "нужен OpenWrt 24.10+/25.12+ с менеджером apk."
+
+PKG_MANAGER=""
+PKG_EXT=""
+if command -v apk >/dev/null 2>&1; then
+    PKG_MANAGER="apk"
+    PKG_EXT="apk"
+elif command -v opkg >/dev/null 2>&1; then
+    PKG_MANAGER="opkg"
+    PKG_EXT="ipk"
+else
+    err "не найден пакетный менеджер (apk/opkg). Нужен OpenWrt."
+fi
+
 command -v wget  >/dev/null 2>&1 || err "не найден wget."
+
+if [ "$PKG_MANAGER" = "opkg" ]; then
+    if ! opkg list-installed 2>/dev/null | grep -q "^nftables "; then
+        say "nftables не найден. Пробую установить…"
+        opkg update >/dev/null 2>&1 || true
+        opkg install nftables >/dev/null 2>&1 || warn "Не удалось установить nftables — splify-firewall может не работать."
+    fi
+fi
+
 # curl + jq are needed for WARP registration; install them if missing (they are
-# not part of a minimal OpenWrt image, but apk pulls them quickly).
+# not part of a minimal OpenWrt image, but the package manager pulls them quickly).
 for _dep in curl jq; do
   if ! command -v "$_dep" >/dev/null 2>&1; then
     say "Ставлю зависимость: $_dep…"
-    apk add "$_dep" >/dev/null 2>&1 || err "не удалось установить $_dep (apk add $_dep)."
+    if [ "$PKG_MANAGER" = "apk" ]; then
+        apk add "$_dep" >/dev/null 2>&1 || err "не удалось установить $_dep (apk add $_dep)."
+    else
+        opkg update >/dev/null 2>&1 || true
+        opkg install "$_dep" >/dev/null 2>&1 || err "не удалось установить $_dep (opkg install $_dep)."
+    fi
   fi
 done
 
@@ -97,8 +123,8 @@ install_splify() {
   wget -qO "$META" "$API" || err "не удалось получить данные релиза (нет интернета?)."
   # GitHub may serve JSON as one line; split on commas so each asset URL is on
   # its own line, otherwise a greedy sed grabs only the last URL.
-  URLS="$(tr ',' '\n' <"$META" | sed -n 's/.*"browser_download_url": *"\([^"]*\.apk\)".*/\1/p')"
-  [ -n "$URLS" ] || err "в последнем релизе нет .apk. Возможно, релиз ещё не собран."
+  URLS="$(tr ',' '\n' <"$META" | sed -n 's/.*"browser_download_url": *"\([^"]*\.'$PKG_EXT'\)".*/\1/p')"
+  [ -n "$URLS" ] || err "в последнем релизе нет .$PKG_EXT. Возможно, релиз ещё не собран."
 
   say "Скачиваю пакеты…"
   for u in $URLS; do
@@ -107,11 +133,15 @@ install_splify() {
     esac
   done
   for pkg in splify- luci-app-splify- luci-i18n-splify-ru-; do
-    ls "$TMP/$pkg"*.apk >/dev/null 2>&1 || err "в релизе не хватает пакета $pkg*.apk"
+    ls "$TMP/$pkg"*.$PKG_EXT >/dev/null 2>&1 || err "в релизе не хватает пакета $pkg*.$PKG_EXT"
   done
 
   say "Устанавливаю splify…"
-  apk add --allow-untrusted "$TMP"/*.apk || err "apk add не выполнился."
+  if [ "$PKG_MANAGER" = "apk" ]; then
+    apk add --allow-untrusted "$TMP"/*.$PKG_EXT || err "apk add не выполнился."
+  else
+    opkg install "$TMP"/*.$PKG_EXT || err "opkg install не выполнился."
+  fi
 
   rm -f /tmp/luci-indexcache* /tmp/luci-modulecache* 2>/dev/null || true
   /etc/init.d/rpcd reload 2>/dev/null || /etc/init.d/rpcd restart 2>/dev/null || true
@@ -124,7 +154,14 @@ install_splify() {
 
 # ──────────────────────────── 3. install AmneziaWG ──────────────────────────
 install_awg() {
-  if apk info -e kmod-amneziawg >/dev/null 2>&1; then
+  _awg_installed=0
+  if [ "$PKG_MANAGER" = "apk" ]; then
+    apk info -e kmod-amneziawg >/dev/null 2>&1 && _awg_installed=1
+  else
+    opkg list-installed 2>/dev/null | grep -q "^kmod-amneziawg " && _awg_installed=1
+  fi
+
+  if [ "$_awg_installed" = "1" ]; then
     say "AmneziaWG (kmod) уже установлен."
   else
     say "AmneziaWG не найден — устанавливаю поддержку…"
