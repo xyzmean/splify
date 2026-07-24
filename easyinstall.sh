@@ -227,19 +227,22 @@ find_best_endpoint() {
   }')
   
   _pings="$TMP/warp_pings"
+  _count=0
   for ip in $_candidates; do
     (
-      if trace_data=$(curl -s --connect-timeout 2 -H "Host: trace.cloudflare.com" "http://${ip}/cdn-cgi/trace"); then
+      if trace_data=$(curl -s --connect-timeout 2 -w "\n%{time_total}" -H "Host: trace.cloudflare.com" "http://${ip}/cdn-cgi/trace"); then
         colo=$(echo "$trace_data" | awk -F'=' '$1=="colo"{print $2}')
         case "$colo" in
           DME) exit 0 ;;
           "")  exit 0 ;;
         esac
-        # get ping
-        ping_time=$(ping -c 1 -W 1 "$ip" | awk -F'/' 'END {print $4}')
-        [ -n "$ping_time" ] && echo "$ping_time $ip $colo" >> "$_pings"
+        # get ping from curl (time_total is the last line), convert to ms
+        ping_ms=$(echo "$trace_data" | tail -n 1 | awk '{printf "%d", $1 * 1000}')
+        [ -n "$ping_ms" ] && echo "$ping_ms $ip $colo" >> "$_pings"
       fi
     ) &
+    _count=$((_count + 1))
+    [ $((_count % 20)) -eq 0 ] && wait
   done
   wait
   
