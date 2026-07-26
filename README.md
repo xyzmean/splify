@@ -55,7 +55,9 @@ wget -O - https://raw.githubusercontent.com/xyzmean/splify/main/install.sh | sh
 
 ## 🗑️ Удаление
 
-Если вы решите полностью удалить пакет с роутера:
+Полностью убрать splify (пакеты splify + AmneziaWG, интерфейс `warp0`, firewall-зону, конфигурацию и runtime-состояние) — роутер вернётся к виду «как до установки»:
 ```sh
 wget -O - https://raw.githubusercontent.com/xyzmean/splify/main/uninstall.sh | sh
 ```
+Свои собственные туннели, созданные вручную в **Сеть → Интерфейсы**, скрипт не трогает.
+
