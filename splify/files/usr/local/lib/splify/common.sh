@@ -344,11 +344,18 @@ _singbox_instance_ctl() {  # iface start|stop
 # sufficient and safer than a generic decoder loop under busybox awk, which
 # does NOT support strtonum() (verified: only gawk/mawk do, not the busybox
 # awk applet OpenWrt actually ships) — see the bats test proving %40/+ decode.
+#
+# ORDER MATTERS: the '+' -> space substitution (form-encoded space in the query
+# string) MUST run BEFORE %2B is decoded to a literal '+'. Otherwise the '+'
+# just produced from %2B gets clobbered back to a space, corrupting base64url
+# tokens (Reality pbk/sid, vless host/path, hysteria2 passwords) that
+# legitimately contain '+'. See the bats test (uri_unescape_plus) — it failed
+# before this reordering and passes after.
 uri_unescape() {
     sed \
         -e 's/%40/@/g' -e 's/%3[Aa]/:/g' -e 's/%2[Ff]/\//g' \
-        -e 's/%2[Bb]/+/g' -e 's/%3[Dd]/=/g' -e 's/%2[Cc]/,/g' \
-        -e 's/%20/ /g' -e 's/+/ /g'
+        -e 's/%3[Dd]/=/g' -e 's/%2[Cc]/,/g' -e 's/%20/ /g' \
+        -e 's/+/ /g' -e 's/%2[Bb]/+/g'
 }
 # $1 = query string (a=b&c=d, no leading '?'), $2 = param name -> prints
 # decoded value on stdout, or nothing if absent.

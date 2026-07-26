@@ -32,6 +32,11 @@ export default function WgPanel() {
   // so an in-flight reveal() needs this to notice the user switched ifaces.
   const ifaceRef = useRef(iface)
   useEffect(() => { ifaceRef.current = iface }, [iface])
+  // `revealed` is a single boolean shared across all ifaces; fillForm resets it
+  // on pick(), but not on the indirect setIface() from load() (e.g. after a
+  // save() reload). Reset it whenever the iface changes so a key shown on iface
+  // A is never rendered revealed on iface B's masked input.
+  useEffect(() => { setRevealed(false) }, [iface])
 
   const load = async () => {
     try {
