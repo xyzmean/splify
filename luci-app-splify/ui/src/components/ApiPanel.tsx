@@ -53,6 +53,10 @@ export default function ApiPanel() {
 
   async function connect() {
     if (!connJson.trim()) return
+    // Validate locally first so a malformed paste fails fast with a clear
+    // message, instead of a backend round-trip that just returns a generic 400.
+    try { JSON.parse(connJson.trim()) }
+    catch { notify('Вставьте корректный JSON подключения', 'warning'); return }
     setBusy('connect')
     try {
       const res = await rpc.connect(connJson.trim())
@@ -215,7 +219,7 @@ function OkBadge({ ok, children }: { ok: boolean; children: React.ReactNode }) {
 }
 function Switch({ on, onClick, disabled, 'aria-label': ariaLabel }: { on: boolean; onClick: () => void; disabled?: boolean; 'aria-label'?: string }) {
   return (
-    <button onClick={onClick} disabled={disabled} aria-label={ariaLabel} role="switch" aria-checked={on}
+    <button type="button" onClick={onClick} disabled={disabled} aria-label={ariaLabel} role="switch" aria-checked={on}
       className={cn('relative h-6 w-11 rounded-full transition disabled:opacity-50', on ? 'bg-success' : 'bg-muted-foreground/30')}>
       <span className={cn('absolute left-0.5 top-0.5 size-5 rounded-full bg-white transition-transform', on && 'translate-x-5')} />
     </button>
