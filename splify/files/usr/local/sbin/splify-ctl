@@ -34,6 +34,12 @@
 # No `set -u`: OpenWrt's /lib/functions.sh config_* helpers are not nounset-safe
 # (see common.sh) — adding it would crash on the first config_get.
 
+# wg-import / wg-set build temp files holding a full .conf (private_key,
+# preshared_key) or a PSK map. mktemp honours this, and the PID-named fallback
+# (when mktemp is absent) is created with these perms — owner-only, so the keys
+# are never world-readable even briefly.
+umask 077
+
 SNAP_VERSION=1
 
 . /usr/share/libubox/jshn.sh
@@ -270,6 +276,10 @@ import_wg_iface() {  # iface
     if [ "$_t" = array ]; then
         _proto="$(g "network.$_if.proto")"; _pt="${_proto}_$_if"
         _pskmap="$(mktemp 2>/dev/null || echo /tmp/splify-psk.$$)"
+        # The PSK map holds live preshared keys (secrets) — wipe it on ANY exit
+        # (signal, die_json, or normal script end) not just the happy path.
+        # EXIT fires after `return 0` when the whole process ends.
+        trap 'rm -f "$_pskmap" 2>/dev/null' INT TERM HUP EXIT
         : > "$_pskmap"
         _j=0
         while [ -n "$(g "network.@${_pt}[$_j]")" ]; do
@@ -456,6 +466,9 @@ cmd_wg_import() {
     _doc="$(cat)"
     case "$_doc" in *'[Peer]'*) : ;; *) die_json "no [Peer] section in config" 2 ;; esac
     _tmp="$(mktemp 2>/dev/null || printf '/tmp/splify-wgimport.%s' "$$")"
+    # _tmp holds a full WG/AWG .conf (private_key, preshared_key) — wipe it on
+    # any exit (die_json mid-loop, signal, normal end), not just the rm below.
+    trap 'rm -f "$_tmp" 2>/dev/null' INT TERM HUP EXIT
     printf '%s\n' "$_doc" > "$_tmp"
 
     # wipe existing peers AND obfuscation knobs; the new .conf re-adds whatever it
@@ -504,8 +517,19 @@ cmd_wg_import() {
                     uci -q delete "network.@${_pt}[-1].allowed_ips"
                     for _ip in $(printf '%s' "$_val" | tr ',' ' '); do uci add_list "network.@${_pt}[-1].allowed_ips=$_ip"; done ;;
                 endpoint)
-                    uci set "network.@${_pt}[-1].endpoint_host=${_val%:*}"
-                    uci set "network.@${_pt}[-1].endpoint_port=${_val##*:}" ;;
+                    # WireGuard endpoint may be host:port or [ipv6]:port.
+                    # ${_val%:*} / ${_val##*:} would leave the brackets on an
+                    # IPv6 host (e.g. "[2001:db8::1]"), which netifd then fails
+                    # to resolve — strip them and pull host/port explicitly.
+                    case "$_val" in
+                        \[*\]:*)
+                            _ep_host="${_val%%]:*}"; _ep_host="${_ep_host#[}"
+                            _ep_port="${_val##*:}" ;;
+                        *)
+                            _ep_host="${_val%:*}"; _ep_port="${_val##*:}" ;;
+                    esac
+                    uci set "network.@${_pt}[-1].endpoint_host=$_ep_host"
+                    uci set "network.@${_pt}[-1].endpoint_port=$_ep_port" ;;
                 persistentkeepalive) uci set "network.@${_pt}[-1].persistent_keepalive=$_val" ;;
             esac
         fi
