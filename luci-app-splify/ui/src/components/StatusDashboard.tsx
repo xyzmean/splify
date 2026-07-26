@@ -47,8 +47,8 @@ function YesNo({ v }: { v: boolean }) {
 
 // Mirrors YesNo: an icon carries the meaning, not colour alone.
 function HealthState({ health }: { health: string }) {
-  if (health === 'ok' || health === 'OK') return <span className="flex items-center gap-1 text-success"><CheckIcon className="size-4" />ок</span>
-  if (health === 'idle') return <span className="flex items-center gap-1 text-muted-foreground"><Minus className="size-4" />простой</span>
+  if (health === 'ok' || health === 'OK') return <span className="flex items-center gap-1 text-success"><CheckIcon className="size-4" />{t('ок')}</span>
+  if (health === 'idle') return <span className="flex items-center gap-1 text-muted-foreground"><Minus className="size-4" />{t('простой')}</span>
   if (health === 'FAIL') return <span className="flex items-center gap-1 text-destructive"><XIcon className="size-4" />FAIL</span>
   return <span className="text-muted-foreground">—</span>
 }
@@ -56,7 +56,6 @@ function HealthState({ health }: { health: string }) {
 interface Props {
   status: Status | null
   events: EventRow[]
-  wgIfaces: string[]
   busy: string
   setBusy: (s: string) => void
   refresh: () => void
@@ -173,7 +172,9 @@ export default function StatusDashboard(p: Props) {
               <div className="truncate text-sm font-semibold tracking-tight">{path.title}</div>
               <div className="mt-0.5 text-xs text-muted-foreground">
                 {t('Mode')} <b className="text-foreground">{s.mode || '?'}</b> · {t('Kill switch')} <b className="text-foreground">{String(s.killswitch) === '1' ? t('on') : t('off')}</b>
-                {s.zapret_version && <> · DPI: <b className="text-foreground">{s.zapret_version}</b></>}
+                {' · DPI: '}{s.zapret_version
+                  ? <b className="text-foreground">{s.zapret_version}</b>
+                  : <b className="text-muted-foreground/70">{t('none')}</b>}
               </div>
             </div>
           </div>
@@ -310,8 +311,8 @@ export default function StatusDashboard(p: Props) {
             </p>
           ) : (
             <div className="space-y-2">
-              {checks.map((c, i) => (
-                <div key={i} className={cn('flex flex-wrap items-center gap-2 rounded-md border-l-4 bg-muted/40 p-2.5', SEV[c.severity].ring)}>
+              {checks.map((c) => (
+                <div key={c.category + ':' + c.message} className={cn('flex flex-wrap items-center gap-2 rounded-md border-l-4 bg-muted/40 p-2.5', SEV[c.severity].ring)}>
                   <SevBadge sev={c.severity} />
                   <div className="min-w-[200px] flex-1">
                     <div>{c.message}</div>
@@ -339,11 +340,11 @@ export default function StatusDashboard(p: Props) {
           ) : (
             <Table>
               <TableBody>
-                {events.slice(0, 50).map((ev, i) => {
+                {events.slice(0, 50).map((ev) => {
                   const m = EVENT_META[ev.kind] || { i: '•', cls: 'text-muted-foreground', ru: ev.kind }
                   const pathStr = ev.from && ev.to ? `${ev.from} → ${ev.to}` : ev.to || ev.from || ''
                   return (
-                    <TableRow key={i}>
+                    <TableRow key={ev.ts + ':' + ev.kind}>
                       <TableCell className={cn('whitespace-nowrap font-semibold', m.cls)}>{m.i} {m.ru}</TableCell>
                       <TableCell className="whitespace-nowrap">{pathStr}</TableCell>
                       <TableCell className="text-muted-foreground">{ev.reason || ''}</TableCell>
@@ -463,9 +464,9 @@ function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: 
   } else if (isVpn) {
     card1 = { dest: `#${activeEp!.priority || '?'} ${activeEp!.iface}`, sub: vpnSub, tone: 'success' }
   } else if (isZapretState) {
-    card1 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'warning' }
+    card1 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'success' }
   } else if (zapretInstalled) {
-    card1 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'warning' }
+    card1 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'success' }
   } else {
     card1 = { dest: t('Open (WAN)'), sub: t('Direct (WAN)'), tone: 'neutral' }
   }
@@ -488,7 +489,7 @@ function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: 
   } else if (mode === 'full' && isVpn) {
     card3 = { dest: `#${activeEp!.priority || '?'} ${activeEp!.iface}`, sub: t('via VPN'), tone: 'success' }
   } else if (zapretInstalled || isZapretState) {
-    card3 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'warning' }
+    card3 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'success' }
   } else {
     card3 = { dest: t('Direct (WAN)'), sub: t('via WAN'), tone: 'neutral' }
   }
