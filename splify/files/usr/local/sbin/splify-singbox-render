@@ -19,6 +19,11 @@
 . /usr/share/libubox/jshn.sh
 . /usr/local/lib/splify/common.sh
 
+# The rendered config carries the endpoint's UUID/password (and the port-hop
+# temp file mirrors a slice of it) — create them owner-only so a world-readable
+# /var/etc/*.tmp can never leak secrets if the script dies before its final mv.
+umask 077
+
 IFACE="${1:-}"
 [ -n "$IFACE" ] || die "usage: splify-singbox-render <iface>"
 
@@ -77,6 +82,16 @@ TUN_ADDR="172.19.${TUN_N}.1/30"
 L3DEV="$(singbox_l3dev "$IFACE")"
 CONF_FILE="$(singbox_conf_file "$IFACE")"
 TMP_FILE="${CONF_FILE}.tmp"
+# _ph_tmp is only created in the hysteria2 port-hop branch below; default it to
+# empty so the trap's rm -f never references an unset name (no set -u here, but
+# explicitness keeps it robust if set -u is ever added).
+_ph_tmp=""
+
+# Always tear down the .tmp render + port-hop file, even on `sing-box check`
+# failure, `die`, or a signal — otherwise a half-rendered config (carrying the
+# endpoint UUID/password) lingers in /var/etc. The final `mv` only fires on the
+# success path; on failure the trap is the ONLY cleanup.
+trap 'rm -f "$TMP_FILE" "$_ph_tmp" 2>/dev/null' EXIT INT TERM HUP
 
 # ---- build config.json via jshn --------------------------------------------
 json_init
@@ -220,7 +235,9 @@ hysteria2)
         done < "$_ph_tmp"
         json_close_array
     fi
-    rm -f "$_ph_tmp"
+    # cleanup happens via the EXIT trap, but free the name now so a second
+    # render (if ever reached in the same process) allocates a fresh temp.
+    rm -f "$_ph_tmp"; _ph_tmp=""
     json_add_string password "$PASSWORD"
     [ -n "$OBFS" ] && {
         json_add_object obfs
@@ -263,7 +280,8 @@ json_cleanup
 
 if command -v sing-box >/dev/null 2>&1; then
     if ! _CHECK_OUT="$(sing-box check -c "$TMP_FILE" 2>&1)"; then
-        rm -f "$TMP_FILE"
+        # TMP_FILE is removed by the EXIT trap; just bail without touching the
+        # currently-running good config.
         warn "singbox $IFACE: 'sing-box check' failed on rendered config — leaving previous config untouched: $_CHECK_OUT"
         exit 1
     fi

@@ -634,6 +634,14 @@ fi
 SEV_NAME() { case "$1" in 0) echo OK;; 1) echo WARN;; 2) echo FIXABLE;; 3) echo FAIL;; esac; }
 OVERALL="$(SEV_NAME "$WORST")"
 
+# zapret_version as the dashboard should show it: the detected flavour ONLY when
+# zapret is actually installed — empty otherwise, so the hero renders "none"
+# instead of a misleading "zapret". ZAPRET_VERSION itself is left intact (the
+# execution paths keep their resolved init/table names even on a missing install,
+# because zapret_available() gates whether they're ever acted on).
+_zv="$ZAPRET_VERSION"
+zapret_available || _zv=""
+
 if [ "$JSON" = 1 ]; then
     # --snapshot wraps the status object and folds in the events array so the
     # dashboard gets both in a single ubus call (one doctor fork instead of two).
@@ -644,7 +652,7 @@ if [ "$JSON" = 1 ]; then
     fi
     printf '"overall":"%s",' "$OVERALL"
     printf '"summary":{"mode":"%s","state":"%s","active_iface":"%s","killswitch":%s,"fail_count":%s,"lan_iface":"%s","lan_cidr":"%s","zapret_version":"%s"},' \
-        "$(json_esc "$MODE")" "$(json_esc "$STATE")" "$(json_esc "$ACTIVE")" "${KILLSWITCH:-0}" "$(fail_get)" "$(json_esc "$LAN_IFACE")" "$(json_esc "$LAN_CIDR")" "$(json_esc "$ZAPRET_VERSION")"
+        "$(json_esc "$MODE")" "$(json_esc "$STATE")" "$(json_esc "$ACTIVE")" "${KILLSWITCH:-0}" "$(fail_get)" "$(json_esc "$LAN_IFACE")" "$(json_esc "$LAN_CIDR")" "$(json_esc "$_zv")"
     printf '"endpoints":[%s],' "${EP_JSON%,}"
     printf '"lists":[%s],' "${LIST_JSON%,}"
     printf '"checks":['
@@ -667,7 +675,7 @@ else
     echo "=== splify doctor ==="
     echo "overall : $OVERALL"
     echo "mode    : $MODE     state: ${STATE:-(none)}     active: ${ACTIVE:-(none)}"
-    echo "killswitch: ${KILLSWITCH:-0}     fail_count: $(fail_get)     lan: $LAN_IFACE -> ${LAN_CIDR:-(none)}     zapret: $ZAPRET_VERSION"
+    echo "killswitch: ${KILLSWITCH:-0}     fail_count: $(fail_get)     lan: $LAN_IFACE -> ${LAN_CIDR:-(none)}     zapret: ${_zv:-(not installed)}"
     echo
     printf '%s' "$CHECKS" | while IFS='	' read -r _s _cat _m _fix; do
         [ -n "$_s" ] || continue

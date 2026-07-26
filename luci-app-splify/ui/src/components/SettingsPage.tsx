@@ -107,14 +107,24 @@ function ListEditor({ values, onChange, placeholder }: { values: string[]; onCha
           <div key={i} className="flex gap-2">
             <input className={field} value={v} placeholder={placeholder}
               onChange={(e) => update(i, e.target.value)}
-              onBlur={(e) => { if (isLast && e.target.value.trim()) { add(e.target.value); } }}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && isLast && (e.target as HTMLInputElement).value.trim()) { add((e.target as HTMLInputElement).value); }
+                // Enter commits the trailing draft row. add() appends to the
+                // values array; the new tail `''` (from `rows = [...values, ''`)
+                // then renders as a fresh empty input on the next commit. We
+                // intentionally do NOT also commit on blur: blurring leaves the
+                // typed text in the controlled input AND appends it, producing a
+                // visible duplicate; Enter is an explicit, unambiguous commit.
+                if (e.key === 'Enter' && isLast && (e.target as HTMLInputElement).value.trim()) {
+                  add((e.target as HTMLInputElement).value)
+                }
               }} />
             {isLast
               ? <Button type="button" size="icon" variant="secondary" className="bg-success text-white hover:bg-success/90"
                   aria-label={t('Add')} title={t('Add')}
-                  onClick={(e) => { const input = (e.currentTarget.previousSibling as HTMLInputElement); if (input?.value.trim()) { add(input.value); input.value = '' } }}>
+                  onClick={(e) => {
+                    const input = e.currentTarget.previousSibling as HTMLInputElement | null
+                    if (input?.value.trim()) { add(input.value) }
+                  }}>
                   <Plus className="size-4" />
                 </Button>
               : <Button type="button" size="icon" variant="destructive" onClick={() => remove(i)} aria-label={t('Delete')} title={t('Delete')}>

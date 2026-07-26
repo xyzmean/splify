@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { rpc, type Status, type EventRow } from '@/lib/rpc'
 import StatusDashboard from '@/components/StatusDashboard'
 import WgPanel from '@/components/WgPanel'
@@ -27,6 +27,11 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState('')
+  // Monotonic request id: if a newer refresh() starts before an older one
+  // resolves, the older one's result is discarded. Prevents a late/slow reply
+  // from clobbering fresher state (e.g. Apply then Restart clicked in quick
+  // succession, or a stale network retry landing after a newer load).
+  const reqId = useRef(0)
 
   // Data loads once on mount and on demand via the "Обновить" button (and after
   // any action). There is deliberately NO background polling interval: a timer
@@ -37,6 +42,7 @@ export default function App() {
   // for both status and events); fall back to separate status()+events() only
   // if the backend is older than the `snapshot` method (or ACL rejects it).
   const refresh = useCallback(async () => {
+    const id = ++reqId.current
     try {
       const snap = await rpc.snapshot().catch(async (snapErr: any) => {
         // Old backend without `snapshot`, or the read ACL doesn't list it yet:
@@ -50,21 +56,21 @@ export default function App() {
         }
         throw snapErr
       })
+      if (id !== reqId.current) return  // superseded — leave state to the newer load
       setStatus(snap.status)
       setEvents(snap.events || [])
       setError(null)
     } catch (e: any) {
+      if (id !== reqId.current) return
       setError(e?.message || String(e))
     } finally {
-      setLoading(false)
+      if (id === reqId.current) setLoading(false)
     }
   }, [])
 
   useEffect(() => {
     refresh()
   }, [refresh])
-
-  const wgIfaces = status ? (status.endpoints || []).map((e) => e.iface) : []
 
   return (
     <div className="splify-react-root p-1 antialiased text-foreground">
@@ -90,7 +96,7 @@ export default function App() {
               <div className="p-8 text-center text-destructive">{t('Error:')} {error}</div>
             ) : (
               <StatusDashboard
-                status={status} events={events} wgIfaces={wgIfaces}
+                status={status} events={events}
                 busy={busy} setBusy={setBusy} refresh={refresh}
               />
             )

@@ -319,6 +319,19 @@ setup_uri_helpers() {
     [ "$(printf 'foo%%2Fbar' | uri_unescape)" = "foo/bar" ]
 }
 
+# Regression for the %2B bug: %2B (literal '+') used to be decoded to '+' and
+# then immediately clobbered back to a space by the form-encoded '+ -> space'
+# rule, corrupting base64url tokens in vless (pbk/sid/host/path) and hysteria2
+# passwords. Order now runs '+' -> space FIRST, %2B LAST, so a real '+' survives.
+@test "uri_unescape keeps a literal + decoded from %2B (base64url tokens)" {
+    setup_uri_helpers
+    # form '+' is space; %2B is a literal '+': both must survive a round trip.
+    [ "$(printf 'b+c%%2Bd' | uri_unescape)" = "b c+d" ]
+    [ "$(printf 'a%%2Bb+c' | uri_unescape)" = "a+b c" ]
+    # a percent-encoded token that legitimately contains '+'
+    [ "$(printf 'pbk%%3DaBc%%2BXYZ' | uri_unescape)" = "pbk=aBc+XYZ" ]
+}
+
 @test "uri_qparam extracts a decoded value, empty when the param is absent" {
     setup_uri_helpers
     [ "$(uri_qparam 'a=1&b=hello%40world' b)" = "hello@world" ]

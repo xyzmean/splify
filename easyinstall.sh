@@ -25,6 +25,18 @@
 # Without WORKER_URL the script tries api.cloudflareclient.com directly and
 # falls back gracefully if that is blocked.
 #
+# WARP endpoint selection — the tunnel's UDP endpoint. Two strategies, picked
+# interactively at run time (or preset non-interactively via WARP_ENDPOINT):
+#   WARP_ENDPOINT=auto    roll the dice over 100 candidate IPs, keep the best
+#                         ping (the original behaviour; better latency when it
+#                         lands well, but a lottery).
+#   WARP_ENDPOINT=engage  pin engage.cloudflareclient.com (CF's stable anycast
+#                         ingress, :500). No probe, no lottery — where engage
+#                         already works it just works.
+# With a controlling terminal the installer asks; the default (Enter) is
+# `engage` (the safer one-shot pick). Headless/CI without a tty falls back to
+# `auto`.
+#
 #   wget -O - https://raw.githubusercontent.com/xyzmean/splify/main/easyinstall.sh | sh
 set -eu
 
@@ -260,6 +272,55 @@ find_best_endpoint() {
   fi
 }
 
+# Ask the operator HOW to pick the WARP endpoint before we spend ~30s probing.
+# Two strategies:
+#   1) auto  — roll the dice over 100 candidate IPs, keep the lowest-ping one
+#              (the original behaviour). Better latency when it lands well, but
+#              it's a lottery: a bad roll can leave you on a slow/blocked IP.
+#   2) engage — pin engage.cloudflareclient.com (CF's stable anycast ingress).
+#              No probe, no lottery: where engage already works it just works.
+#
+# Non-interactive contexts (wget|sh without a controlling terminal, or
+# WARP_ENDPOINT preset) skip the prompt: WARP_ENDPOINT=auto|engage picks the
+# strategy; otherwise the default is auto (back-compat with prior behaviour).
+choose_endpoint() {
+  case "${WARP_ENDPOINT:-}" in
+    auto)   WARP_EP_MODE=auto ;;
+    engage) WARP_EP_MODE=engage ;;
+    *)
+      # Prompt only when there IS a controlling terminal to read the answer
+      # from. Under `wget | sh` stdin is the pipe, so we read from /dev/tty
+      # (the real terminal) instead — but if there is none (fully headless/CI),
+      # `read </dev/tty` would either block or fail. Detect that case by
+      # probing /dev/tty for read+write+char-device inside a subshell (keeps
+      # any failure isolated from `set -e` and produces no stderr noise).
+      if { [ -r /dev/tty ] && [ -w /dev/tty ] && [ -c /dev/tty ]; } 2>/dev/null; then
+        printf '\033[1;36m==>\033[0m %s\n' "Выберите endpoint WARP:"
+        printf '  \033[1;32m1\033[0m) автоматически подобрать (рулетка по 100 IP, лучший по пингу)\n'
+        printf '  \033[1;32m2\033[0m) engage.cloudflareclient.com (стабильный anycast, без подбора)\n'
+        # default (Enter) = 2 (engage): no-probe works wherever engage already
+        # resolves, so it's the safer pick for a one-shot installer.
+        printf 'По умолчанию [\033[1;m2\033[0m]: '
+        _choice=""
+        read -r _choice </dev/tty 2>/dev/null || _choice=""
+        case "$_choice" in
+          1) WARP_EP_MODE=auto ;;
+          *) WARP_EP_MODE=engage ;;
+        esac
+      else
+        WARP_EP_MODE=auto
+      fi
+      ;;
+  esac
+
+  if [ "$WARP_EP_MODE" = engage ]; then
+    WARP_EP="engage.cloudflareclient.com:500"
+    say "Endpoint зафиксирован: $WARP_EP (без подбора)."
+  else
+    find_best_endpoint
+  fi
+}
+
 register_warp() {
   say "Регистрирую устройство Cloudflare WARP…"
   [ -n "$WORKER_URL" ] \
@@ -456,7 +517,7 @@ install_awg
 sleep 3
 register_warp
 sleep 3
-find_best_endpoint
+choose_endpoint
 sleep 3
 create_warp_iface
 sleep 3

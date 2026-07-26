@@ -28,7 +28,15 @@ function fallbackToast(msg: string, kind: NotifyKind) {
 export function notify(msg: string, kind: NotifyKind = 'info') {
   try {
     if (window.ui?.addNotification) {
-      window.ui.addNotification(null, window.L ? window.L.dom.create('p', {}, msg) : msg, kind)
+      // msg often concatenates server-controlled text (action stdout, RPC
+      // errors, import results). Render it strictly as text — never let it
+      // reach a DOM-creation API that could interpret it as HTML. LuCI's
+      // dom.create third arg is positional textContent today, but treating it
+      // as a child slot is a latent XSS sink; set textContent explicitly so the
+      // contract holds regardless of how LuCI evolves.
+      const p = document.createElement('p')
+      p.textContent = msg
+      window.ui.addNotification(null, p, kind)
       return
     }
   } catch { /* fall through to the in-app toast */ }

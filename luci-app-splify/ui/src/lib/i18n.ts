@@ -88,6 +88,8 @@ const RU: Record<string, string> = {
   'Handshake': 'Handshake',
   'Traffic': 'Трафик',
   'Health': 'Health',
+  'ок': 'ок',
+  'простой': 'простой',
   'Zone': 'Зона',
   'Masq': 'Masq',
   'Masquerade (masq) hides LAN behind the tunnel IP': 'Masquerade (masq) прячет LAN за IP-адресом туннеля',

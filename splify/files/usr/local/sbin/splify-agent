@@ -87,8 +87,12 @@ poll_once() {
     # report exactly when the node is degraded (the very state worth reporting).
     _status="$(/usr/local/sbin/splify-doctor --json 2>/dev/null)"; [ -n "$_status" ] || _status='{}'
     _config="$(/usr/local/sbin/splify-ctl export 2>/dev/null)"; [ -n "$_config" ] || _config='{}'
+    # node_id is operator/controller-controlled and ends up inside a JSON string
+    # literal — escape backslash and double-quote the same way splify-doctor's
+    # json_esc does, or a stray '"' / '\' breaks the whole request body.
+    _node_esc="$(printf '%s' "$_node" | sed 's/\\/\\\\/g; s/"/\\"/g')"
     _body="$(printf '{"node":"%s","ts":%s,"agent":"splify-agent/1","applied_gen":%s,"applied_action_gen":%s,"status":%s,"config":%s}' \
-        "$_node" "$(date +%s)" "$_gen" "$_agen" "$_status" "$_config")"
+        "$_node_esc" "$(date +%s)" "$_gen" "$_agen" "$_status" "$_config")"
 
     # Try the internal URL first (over the tunnel, kept private), then the
     # external URL over WAN — pinned to the WAN device so it works with the
