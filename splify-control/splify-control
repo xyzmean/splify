@@ -580,37 +580,61 @@ ADMIN_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>splify-control</title>
 <style>
- :root{--bg:#0f1115;--card:#181b22;--bd:#2a2f3a;--fg:#e6e9ef;--mut:#9aa3b2;--acc:#3b82f6;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444}
- *{box-sizing:border-box} body{margin:0;font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--fg)}
- header{padding:14px 20px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:12px}
- header h1{font-size:18px;margin:0;font-weight:700} .mut{color:var(--mut)}
- .wrap{display:grid;grid-template-columns:340px 1fr;gap:0;height:calc(100vh - 53px)}
- .list{border-right:1px solid var(--bd);overflow:auto} .detail{overflow:auto;padding:18px 22px}
- .node{padding:12px 16px;border-bottom:1px solid var(--bd);cursor:pointer} .node:hover{background:#1d2129}
- .node.sel{background:#222838} .node b{font-weight:600}
- .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600}
- .ok{background:rgba(34,197,94,.15);color:var(--ok)} .warn{background:rgba(245,158,11,.15);color:var(--warn)}
- .bad{background:rgba(239,68,68,.15);color:var(--bad)} .dim{background:#252a34;color:var(--mut)}
- .card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:16px;margin-bottom:16px}
- .card h3{margin:0 0 12px;font-size:15px} h2{font-size:18px;margin:0 0 6px}
- label{display:block;font-size:12px;color:var(--mut);margin:8px 0 3px}
- input,textarea,select{width:100%;background:#0d0f13;border:1px solid var(--bd);color:var(--fg);border-radius:7px;padding:8px 10px;font:inherit}
- textarea{min-height:150px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
- button{background:var(--acc);color:#fff;border:0;border-radius:7px;padding:8px 14px;font:inherit;font-weight:600;cursor:pointer}
- button.ghost{background:#222838;color:var(--fg);border:1px solid var(--bd)} button.danger{background:var(--bad)}
- button:disabled{opacity:.5;cursor:default} .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
- .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
- table{width:100%;border-collapse:collapse;font-size:13px} td,th{text-align:left;padding:5px 8px;border-bottom:1px solid var(--bd)}
- code{background:#0d0f13;padding:1px 6px;border-radius:5px;font-size:12px} .sp{flex:1} .small{font-size:12px}
- .g2{display:grid;grid-template-columns:1fr 1fr;gap:10px} .g3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
- details{border:1px solid var(--bd);border-radius:10px;padding:10px 16px;margin-bottom:16px;background:var(--card)}
+ :root{
+  --bg:#09090b;--card:rgba(24,24,27,0.7);--bd:rgba(255,255,255,0.1);
+  --fg:#fafafa;--mut:#a1a1aa;--acc:#3b82f6;--acc-hover:#2563eb;
+  --ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;--glass:rgba(255,255,255,0.03);
+ }
+ @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+ *{box-sizing:border-box} 
+ body{margin:0;font:14px/1.5 'Inter',system-ui,sans-serif;background:var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased}
+ header{padding:16px 24px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:16px;background:var(--card);backdrop-filter:blur(12px)}
+ header h1{font-size:20px;margin:0;font-weight:700;background:linear-gradient(90deg,#60a5fa,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent} 
+ .mut{color:var(--mut)}
+ .wrap{display:grid;grid-template-columns:340px 1fr;gap:0;height:calc(100vh - 61px)}
+ .list{border-right:1px solid var(--bd);overflow:auto;background:var(--glass)} 
+ .detail{overflow:auto;padding:24px 32px;background:radial-gradient(circle at top right, rgba(59,130,246,0.05), transparent 40%)}
+ .node{padding:16px 20px;border-bottom:1px solid var(--bd);cursor:pointer;transition:all 0.2s} 
+ .node:hover{background:rgba(255,255,255,0.03)}
+ .node.sel{background:rgba(59,130,246,0.1);border-left:3px solid var(--acc)} 
+ .node b{font-weight:600;font-size:15px}
+ .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:600;letter-spacing:0.5px;text-transform:uppercase}
+ .ok{background:rgba(34,197,94,.15);color:var(--ok);border:1px solid rgba(34,197,94,.2)} 
+ .warn{background:rgba(245,158,11,.15);color:var(--warn);border:1px solid rgba(245,158,11,.2)}
+ .bad{background:rgba(239,68,68,.15);color:var(--bad);border:1px solid rgba(239,68,68,.2)} 
+ .dim{background:rgba(255,255,255,0.1);color:var(--mut)}
+ .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:20px;margin-bottom:20px;backdrop-filter:blur(10px);box-shadow:0 4px 24px -4px rgba(0,0,0,0.5);transition:all 0.3s}
+ .card:hover{border-color:rgba(255,255,255,0.2)}
+ .card h3{margin:0 0 16px;font-size:16px;font-weight:600;display:flex;align-items:center;gap:8px} 
+ h2{font-size:22px;margin:0 0 8px;font-weight:700}
+ label{display:block;font-size:12px;font-weight:500;color:var(--mut);margin:10px 0 4px;text-transform:uppercase;letter-spacing:0.5px}
+ input,textarea,select{width:100%;background:rgba(0,0,0,0.2);border:1px solid var(--bd);color:var(--fg);border-radius:8px;padding:10px 12px;font:inherit;transition:all 0.2s}
+ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 2px rgba(59,130,246,0.2)}
+ textarea{min-height:150px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:13px}
+ button{background:var(--acc);color:#fff;border:1px solid transparent;border-radius:8px;padding:8px 16px;font:inherit;font-weight:600;cursor:pointer;transition:all 0.2s;box-shadow:0 2px 10px rgba(59,130,246,0.2)}
+ button:hover{background:var(--acc-hover);transform:translateY(-1px)}
+ button.ghost{background:rgba(255,255,255,0.05);color:var(--fg);border:1px solid var(--bd);box-shadow:none} 
+ button.ghost:hover{background:rgba(255,255,255,0.1)}
+ button.danger{background:var(--bad);box-shadow:0 2px 10px rgba(239,68,68,0.2)}
+ button.danger:hover{background:#dc2626}
+ button:disabled{opacity:.5;cursor:default;transform:none} 
+ .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+ .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px}
+ table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px} 
+ td,th{text-align:left;padding:8px 12px;border-bottom:1px solid var(--bd)}
+ th{font-weight:600;color:var(--mut);text-transform:uppercase;font-size:11px;letter-spacing:0.5px}
+ code{background:rgba(255,255,255,0.1);padding:2px 8px;border-radius:6px;font-size:12px;font-family:ui-monospace,SFMono-Regular,monospace} 
+ .sp{flex:1} .small{font-size:12.5px}
+ .g2{display:grid;grid-template-columns:1fr 1fr;gap:16px} .g3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+ details{border:1px solid var(--bd);border-radius:12px;padding:12px 20px;margin-bottom:20px;background:var(--card);backdrop-filter:blur(10px)}
  details summary{cursor:pointer;font-weight:600;font-size:15px;padding:4px 0}
- .btns{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
- .etbl input,.etbl select{padding:5px 8px} .etbl td{border-bottom:none;padding:3px 4px}
- .chip{display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;user-select:none}
+ .btns{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+ .etbl input,.etbl select{padding:6px 10px} .etbl td{border-bottom:none;padding:4px 6px}
+ .chip{display:inline-flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;user-select:none;padding:4px 8px;border-radius:6px;background:rgba(255,255,255,0.05)}
+ .chip:hover{background:rgba(255,255,255,0.1)}
  .chip input{width:auto}
- .toast{position:fixed;right:16px;bottom:16px;background:#222838;border:1px solid var(--bd);padding:10px 14px;border-radius:8px;opacity:0;transition:.2s}
- .toast.show{opacity:1}
+ .toast{position:fixed;right:24px;bottom:24px;background:rgba(24,24,27,0.9);backdrop-filter:blur(10px);border:1px solid var(--bd);padding:12px 20px;border-radius:10px;opacity:0;transition:all 0.3s cubic-bezier(0.4, 0, 0.2, 1);transform:translateY(10px);box-shadow:0 10px 40px -10px rgba(0,0,0,0.5)}
+ .toast.show{opacity:1;transform:translateY(0)}
 </style></head><body>
 <header><h1>splify-control</h1><span class="mut" id="sub">панель управления нодами</span><span class="sp"></span>
  <button class="ghost" onclick="openMesh()">Site-to-site меш</button>
