@@ -33,7 +33,7 @@ else
 fi
 
 # uci -q get, пусто если не задано (не роняет скрипт).
-uget() { uci -q get "$1" 2>/dev/null; }
+uget() { uci -q get "$1" 2>/dev/null || true; }
 
 # Удалить пакет(ы) через доступный менеджер. Молча, ошибки не фатальны:
 # пакета может уже не быть (частичный uninstall ранее) — это норма.
@@ -105,9 +105,9 @@ while [ -n "$(uget "firewall.@zone[$_zi]")" ]; do
     _match=""
     for _ep in $_ep_ifaces; do
         [ -n "$_ep" ] || continue
-        { [ "$_zn" = "$_ep" ] || \
-          case " $_znet " in *" $_ep "*) :;; *) false;; esac || \
-          case " $_zdev " in *" $_ep "*) :;; *) false;; esac; } && { _match=1; break; }
+        if [ "$_zn" = "$_ep" ]; then _match=1; break; fi
+        case " $_znet " in *" $_ep "*) _match=1; break ;; esac
+        case " $_zdev " in *" $_ep "*) _match=1; break ;; esac
     done
     if [ -n "$_match" ]; then
         uci -q delete "firewall.@zone[$_zi]" || true
@@ -125,7 +125,7 @@ while [ -n "$(uget "firewall.@forwarding[$_fi]")" ]; do
     _match=""
     for _ep in $_ep_ifaces; do
         [ -n "$_ep" ] || continue
-        { [ "$_fsrc" = "$_ep" ] || [ "$_fdest" = "$_ep" ]; } && { _match=1; break; }
+        if [ "$_fsrc" = "$_ep" ] || [ "$_fdest" = "$_ep" ]; then _match=1; break; fi
     done
     if [ -n "$_match" ]; then
         uci -q delete "firewall.@forwarding[$_fi]" || true

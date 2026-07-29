@@ -19,7 +19,7 @@ config splify 'global'
 
 	# ipsum: blocked/foreign IP list -> VPN (downloaded by URL, refreshed daily)
 	option ipsum_enabled '1'
-	option ipsum_url 'https://raw.githubusercontent.com/xyzmean/ru-bypass-ipsets/refs/heads/main/lists/all.lst'
+	option ipsum_url 'https://github.com/1andrevich/Re-filter-lists/releases/latest/download/ipsum.lst'
 	# ru/cn subnets kept direct; feed the zapret bypass set
 	option ru_enabled '1'
 	option ru_url 'https://github.com/xyzmean/radb-tools/releases/download/latest/ru_cn_final.lst'
