@@ -49,7 +49,7 @@ ZAPRET_MODE="$(uci -q get splify.global.zapret_enabled)"
 # 7. Router info
 ROUTER_MODEL="$(cat /tmp/sysinfo/model 2>/dev/null || echo "unknown")"
 ROUTER_BOARD="$(cat /tmp/sysinfo/board_name 2>/dev/null || echo "unknown")"
-UPTIME="$(cat /proc/uptime | awk '{print $1}')"
+UPTIME="$(awk '{print $1}' /proc/uptime)"
 
 # Build JSON
 json_init
