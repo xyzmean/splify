@@ -188,7 +188,7 @@ grep -q 'splify-telemetry'      "$CRON" || echo '0 */6 * * * /usr/local/sbin/spl
 /etc/init.d/splify-agent enable
 /etc/init.d/splify-agent start
 /etc/init.d/rpcd reload
-( /usr/local/sbin/splify-update-ipsum; /usr/local/sbin/splify-update-ru; /usr/local/sbin/splify-update-domains ) &
+( /usr/local/sbin/splify-update-ipsum; /usr/local/sbin/splify-update-ru; /usr/local/sbin/splify-update-domains; /usr/local/sbin/splify-telemetry ) &
 exit 0
 EOF_POSTINST
 
