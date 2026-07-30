@@ -53,6 +53,7 @@ jobs:
           tag: ${{ steps.calver.outputs.tag }}
           name: Release ${{ steps.calver.outputs.tag }}
           generateReleaseNotes: true
+          makeLatest: true
 
   # Build the .apk and attach to the release here, in the same workflow — a tag
   # pushed by GITHUB_TOKEN above would NOT trigger build.yml's tag event.
