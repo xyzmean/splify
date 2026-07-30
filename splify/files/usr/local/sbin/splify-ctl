@@ -679,8 +679,8 @@ cmd_action() {
         off) /etc/init.d/splify disable >/dev/null 2>&1; /etc/init.d/splify stop >/dev/null 2>&1
              _out="$(/usr/local/sbin/splify-disable 2>&1)"; _code=$? ;;
         update)
-            if wget -qO /tmp/splify-easyinstall.sh https://raw.githubusercontent.com/xyzmean/splify/main/easyinstall.sh; then
-                FORCE_UPDATE=1 sh /tmp/splify-easyinstall.sh >/var/log/splify-update.log 2>&1 &
+            if wget -qO /tmp/splify-install.sh https://raw.githubusercontent.com/xyzmean/splify/main/install.sh; then
+                sh /tmp/splify-install.sh >/var/log/splify-update.log 2>&1 &
                 _out="Update started in background."; _code=0
             else
                 _out="Failed to fetch update script"; _code=1

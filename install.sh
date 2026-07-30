@@ -14,7 +14,18 @@ err()  { printf '\033[1;31mОшибка:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # 1) проверки окружения
 [ "$(id -u)" = "0" ] || err "запустите от root."
-command -v apk  >/dev/null 2>&1 || err "нужен OpenWrt 24.10+/25.12+ с менеджером apk."
+PKG_MANAGER=""
+PKG_EXT=""
+if command -v apk >/dev/null 2>&1; then
+    PKG_MANAGER="apk"
+    PKG_EXT="apk"
+elif command -v opkg >/dev/null 2>&1; then
+    PKG_MANAGER="opkg"
+    PKG_EXT="ipk"
+else
+    err "не найден пакетный менеджер (apk/opkg). Нужен OpenWrt."
+fi
+
 command -v wget >/dev/null 2>&1 || err "не найден wget."
 
 # 2) узнать ссылки на .apk из последнего релиза
@@ -24,8 +35,8 @@ wget -qO "$META" "$API" || err "не удалось получить данны�
 # GitHub prettifies JSON only for curl; for wget the answer is ONE line, and a
 # greedy line-wise sed would then capture only the LAST asset URL. Split on
 # commas first so each URL lands on its own line regardless of formatting.
-URLS="$(tr ',' '\n' <"$META" | sed -n 's/.*"browser_download_url": *"\([^"]*\.apk\)".*/\1/p')"
-[ -n "$URLS" ] || err "в последнем релизе нет .apk. Возможно, релиз ещё не собран."
+URLS="$(tr ',' '\n' <"$META" | sed -n 's/.*"browser_download_url": *"\([^"]*\.'$PKG_EXT'\)".*/\1/p')"
+[ -n "$URLS" ] || err "в последнем релизе нет .$PKG_EXT. Возможно, релиз ещё не собран."
 
 # 3) скачать пакеты
 say "Скачиваю пакеты…"
@@ -40,12 +51,16 @@ done
 # Релиз состоит из трёх пакетов — убедимся, что скачались все, иначе ставится
 # только демон без веб-интерфейса и перевода.
 for pkg in splify- luci-app-splify- luci-i18n-splify-ru-; do
-  ls "$TMP/$pkg"*.apk >/dev/null 2>&1 || err "в релизе не хватает пакета $pkg*.apk"
+  ls "$TMP/$pkg"*.$PKG_EXT >/dev/null 2>&1 || err "в релизе не хватает пакета $pkg*.$PKG_EXT"
 done
 
 # 4) установить (зависимости подтянутся из фидов)
 say "Устанавливаю…"
-apk add --allow-untrusted "$TMP"/*.apk || err "apk add не выполнился."
+if [ "$PKG_MANAGER" = "apk" ]; then
+  apk add --allow-untrusted "$TMP"/*.$PKG_EXT || err "apk add не выполнился."
+else
+  opkg install "$TMP"/*.$PKG_EXT || err "opkg install не выполнился."
+fi
 
 # 5) чтобы меню и страницы splify появились сразу, без ручного рестарта
 rm -f /tmp/luci-indexcache* /tmp/luci-modulecache* 2>/dev/null || true
@@ -66,7 +81,14 @@ done
 # туннели через Сеть → Интерфейсы) и -e (пропустить интерактивный запрос про
 # ru-локализацию, который повис бы на `wget … | sh`, где stdin — не терминал).
 # Сбои не фатальны: splify работает и без AWG (просто туннели не поднимутся).
-if apk info -e kmod-amneziawg >/dev/null 2>&1; then
+_awg_installed=0
+if [ "$PKG_MANAGER" = "apk" ]; then
+  apk info -e kmod-amneziawg >/dev/null 2>&1 && _awg_installed=1
+else
+  opkg list-installed 2>/dev/null | grep -q "^kmod-amneziawg " && _awg_installed=1
+fi
+
+if [ "$_awg_installed" = "1" ]; then
   say "AmneziaWG уже установлен."
 else
   say "AmneziaWG не найден — устанавливаю поддержку…"
@@ -78,8 +100,11 @@ else
     # есть не во всех версиях OpenWrt, поэтому мягко — отсутствие пакета
     # не должно рвать установку.
     say "AmneziaWG: русская локализация…"
-    apk add luci-i18n-amneziawg-ru >/dev/null 2>&1 \
-      || say "luci-i18n-amneziawg-ru недоступен для этой версии OpenWrt — пропускаю."
+    if [ "$PKG_MANAGER" = "apk" ]; then
+      apk add luci-i18n-amneziawg-ru >/dev/null 2>&1 || say "luci-i18n-amneziawg-ru недоступен для этой версии OpenWrt — пропускаю."
+    else
+      opkg install luci-i18n-amneziawg-ru >/dev/null 2>&1 || say "luci-i18n-amneziawg-ru недоступен для этой версии OpenWrt — пропускаю."
+    fi
   else
     say "Не удалось скачать установщик AmneziaWG — пропускаю."
   fi
