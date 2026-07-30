@@ -220,7 +220,7 @@ function OkBadge({ ok, children }: { ok: boolean; children: React.ReactNode }) {
 function Switch({ on, onClick, disabled, 'aria-label': ariaLabel }: { on: boolean; onClick: () => void; disabled?: boolean; 'aria-label'?: string }) {
   return (
     <button type="button" onClick={onClick} disabled={disabled} aria-label={ariaLabel} role="switch" aria-checked={on}
-      className={cn('relative h-6 w-11 rounded-full transition disabled:opacity-50', on ? 'bg-success' : 'bg-muted-foreground/30')}>
+      className={cn('relative h-6 w-11 rounded-full transition disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background', on ? 'bg-success' : 'bg-muted-foreground/30')}>
       <span className={cn('absolute left-0.5 top-0.5 size-5 rounded-full bg-white transition-transform', on && 'translate-x-5')} />
     </button>
   )

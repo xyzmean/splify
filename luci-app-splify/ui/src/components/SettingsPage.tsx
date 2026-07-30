@@ -48,7 +48,7 @@ function Switch({ on, onClick, disabled, 'aria-label': ariaLabel }: { on: boolea
   return (
     <button type="button" onClick={onClick} disabled={disabled}
       role="switch" aria-checked={on} aria-label={ariaLabel}
-      className={cn('relative h-6 w-11 shrink-0 rounded-full transition disabled:opacity-50', on ? 'bg-success' : 'bg-muted-foreground/30')}>
+      className={cn('relative h-6 w-11 shrink-0 rounded-full transition disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background', on ? 'bg-success' : 'bg-muted-foreground/30')}>
       <span className={cn('absolute left-0.5 top-0.5 size-5 rounded-full bg-white transition-transform', on && 'translate-x-5')} />
     </button>
   )
@@ -321,7 +321,7 @@ export default function SettingsPage() {
             const count = id === 'endpoints' ? endpoints.length : id === 'devices' ? devices.length : null
             return (
               <button key={id} onClick={() => setTab(id)}
-                className={cn('flex items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-left text-sm transition',
+                className={cn('flex items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1',
                   // Argon sidebar: active item = primary fill + white text
                   active ? 'bg-primary font-medium text-primary-foreground' : 'text-muted-foreground hover:bg-primary/90 hover:text-primary-foreground')}>
                 <Icon className="size-4 shrink-0" />{label}
