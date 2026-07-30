@@ -11,3 +11,7 @@
 ## 2024-05-14 - Optimize StatusDashboard computations
 **Learning:** React re-evaluates heavy array iterations if they are not properly memoized. The `useMemo` dependency array must include all outer scope variables, and using an internal early return within the component, if checked *before* a hook, violates the Rules of Hooks. Hooks must be declared before any early returns.
 **Action:** Always place `useMemo` hooks before conditional early returns. Handle the null states inside the `useMemo` calculation instead. Use the computed properties to avoid redundant subset operations (e.g., using `enabledLists` to compute `okLists` rather than filtering the original `lists` again).
+
+## 2024-05-14 - React Code Splitting for Tab Route Components
+**Learning:** In a single-page app containing multiple discrete tools/tabs (like `StatusDashboard`, `WgPanel`, `ApiPanel`), importing all components synchronously bloats the initial bundle. For resource-constrained devices like routers (OpenWrt), reducing initial payload is a measurable win. Code-splitting using `React.lazy` on background tabs successfully breaks these chunks out (e.g. 10KB+ for WgPanel and ApiPanel each).
+**Action:** Use `React.lazy` and `Suspense` for conditional sub-views (like tabs or heavy modals) that aren't visible on the initial render to lower the initial parse/execute time and main bundle size.

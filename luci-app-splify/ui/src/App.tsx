@@ -1,11 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react'
 import { rpc, type Status, type EventRow } from '@/lib/rpc'
 import StatusDashboard from '@/components/StatusDashboard'
-import WgPanel from '@/components/WgPanel'
-import ApiPanel from '@/components/ApiPanel'
+
+// ⚡ Bolt: Code splitting background tabs
+// WgPanel and ApiPanel are heavy components only needed when their specific tabs are active.
+// Using React.lazy() splits them into separate JS chunks, reducing the initial bundle size
+// parsed and executed on load, which is critical for low-power router devices.
+const WgPanel = lazy(() => import('@/components/WgPanel'))
+const ApiPanel = lazy(() => import('@/components/ApiPanel'))
+
 // sing-box tab is hidden — the backend (SingboxPanel.tsx + singbox_* rpc methods)
 // stays in place so the feature can be re-enabled when it is finished.
-// import SingboxPanel from '@/components/SingboxPanel'
+// const SingboxPanel = lazy(() => import('@/components/SingboxPanel'))
 import { cn } from '@/lib/utils'
 import { t } from '@/lib/i18n'
 import { Activity, Radio, ShieldCheck } from 'lucide-react'
@@ -89,20 +95,22 @@ export default function App() {
         </nav>
 
         <div className="min-w-0 flex-1 space-y-4">
-          {tab === 'status' && (
-            loading && !status ? (
-              <div className="p-8 text-center text-muted-foreground animate-pulse">{t('Loading splify…')}</div>
-            ) : error && !status ? (
-              <div className="p-8 text-center text-destructive">{t('Error:')} {error}</div>
-            ) : (
-              <StatusDashboard
-                status={status} events={events}
-                busy={busy} setBusy={setBusy} refresh={refresh}
-              />
-            )
-          )}
-          {tab === 'wg' && <WgPanel />}
-          {tab === 'api' && <ApiPanel />}
+          <Suspense fallback={<div className="p-8 text-center text-muted-foreground animate-pulse">{t('Loading…')}</div>}>
+            {tab === 'status' && (
+              loading && !status ? (
+                <div className="p-8 text-center text-muted-foreground animate-pulse">{t('Loading splify…')}</div>
+              ) : error && !status ? (
+                <div className="p-8 text-center text-destructive">{t('Error:')} {error}</div>
+              ) : (
+                <StatusDashboard
+                  status={status} events={events}
+                  busy={busy} setBusy={setBusy} refresh={refresh}
+                />
+              )
+            )}
+            {tab === 'wg' && <WgPanel />}
+            {tab === 'api' && <ApiPanel />}
+          </Suspense>
         </div>
       </div>
     </div>
