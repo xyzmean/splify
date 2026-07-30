@@ -11,3 +11,7 @@
 ## 2024-05-14 - Optimize StatusDashboard computations
 **Learning:** React re-evaluates heavy array iterations if they are not properly memoized. The `useMemo` dependency array must include all outer scope variables, and using an internal early return within the component, if checked *before* a hook, violates the Rules of Hooks. Hooks must be declared before any early returns.
 **Action:** Always place `useMemo` hooks before conditional early returns. Handle the null states inside the `useMemo` calculation instead. Use the computed properties to avoid redundant subset operations (e.g., using `enabledLists` to compute `okLists` rather than filtering the original `lists` again).
+
+## 2024-08-01 - [StatusDashboard Re-render Optimization]
+**Learning:** React re-evaluates heavy array iterations and large list components (`events.map`, `checks.map`) when the parent component's non-data state (like `busy` spinners) changes.
+**Action:** Extract list-rendering sections into separate components wrapped in `React.memo` to shield them from parent UI state changes, and ensure derived filtering (like `checks`) is wrapped inside `useMemo` hooks.

@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react'
+import { useMemo, useRef, memo } from 'react'
 import type { Status, EventRow, Check, Sev } from '@/lib/rpc'
 import { rpc } from '@/lib/rpc'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -89,9 +89,10 @@ export default function StatusDashboard(p: Props) {
     const onlineTun = eps.filter((e) => e.present).length
     const lists = status.lists || []
     const enabledLists = lists.filter((l) => l.enabled)
+    const checks = (status.checks || []).filter((c) => c.severity !== 'OK')
     const okLists = enabledLists.filter((l) => l.ok).length
 
-    return { s, eps, rates, overall, path, HeroIcon, isOn, activeEp, totRx, totTx, onlineTun, lists, enabledLists, okLists }
+    return { s, eps, rates, overall, path, HeroIcon, isOn, activeEp, totRx, totTx, onlineTun, lists, enabledLists, okLists, checks }
   }, [status])
 
   const derivedProps = derived
@@ -106,7 +107,7 @@ export default function StatusDashboard(p: Props) {
     )
   }
 
-  const { s, eps, rates, overall, path, HeroIcon, isOn, activeEp, totRx, totTx, onlineTun, lists, enabledLists, okLists } = derivedProps
+  const { s, eps, rates, overall, path, HeroIcon, isOn, activeEp, totRx, totTx, onlineTun, lists, enabledLists, okLists, checks } = derivedProps
 
   async function run(action: string, confirmMsg?: string, toast?: string) {
     if (confirmMsg && !window.confirm(confirmMsg)) return
@@ -156,7 +157,7 @@ export default function StatusDashboard(p: Props) {
     )
   }
 
-  const checks = (status!.checks || []).filter((c) => c.severity !== 'OK')
+
   const firstRun = eps.length === 0
 
   return (
@@ -335,31 +336,37 @@ export default function StatusDashboard(p: Props) {
         </Section>
 
         <Section title={t('Event history')} icon={History}>
-          {events.length === 0 ? (
-            <p className="text-sm text-muted-foreground">{t('No failover events recorded yet.')}</p>
-          ) : (
-            <Table>
-              <TableBody>
-                {events.slice(0, 50).map((ev) => {
-                  const m = EVENT_META[ev.kind] || { i: '•', cls: 'text-muted-foreground', ru: ev.kind }
-                  const pathStr = ev.from && ev.to ? `${ev.from} → ${ev.to}` : ev.to || ev.from || ''
-                  return (
-                    <TableRow key={ev.ts + ':' + ev.kind}>
-                      <TableCell className={cn('whitespace-nowrap font-semibold', m.cls)}>{m.i} {m.ru}</TableCell>
-                      <TableCell className="whitespace-nowrap">{pathStr}</TableCell>
-                      <TableCell className="text-muted-foreground">{ev.reason || ''}</TableCell>
-                      <TableCell className="whitespace-nowrap text-right text-muted-foreground">{fmtWhen(ev.ts)}</TableCell>
-                    </TableRow>
-                  )
-                })}
-              </TableBody>
-            </Table>
-          )}
+          <EventHistoryTable events={events} />
         </Section>
       </div>
     </div>
   )
 }
+
+
+const EventHistoryTable = memo(({ events }: { events: EventRow[] }) => {
+  if (events.length === 0) {
+    return <p className="text-sm text-muted-foreground">{t('No failover events recorded yet.')}</p>
+  }
+  return (
+    <Table>
+      <TableBody>
+        {events.slice(0, 50).map((ev) => {
+          const m = EVENT_META[ev.kind] || { i: '•', cls: 'text-muted-foreground', ru: ev.kind }
+          const pathStr = ev.from && ev.to ? `${ev.from} → ${ev.to}` : ev.to || ev.from || ''
+          return (
+            <TableRow key={ev.ts + ':' + ev.kind}>
+              <TableCell className={cn('whitespace-nowrap font-semibold', m.cls)}>{m.i} {m.ru}</TableCell>
+              <TableCell className="whitespace-nowrap">{pathStr}</TableCell>
+              <TableCell className="text-muted-foreground">{ev.reason || ''}</TableCell>
+              <TableCell className="whitespace-nowrap text-right text-muted-foreground">{fmtWhen(ev.ts)}</TableCell>
+            </TableRow>
+          )
+        })}
+      </TableBody>
+    </Table>
+  )
+})
 
 function MiniStat({ label, value, sub, tone }: { label: string; value: React.ReactNode; sub?: React.ReactNode; tone?: string }) {
   return (
@@ -432,7 +439,7 @@ function PathCard({ title, dest, sub, tone }: {
   )
 }
 
-function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: number; tx: number }> }) {
+const Chain = memo(({ status, rates }: { status: Status; rates: Record<string, { rx: number; tx: number }> }) => {
   const s = status.summary
   const state = s.state || ''
   const mode = s.mode || ''
@@ -512,4 +519,4 @@ function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: 
       </p>
     </div>
   )
-}
+})
