@@ -126,7 +126,7 @@ done
 
 # ──────────────────────────── 2. install splify packages ───────────────────
 install_splify() {
-  if command -v splify-ctl >/dev/null 2>&1 || [ -x /usr/local/sbin/splify-ctl ]; then
+  if [ "${FORCE_UPDATE:-0}" != "1" ] && { command -v splify-ctl >/dev/null 2>&1 || [ -x /usr/local/sbin/splify-ctl ]; }; then
     say "splify уже установлен."
     return 0
   fi

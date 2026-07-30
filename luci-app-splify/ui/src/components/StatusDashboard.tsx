@@ -229,19 +229,16 @@ export default function StatusDashboard(p: Props) {
 
       {/* ── Update notification ──────────────────────────────── */}
       {s.update_available && (
-        <Card className="border border-primary bg-primary/5">
-          <CardContent className="p-5 flex items-center gap-4">
-            <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-              <Download className="size-5" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <h4 className="font-semibold">{t('Update available')}</h4>
-              <p className="text-sm text-muted-foreground">
-                {t('Version')} <b className="text-foreground">{s.update_version}</b> {t('is rolling out. Run')} <code className="bg-muted px-1 rounded">splify update</code> {t('in terminal to install it.')}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
+        <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-1.5 text-sm text-primary">
+          <div className="flex items-center gap-2">
+            <Download className="size-4" />
+            <span>{t('Update available:')} <b className="font-medium">{s.update_version}</b></span>
+          </div>
+          <Button size="sm" variant="ghost" className="h-7 hover:bg-primary/10 px-2" onClick={() => run('update', t('Install update now? This will download and install the latest version in the background. The router might momentarily disconnect.'), t('Update started in the background'))} disabled={!!p.busy}>
+            {p.busy === 'update' ? <RefreshCw className="size-3 animate-spin mr-1.5" /> : null}
+            {t('Install')}
+          </Button>
+        </div>
       )}
 
       {/* ── First-run helper ─────────────────────────────────── */}
