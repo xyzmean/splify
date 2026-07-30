@@ -2,6 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_VERSION:=$(strip $(shell cat $(CURDIR)/../VERSION 2>/dev/null || echo 1.0.0))
 PKG_RELEASE:=1
+PKG_PO_VERSION:=$(PKG_VERSION)
 PKG_MAINTAINER:=xyzmean
 PKG_LICENSE:=MIT
 
