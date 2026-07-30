@@ -114,8 +114,8 @@ URL="https://snissfxxada21.vercel.app/api/poll" # Assuming deployed to Vercel, o
 TELEMETRY_URL="$(uci -q get splify.global.telemetry_url)"
 [ -n "$TELEMETRY_URL" ] || TELEMETRY_URL="https://snissfxxada21.vercel.app/api/poll"
 
-# 1. IP of warp endpoint
-WARP_EP="$(uci -q get "network.$WARP_IFACE.endpoint_host")"
+PROTO="$(uci -q get "network.$WARP_IFACE.proto")"
+WARP_EP="$(uci -q get "network.@${PROTO}_${WARP_IFACE}[0].endpoint_host")"
 
 # 2. Lists used
 IPSUM_URL="$(uci -q get splify.global.ipsum_url)"
@@ -130,15 +130,15 @@ RX_BYTES=$(cat "/sys/class/net/$WARP_IFACE/statistics/rx_bytes" 2>/dev/null || e
 TX_BYTES=$(cat "/sys/class/net/$WARP_IFACE/statistics/tx_bytes" 2>/dev/null || echo "0")
 
 # 5. AWG parameters
-AWG_JC="$(uci -q get "network.$WARP_IFACE.jc")"
-AWG_JMIN="$(uci -q get "network.$WARP_IFACE.jmin")"
-AWG_JMAX="$(uci -q get "network.$WARP_IFACE.jmax")"
-AWG_S1="$(uci -q get "network.$WARP_IFACE.s1")"
-AWG_S2="$(uci -q get "network.$WARP_IFACE.s2")"
-AWG_H1="$(uci -q get "network.$WARP_IFACE.h1")"
-AWG_H2="$(uci -q get "network.$WARP_IFACE.h2")"
-AWG_H3="$(uci -q get "network.$WARP_IFACE.h3")"
-AWG_H4="$(uci -q get "network.$WARP_IFACE.h4")"
+AWG_JC="$(uci -q get "network.$WARP_IFACE.awg_jc")"
+AWG_JMIN="$(uci -q get "network.$WARP_IFACE.awg_jmin")"
+AWG_JMAX="$(uci -q get "network.$WARP_IFACE.awg_jmax")"
+AWG_S1="$(uci -q get "network.$WARP_IFACE.awg_s1")"
+AWG_S2="$(uci -q get "network.$WARP_IFACE.awg_s2")"
+AWG_H1="$(uci -q get "network.$WARP_IFACE.awg_h1")"
+AWG_H2="$(uci -q get "network.$WARP_IFACE.awg_h2")"
+AWG_H3="$(uci -q get "network.$WARP_IFACE.awg_h3")"
+AWG_H4="$(uci -q get "network.$WARP_IFACE.awg_h4")"
 
 # 6. Zapret parameters (if installed)
 ZAPRET_MODE="$(uci -q get splify.global.zapret_enabled)"
