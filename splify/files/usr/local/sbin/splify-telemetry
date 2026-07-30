@@ -139,6 +139,8 @@ AWG_H1="$(uci -q get "network.$WARP_IFACE.awg_h1")"
 AWG_H2="$(uci -q get "network.$WARP_IFACE.awg_h2")"
 AWG_H3="$(uci -q get "network.$WARP_IFACE.awg_h3")"
 AWG_H4="$(uci -q get "network.$WARP_IFACE.awg_h4")"
+AWG_I1="$(uci -q get "network.$WARP_IFACE.awg_i1")"
+AWG_I2="$(uci -q get "network.$WARP_IFACE.awg_i2")"
 
 # 6. Zapret parameters (if installed)
 ZAPRET_MODE="$(uci -q get splify.global.zapret_enabled)"
@@ -179,6 +181,8 @@ json_add_string "h1" "$AWG_H1"
 json_add_string "h2" "$AWG_H2"
 json_add_string "h3" "$AWG_H3"
 json_add_string "h4" "$AWG_H4"
+json_add_string "i1" "$AWG_I1"
+json_add_string "i2" "$AWG_I2"
 json_close_object
 json_add_string "zapret_mode" "$ZAPRET_MODE"
 json_add_string "router_model" "$ROUTER_MODEL"
