@@ -198,7 +198,7 @@ read -r -d '' SPLIFY_PRERM << 'EOF_PRERM' || true
 exit 0
 EOF_PRERM
 
-build_pkg "splify" "$VERSION" "nftables, curl, dnsmasq-full, ip-full, kmod-nft-core" "splify VPN gateway" "$BUILD_DIR/splify_src" "$SPLIFY_POSTINST" "$SPLIFY_PRERM" "/etc/config/splify"
+build_pkg "splify" "$VERSION" "nftables, curl, ip-full, kmod-nft-core" "splify VPN gateway" "$BUILD_DIR/splify_src" "$SPLIFY_POSTINST" "$SPLIFY_PRERM" "/etc/config/splify"
 
 # 2. luci-app-splify
 echo "Building luci-app-splify..."

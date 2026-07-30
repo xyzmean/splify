@@ -13,7 +13,7 @@ define Package/splify
   CATEGORY:=Network
   TITLE:=splify — простой split-tunnel VPN-шлюз для OpenWrt
   URL:=https://github.com/xyzmean/splify
-  DEPENDS:=+nftables +curl +dnsmasq-full +ip-full +kmod-nft-core
+  DEPENDS:=+nftables +curl +ip-full +kmod-nft-core
   PKGARCH:=all
 endef
 
