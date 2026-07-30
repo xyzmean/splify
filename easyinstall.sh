@@ -144,8 +144,8 @@ install_splify() {
       *splify*) wget -qO "$TMP/${u##*/}" "$u" || err "не удалось скачать $u" ;;
     esac
   done
-  for pkg in splify- luci-app-splify- luci-i18n-splify-ru-; do
-    ls "$TMP/$pkg"*.$PKG_EXT >/dev/null 2>&1 || err "в релизе не хватает пакета $pkg*.$PKG_EXT"
+  for pkg in splify luci-app-splify luci-i18n-splify-ru; do
+    ls "$TMP/$pkg"*.$PKG_EXT >/dev/null 2>&1 || err "в релизе не хватает пакета $pkg"
   done
 
   say "Устанавливаю splify…"

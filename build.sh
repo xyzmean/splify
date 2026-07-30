@@ -141,6 +141,9 @@ EOF3
     fi
     
     ./ipkg-build "$pkg_dir" "$PWD/$OUT_DIR"
+    
+    # Rename ipk to use hyphen instead of underscore
+    mv "$PWD/$OUT_DIR/${pkg_name}_${version}-1_all.ipk" "$PWD/$OUT_DIR/${pkg_name}-${version}-1_all.ipk" 2>/dev/null || true
 
     # Build APK
     local clean_deps=$(echo "$depends" | sed 's/,//g')
@@ -156,7 +159,7 @@ EOF3
         apk_script_args="$apk_script_args --script pre-deinstall:$pkg_dir/.pre-deinstall"
     fi
 
-    local out_apk="$OUT_DIR/${pkg_name}_${version}-1_noarch.apk"
+    local out_apk="$OUT_DIR/${pkg_name}-${version}-1_noarch.apk"
 
     docker run --rm -v "$PWD":/workspace -w /workspace alpine:latest sh -c "apk update && apk add apk-tools && apk mkpkg --info name:$pkg_name --info version:$version-r1 --info description:'$description' --info arch:noarch --info depends:'$clean_deps' $apk_script_args -F $src_dir -o $out_apk"
     

@@ -50,8 +50,8 @@ for u in $URLS; do
 done
 # Релиз состоит из трёх пакетов — убедимся, что скачались все, иначе ставится
 # только демон без веб-интерфейса и перевода.
-for pkg in splify- luci-app-splify- luci-i18n-splify-ru-; do
-  ls "$TMP/$pkg"*.$PKG_EXT >/dev/null 2>&1 || err "в релизе не хватает пакета $pkg*.$PKG_EXT"
+for pkg in splify luci-app-splify luci-i18n-splify-ru; do
+  ls "$TMP/$pkg"*.$PKG_EXT >/dev/null 2>&1 || err "в релизе не хватает пакета $pkg"
 done
 
 # 4) установить (зависимости подтянутся из фидов)
