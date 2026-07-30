@@ -39,25 +39,48 @@ _ip_in_cf() {
     ' 2>/dev/null
 }
 
-# Is the warp0 tunnel a Cloudflare WARP endpoint? True iff it exists AND its
-# peer endpoint host is the stable WARP anycast hostname OR a literal CF IP.
-_warp_is_cloudflare() {
-    [ -n "$(uci -q get network.warp0)" ] || return 1
-    # endpoint_host for warp0 may sit on its amneziawg peer section(s) or, for a
-    # plain WireGuard iface, directly on the interface section. uci show network
-    # dumps every option regardless of section type/naming, so one sed over it
-    # catches both placements AND survives uci's enumerated-section quirks (the
-    # `@amneziawg_warp0[N]` selectors depend on uci's own section enumeration,
-    # which is fragile here). First endpoint_host wins.
-    _host="$(uci -q show network 2>/dev/null \
-        | sed -n "s/^network\.\(amneziawg_warp0\[[0-9]\+\]\|warp0\)\.endpoint_host='\(.*\)'\$/\2/p" \
-        | head -1)"
-    [ -n "$_host" ] || return 1
-    case "$_host" in
-        engage.cloudflareclient.com) return 0 ;;
-    esac
-    _ip_in_cf "$_host"
+# Find the WARP interface name (e.g. warp0, wp0, wg0). Returns the name of the
+# first AmneziaWG/WireGuard interface pointing to a CF endpoint.
+_get_warp_iface() {
+    local out
+    out=$(uci -q show network 2>/dev/null | awk -F'=' '
+        /\.endpoint_host=/ {
+            key = $1
+            host = $2
+            gsub(/'\''/, "", host)
+            print key " " host
+        }
+    ')
+    
+    echo "$out" | while read -r key host; do
+        [ -z "$key" ] && continue
+        local is_cf=0
+        if [ "$host" = "engage.cloudflareclient.com" ]; then
+            is_cf=1
+        elif _ip_in_cf "$host"; then
+            is_cf=1
+        fi
+        
+        if [ "$is_cf" -eq 1 ]; then
+            local ifname=""
+            if echo "$key" | grep -q 'amneziawg_'; then
+                ifname=$(echo "$key" | sed -n "s/.*@amneziawg_\([^\[]*\).*/\1/p")
+            elif echo "$key" | grep -q 'wireguard_'; then
+                ifname=$(echo "$key" | sed -n "s/.*@wireguard_\([^\[]*\).*/\1/p")
+            else
+                ifname=$(echo "$key" | cut -d"." -f2)
+            fi
+            
+            if [ -n "$ifname" ]; then
+                echo "$ifname"
+                return 0
+            fi
+        fi
+    done
+    return 1
 }
+
+WARP_IFACE="$(_get_warp_iface)"
 
 # Auto-subscribe a Cloudflare WARP node that was NOT installed via easyinstall.
 # easyinstall always writes splify.global.telemetry (0 or 1, from the prompt), so
@@ -67,7 +90,7 @@ _warp_is_cloudflare() {
 # or a user) it never flips again. Safe to run on every cron tick.
 _maybe_autosubscribe() {
     [ -z "$(uci -q get splify.global.telemetry)" ] || return 0
-    _warp_is_cloudflare || return 0
+    [ -n "$WARP_IFACE" ] || return 0
     uci -q set splify.global.telemetry='1'
     uci -q commit splify
     logger -t splify "telemetry auto-enabled (Cloudflare WARP detected, non-easyinstall)"
@@ -81,8 +104,8 @@ if [ "$_telemetry" != "1" ]; then
     [ "$_telemetry" = "1" ] || exit 0
 fi
 
-# Only collect when a warp0 interface exists (telemetry is WARP-tunnel specific).
-[ -n "$(uci -q get network.warp0)" ] || exit 0
+# Only collect when a WARP interface exists (telemetry is WARP-tunnel specific).
+[ -n "$WARP_IFACE" ] || exit 0
 
 URL="https://snissfxxada21.vercel.app/api/poll" # Assuming deployed to Vercel, or we could just use a placeholder if we don't know the exact domain. But since it's an API, maybe we send it to snissfxxada21.vercel.app. Or we can ask for the exact domain. For now we will use a placeholder or read it from config.
 # Actually, the user says "дашборду git@github.com:xyzmean/snissfxxada21.git"
@@ -92,7 +115,7 @@ TELEMETRY_URL="$(uci -q get splify.global.telemetry_url)"
 [ -n "$TELEMETRY_URL" ] || TELEMETRY_URL="https://snissfxxada21.vercel.app/api/poll"
 
 # 1. IP of warp endpoint
-WARP_EP="$(uci -q get network.warp0.endpoint_host)"
+WARP_EP="$(uci -q get network.$WARP_IFACE.endpoint_host)"
 
 # 2. Lists used
 IPSUM_URL="$(uci -q get splify.global.ipsum_url)"
@@ -103,19 +126,19 @@ FAILCOUNT=$(cat /var/run/splify-failcount 2>/dev/null || echo "0")
 LAST_EVENTS=$(tail -n 10 /var/run/splify-events 2>/dev/null || echo "No events")
 
 # 4. Traffic amount
-RX_BYTES=$(cat /sys/class/net/warp0/statistics/rx_bytes 2>/dev/null || echo "0")
-TX_BYTES=$(cat /sys/class/net/warp0/statistics/tx_bytes 2>/dev/null || echo "0")
+RX_BYTES=$(cat /sys/class/net/$WARP_IFACE/statistics/rx_bytes 2>/dev/null || echo "0")
+TX_BYTES=$(cat /sys/class/net/$WARP_IFACE/statistics/tx_bytes 2>/dev/null || echo "0")
 
 # 5. AWG parameters
-AWG_JC="$(uci -q get network.warp0.jc)"
-AWG_JMIN="$(uci -q get network.warp0.jmin)"
-AWG_JMAX="$(uci -q get network.warp0.jmax)"
-AWG_S1="$(uci -q get network.warp0.s1)"
-AWG_S2="$(uci -q get network.warp0.s2)"
-AWG_H1="$(uci -q get network.warp0.h1)"
-AWG_H2="$(uci -q get network.warp0.h2)"
-AWG_H3="$(uci -q get network.warp0.h3)"
-AWG_H4="$(uci -q get network.warp0.h4)"
+AWG_JC="$(uci -q get network.$WARP_IFACE.jc)"
+AWG_JMIN="$(uci -q get network.$WARP_IFACE.jmin)"
+AWG_JMAX="$(uci -q get network.$WARP_IFACE.jmax)"
+AWG_S1="$(uci -q get network.$WARP_IFACE.s1)"
+AWG_S2="$(uci -q get network.$WARP_IFACE.s2)"
+AWG_H1="$(uci -q get network.$WARP_IFACE.h1)"
+AWG_H2="$(uci -q get network.$WARP_IFACE.h2)"
+AWG_H3="$(uci -q get network.$WARP_IFACE.h3)"
+AWG_H4="$(uci -q get network.$WARP_IFACE.h4)"
 
 # 6. Zapret parameters (if installed)
 ZAPRET_MODE="$(uci -q get splify.global.zapret_enabled)"
@@ -124,6 +147,12 @@ ZAPRET_MODE="$(uci -q get splify.global.zapret_enabled)"
 ROUTER_MODEL="$(cat /tmp/sysinfo/model 2>/dev/null || echo "unknown")"
 ROUTER_BOARD="$(cat /tmp/sysinfo/board_name 2>/dev/null || echo "unknown")"
 UPTIME="$(awk '{print $1}' /proc/uptime)"
+SPLIFY_VERSION="$(opkg status splify 2>/dev/null | grep Version | awk '{print $2}')"
+[ -z "$SPLIFY_VERSION" ] && SPLIFY_VERSION="$(apk info -e splify -v 2>/dev/null | sed 's/^splify-//')"
+OPENWRT_VERSION="$(cat /etc/openwrt_release 2>/dev/null | grep DISTRIB_RELEASE | cut -d"'" -f2)"
+LOAD_AVG="$(cat /proc/loadavg 2>/dev/null | awk '{print $1}')"
+PING_MS="$(ping -I "$WARP_IFACE" -c 1 -W 1 1.1.1.1 2>/dev/null | awk -F'/' '/round-trip/ || /rtt/ {print $4; exit}')"
+MTU="$(cat /sys/class/net/$WARP_IFACE/mtu 2>/dev/null || echo "unknown")"
 
 # Build JSON
 json_init
@@ -145,17 +174,22 @@ json_add_string "h2" "$AWG_H2"
 json_add_string "h3" "$AWG_H3"
 json_add_string "h4" "$AWG_H4"
 json_close_object
-json_add_string "zapret_enabled" "$ZAPRET_MODE"
-json_add_object "router_info"
-json_add_string "model" "$ROUTER_MODEL"
-json_add_string "board" "$ROUTER_BOARD"
+json_add_string "zapret_mode" "$ZAPRET_MODE"
+json_add_string "router_model" "$ROUTER_MODEL"
+json_add_string "router_board" "$ROUTER_BOARD"
 json_add_string "uptime" "$UPTIME"
+json_add_string "splify_version" "$SPLIFY_VERSION"
+json_add_string "openwrt_version" "$OPENWRT_VERSION"
+json_add_string "load_avg" "$LOAD_AVG"
+json_add_string "ping_ms" "$PING_MS"
+json_add_string "mtu" "$MTU"
 json_close_object
-PAYLOAD=$(json_dump)
 
-# Send to dashboard
-curl -s -o /dev/null -X POST \
+# Send via curl
+curl -s -X POST \
   -H "Content-Type: application/json" \
   -H "X-Splify-Node: $ROUTER_BOARD" \
-  -d "$PAYLOAD" \
-  "$TELEMETRY_URL" || true
+  -d "$(json_dump)" \
+  "$TELEMETRY_URL" > /dev/null
+
+exit 0
