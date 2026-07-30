@@ -35,6 +35,7 @@ export interface Status {
   summary: {
     mode: string; state: string; active_iface: string; killswitch: number
     fail_count: number; lan_iface: string; lan_cidr: string; zapret_version: string
+    update_available?: boolean; update_version?: string
   }
   endpoints: Endpoint[]
   lists: ListRow[]

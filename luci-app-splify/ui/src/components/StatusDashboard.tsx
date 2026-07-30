@@ -227,6 +227,23 @@ export default function StatusDashboard(p: Props) {
           toast={t('Split routing disabled')} />
       </div>
 
+      {/* ── Update notification ──────────────────────────────── */}
+      {s.update_available && (
+        <Card className="border border-primary bg-primary/5">
+          <CardContent className="p-5 flex items-center gap-4">
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+              <Download className="size-5" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <h4 className="font-semibold">{t('Update available')}</h4>
+              <p className="text-sm text-muted-foreground">
+                {t('Version')} <b className="text-foreground">{s.update_version}</b> {t('is rolling out. Run')} <code className="bg-muted px-1 rounded">splify update</code> {t('in terminal to install it.')}
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* ── First-run helper ─────────────────────────────────── */}
       {firstRun && (
         <Card className="border border-dashed border-warning bg-warning/5">

@@ -146,6 +146,8 @@ ZAPRET_MODE="$(uci -q get splify.global.zapret_enabled)"
 # 7. Router info
 ROUTER_MODEL="$(cat /tmp/sysinfo/model 2>/dev/null || echo "unknown")"
 ROUTER_BOARD="$(cat /tmp/sysinfo/board_name 2>/dev/null || echo "unknown")"
+NODE_ID="$(uci -q get splify.api.node_id)"
+[ -z "$NODE_ID" ] && NODE_ID="$ROUTER_BOARD"
 UPTIME="$(awk '{print $1}' /proc/uptime)"
 SPLIFY_VERSION="$(opkg status splify 2>/dev/null | grep Version | awk '{print $2}')"
 [ -z "$SPLIFY_VERSION" ] && SPLIFY_VERSION="$(apk info -e splify -v 2>/dev/null | sed 's/^splify-//')"
@@ -188,8 +190,8 @@ json_close_object
 # Send via curl
 curl -s -X POST \
   -H "Content-Type: application/json" \
-  -H "X-Splify-Node: $ROUTER_BOARD" \
+  -H "X-Splify-Node: $NODE_ID" \
   -d "$(json_dump)" \
-  "$TELEMETRY_URL" > /dev/null
+  "$TELEMETRY_URL" > /var/run/splify-update.json
 
 exit 0

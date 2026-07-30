@@ -642,6 +642,13 @@ OVERALL="$(SEV_NAME "$WORST")"
 _zv="$ZAPRET_VERSION"
 zapret_available || _zv=""
 
+_update_avail="false"
+_update_ver=""
+if [ -f /var/run/splify-update.json ]; then
+    _update_avail="$(jsonfilter -q -i /var/run/splify-update.json -e '@.update.available' 2>/dev/null || echo false)"
+    _update_ver="$(jsonfilter -q -i /var/run/splify-update.json -e '@.update.version' 2>/dev/null || echo "")"
+fi
+
 if [ "$JSON" = 1 ]; then
     # --snapshot wraps the status object and folds in the events array so the
     # dashboard gets both in a single ubus call (one doctor fork instead of two).
@@ -651,8 +658,8 @@ if [ "$JSON" = 1 ]; then
         printf '{'
     fi
     printf '"overall":"%s",' "$OVERALL"
-    printf '"summary":{"mode":"%s","state":"%s","active_iface":"%s","killswitch":%s,"fail_count":%s,"lan_iface":"%s","lan_cidr":"%s","zapret_version":"%s"},' \
-        "$(json_esc "$MODE")" "$(json_esc "$STATE")" "$(json_esc "$ACTIVE")" "${KILLSWITCH:-0}" "$(fail_get)" "$(json_esc "$LAN_IFACE")" "$(json_esc "$LAN_CIDR")" "$(json_esc "$_zv")"
+    printf '"summary":{"mode":"%s","state":"%s","active_iface":"%s","killswitch":%s,"fail_count":%s,"lan_iface":"%s","lan_cidr":"%s","zapret_version":"%s","update_available":%s,"update_version":"%s"},' \
+        "$(json_esc "$MODE")" "$(json_esc "$STATE")" "$(json_esc "$ACTIVE")" "${KILLSWITCH:-0}" "$(fail_get)" "$(json_esc "$LAN_IFACE")" "$(json_esc "$LAN_CIDR")" "$(json_esc "$_zv")" "$_update_avail" "$(json_esc "$_update_ver")"
     printf '"endpoints":[%s],' "${EP_JSON%,}"
     printf '"lists":[%s],' "${LIST_JSON%,}"
     printf '"checks":['
