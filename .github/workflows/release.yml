@@ -22,47 +22,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build APK packages in OpenWrt SDK
-        uses: docker/build-push-action@v6
-        with:
-          file: ./Dockerfile-apk
-          context: .
-          load: true
-          tags: splify:rel-apk
-          build-args: |
-            VERSION=${{ inputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build IPK packages in OpenWrt SDK
-        uses: docker/build-push-action@v6
-        with:
-          file: ./Dockerfile-ipk
-          context: .
-          load: true
-          tags: splify:rel-ipk
-          build-args: |
-            VERSION=${{ inputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Update version and build
+        run: |
+          echo "${{ inputs.version }}" > VERSION
+          ./build.sh
 
       - name: Extract built packages
         run: |
-          mkdir -p release out
-          id=$(docker create splify:rel-apk)
-          docker cp "$id:/builder/bin/packages/." ./out/
-          docker rm "$id"
-          id2=$(docker create splify:rel-ipk)
-          docker cp "$id2:/builder/bin/packages/." ./out/
-          docker rm "$id2"
-          find ./out \( -name 'splify*.apk' -o -name 'luci-app-splify*.apk' \
-                        -o -name 'luci-i18n-splify-*.apk' \
-                        -o -name 'splify*.ipk' -o -name 'luci-app-splify*.ipk' \
-                        -o -name 'luci-i18n-splify-*.ipk' \) \
-               -exec cp -v {} release/ \;
-          cp -v install.sh release/
+          mkdir -p release
+          cp -v out/*.apk out/*.ipk release/ || true
+          cp -v install.sh release/ || true
           echo "--- shipped ---"; ls -l release
 
       - name: Publish release

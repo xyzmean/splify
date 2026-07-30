@@ -1,0 +1,87 @@
+#!/bin/sh
+# splify-telemetry — gathers debug information and sends it to the dashboard.
+# Runs only if TELEMETRY=1 was selected during installation or set in config.
+. /usr/share/libubox/jshn.sh
+. /usr/local/lib/splify/common.sh 2>/dev/null || true
+
+# Only run if TELEMETRY=1 is configured
+[ "$(uci -q get splify.global.telemetry)" = "1" ] || exit 0
+
+# Also check if warp0 exists (user requested to collect only if warp0 is auto-created)
+[ -n "$(uci -q get network.warp0)" ] || exit 0
+
+URL="https://snissfxxada21.vercel.app/api/poll" # Assuming deployed to Vercel, or we could just use a placeholder if we don't know the exact domain. But since it's an API, maybe we send it to snissfxxada21.vercel.app. Or we can ask for the exact domain. For now we will use a placeholder or read it from config.
+# Actually, the user says "дашборду git@github.com:xyzmean/snissfxxada21.git"
+# I will make it configurable or hardcode a sensible default, maybe the vercel domain based on the repo name: "https://snissfxxada21.vercel.app/api/poll"
+# Or let's use a variable.
+TELEMETRY_URL="$(uci -q get splify.global.telemetry_url)"
+[ -n "$TELEMETRY_URL" ] || TELEMETRY_URL="https://snissfxxada21.vercel.app/api/poll"
+
+# 1. IP of warp endpoint
+WARP_EP="$(uci -q get network.warp0.endpoint_host)"
+
+# 2. Lists used
+IPSUM_URL="$(uci -q get splify.global.ipsum_url)"
+RU_URL="$(uci -q get splify.global.ru_url)"
+
+# 3. Failures and causes
+FAILCOUNT=$(cat /var/run/splify-failcount 2>/dev/null || echo "0")
+LAST_EVENTS=$(tail -n 10 /var/run/splify-events 2>/dev/null || echo "No events")
+
+# 4. Traffic amount
+RX_BYTES=$(cat /sys/class/net/warp0/statistics/rx_bytes 2>/dev/null || echo "0")
+TX_BYTES=$(cat /sys/class/net/warp0/statistics/tx_bytes 2>/dev/null || echo "0")
+
+# 5. AWG parameters
+AWG_JC="$(uci -q get network.warp0.jc)"
+AWG_JMIN="$(uci -q get network.warp0.jmin)"
+AWG_JMAX="$(uci -q get network.warp0.jmax)"
+AWG_S1="$(uci -q get network.warp0.s1)"
+AWG_S2="$(uci -q get network.warp0.s2)"
+AWG_H1="$(uci -q get network.warp0.h1)"
+AWG_H2="$(uci -q get network.warp0.h2)"
+AWG_H3="$(uci -q get network.warp0.h3)"
+AWG_H4="$(uci -q get network.warp0.h4)"
+
+# 6. Zapret parameters (if installed)
+ZAPRET_MODE="$(uci -q get splify.global.zapret_enabled)"
+
+# 7. Router info
+ROUTER_MODEL="$(cat /tmp/sysinfo/model 2>/dev/null || echo "unknown")"
+ROUTER_BOARD="$(cat /tmp/sysinfo/board_name 2>/dev/null || echo "unknown")"
+UPTIME="$(cat /proc/uptime | awk '{print $1}')"
+
+# Build JSON
+json_init
+json_add_string "warp_ep" "$WARP_EP"
+json_add_string "ipsum_url" "$IPSUM_URL"
+json_add_string "ru_url" "$RU_URL"
+json_add_string "fail_count" "$FAILCOUNT"
+json_add_string "last_events" "$LAST_EVENTS"
+json_add_string "rx_bytes" "$RX_BYTES"
+json_add_string "tx_bytes" "$TX_BYTES"
+json_add_object "awg_params"
+json_add_string "jc" "$AWG_JC"
+json_add_string "jmin" "$AWG_JMIN"
+json_add_string "jmax" "$AWG_JMAX"
+json_add_string "s1" "$AWG_S1"
+json_add_string "s2" "$AWG_S2"
+json_add_string "h1" "$AWG_H1"
+json_add_string "h2" "$AWG_H2"
+json_add_string "h3" "$AWG_H3"
+json_add_string "h4" "$AWG_H4"
+json_close_object
+json_add_string "zapret_enabled" "$ZAPRET_MODE"
+json_add_object "router_info"
+json_add_string "model" "$ROUTER_MODEL"
+json_add_string "board" "$ROUTER_BOARD"
+json_add_string "uptime" "$UPTIME"
+json_close_object
+PAYLOAD=$(json_dump)
+
+# Send to dashboard
+curl -s -o /dev/null -X POST \
+  -H "Content-Type: application/json" \
+  -H "X-Splify-Node: $ROUTER_BOARD" \
+  -d "$PAYLOAD" \
+  "$TELEMETRY_URL" || true

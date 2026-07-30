@@ -47,6 +47,7 @@ CRON=/etc/crontabs/root; touch "$$CRON"
 grep -q 'splify-update-ipsum'   "$$CRON" || echo '30 4 * * * /usr/local/sbin/splify-update-ipsum >/dev/null 2>&1'   >> "$$CRON"
 grep -q 'splify-update-ru'      "$$CRON" || echo '45 4 * * * /usr/local/sbin/splify-update-ru >/dev/null 2>&1'      >> "$$CRON"
 grep -q 'splify-update-domains' "$$CRON" || echo '50 4 * * * /usr/local/sbin/splify-update-domains >/dev/null 2>&1' >> "$$CRON"
+grep -q 'splify-telemetry'      "$$CRON" || echo '0 */6 * * * /usr/local/sbin/splify-telemetry >/dev/null 2>&1'     >> "$$CRON"
 /etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1
 /etc/init.d/splify enable >/dev/null 2>&1
 /etc/init.d/splify restart >/dev/null 2>&1

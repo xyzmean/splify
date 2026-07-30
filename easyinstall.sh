@@ -510,6 +510,24 @@ setup_firewall() {
   fi
 }
 
+choose_telemetry() {
+  TELEMETRY=0
+  if { [ -r /dev/tty ] && [ -w /dev/tty ] && [ -c /dev/tty ]; } 2>/dev/null; then
+    printf '\n\033[1;36m==>\033[0m %s\n' "Хотите ли вы отправлять анонимную техническую информацию для отладки?"
+    printf '  (IP WARP, списки, параметры awg/zapret, сбои, трафик, модель роутера)\n'
+    printf '  \033[1;32m1\033[0m) Да, помогать в улучшении (отправка на дашборд)\n'
+    printf '  \033[1;32m2\033[0m) Нет\n'
+    printf 'По умолчанию [\033[1;m2\033[0m]: '
+    _telemetry_choice=""
+    read -r _telemetry_choice </dev/tty 2>/dev/null || _telemetry_choice=""
+    case "$_telemetry_choice" in
+      1) TELEMETRY=1 ;;
+      *) TELEMETRY=0 ;;
+    esac
+  fi
+  uci -q set splify.global.telemetry="$TELEMETRY"
+}
+
 # ──────────────────────────── main ──────────────────────────────────────────
 install_splify
 sleep 3
@@ -520,6 +538,8 @@ sleep 3
 choose_endpoint
 sleep 3
 create_warp_iface
+sleep 3
+choose_telemetry
 sleep 3
 register_in_splify
 sleep 3
