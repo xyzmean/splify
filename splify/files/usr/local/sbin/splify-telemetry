@@ -115,7 +115,7 @@ TELEMETRY_URL="$(uci -q get splify.global.telemetry_url)"
 [ -n "$TELEMETRY_URL" ] || TELEMETRY_URL="https://snissfxxada21.vercel.app/api/poll"
 
 # 1. IP of warp endpoint
-WARP_EP="$(uci -q get network.$WARP_IFACE.endpoint_host)"
+WARP_EP="$(uci -q get "network.$WARP_IFACE.endpoint_host")"
 
 # 2. Lists used
 IPSUM_URL="$(uci -q get splify.global.ipsum_url)"
@@ -126,19 +126,19 @@ FAILCOUNT=$(cat /var/run/splify-failcount 2>/dev/null || echo "0")
 LAST_EVENTS=$(tail -n 10 /var/run/splify-events 2>/dev/null || echo "No events")
 
 # 4. Traffic amount
-RX_BYTES=$(cat /sys/class/net/$WARP_IFACE/statistics/rx_bytes 2>/dev/null || echo "0")
-TX_BYTES=$(cat /sys/class/net/$WARP_IFACE/statistics/tx_bytes 2>/dev/null || echo "0")
+RX_BYTES=$(cat "/sys/class/net/$WARP_IFACE/statistics/rx_bytes" 2>/dev/null || echo "0")
+TX_BYTES=$(cat "/sys/class/net/$WARP_IFACE/statistics/tx_bytes" 2>/dev/null || echo "0")
 
 # 5. AWG parameters
-AWG_JC="$(uci -q get network.$WARP_IFACE.jc)"
-AWG_JMIN="$(uci -q get network.$WARP_IFACE.jmin)"
-AWG_JMAX="$(uci -q get network.$WARP_IFACE.jmax)"
-AWG_S1="$(uci -q get network.$WARP_IFACE.s1)"
-AWG_S2="$(uci -q get network.$WARP_IFACE.s2)"
-AWG_H1="$(uci -q get network.$WARP_IFACE.h1)"
-AWG_H2="$(uci -q get network.$WARP_IFACE.h2)"
-AWG_H3="$(uci -q get network.$WARP_IFACE.h3)"
-AWG_H4="$(uci -q get network.$WARP_IFACE.h4)"
+AWG_JC="$(uci -q get "network.$WARP_IFACE.jc")"
+AWG_JMIN="$(uci -q get "network.$WARP_IFACE.jmin")"
+AWG_JMAX="$(uci -q get "network.$WARP_IFACE.jmax")"
+AWG_S1="$(uci -q get "network.$WARP_IFACE.s1")"
+AWG_S2="$(uci -q get "network.$WARP_IFACE.s2")"
+AWG_H1="$(uci -q get "network.$WARP_IFACE.h1")"
+AWG_H2="$(uci -q get "network.$WARP_IFACE.h2")"
+AWG_H3="$(uci -q get "network.$WARP_IFACE.h3")"
+AWG_H4="$(uci -q get "network.$WARP_IFACE.h4")"
 
 # 6. Zapret parameters (if installed)
 ZAPRET_MODE="$(uci -q get splify.global.zapret_enabled)"
@@ -151,10 +151,10 @@ NODE_ID="$(uci -q get splify.api.node_id)"
 UPTIME="$(awk '{print $1}' /proc/uptime)"
 SPLIFY_VERSION="$(opkg status splify 2>/dev/null | grep Version | awk '{print $2}')"
 [ -z "$SPLIFY_VERSION" ] && SPLIFY_VERSION="$(apk info -e splify -v 2>/dev/null | sed 's/^splify-//')"
-OPENWRT_VERSION="$(cat /etc/openwrt_release 2>/dev/null | grep DISTRIB_RELEASE | cut -d"'" -f2)"
-LOAD_AVG="$(cat /proc/loadavg 2>/dev/null | awk '{print $1}')"
+OPENWRT_VERSION="$(grep DISTRIB_RELEASE /etc/openwrt_release 2>/dev/null | cut -d"'" -f2)"
+LOAD_AVG="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
 PING_MS="$(ping -I "$WARP_IFACE" -c 1 -W 1 1.1.1.1 2>/dev/null | awk -F'/' '/round-trip/ || /rtt/ {print $4; exit}')"
-MTU="$(cat /sys/class/net/$WARP_IFACE/mtu 2>/dev/null || echo "unknown")"
+MTU="$(cat "/sys/class/net/$WARP_IFACE/mtu" 2>/dev/null || echo "unknown")"
 
 # Build JSON
 json_init
