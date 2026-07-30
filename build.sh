@@ -205,8 +205,33 @@ echo "Building luci-app-splify..."
 mkdir -p "$BUILD_DIR/luci_src"
 [ -d luci-app-splify/luasrc ] && cp -r luci-app-splify/luasrc/* "$BUILD_DIR/luci_src/" || true
 [ -d luci-app-splify/root ] && cp -r luci-app-splify/root/* "$BUILD_DIR/luci_src/" || true
+# LuCI view modules (the loader shims) + tracked static assets live under
+# htdocs/. The old OpenWrt luci.mk installed htdocs/* to /www/ automatically;
+# without the SDK that step is gone, so it MUST be done explicitly. Skipping it
+# was what broke the dashboard with a "NetworkError": LuCI requests
+# view/splify/main (action { type: view, path: "splify/main" }) and 404s the
+# module because it never shipped in the package.
+#
+# NOTE: the destination www/ must exist BEFORE the copy. With a single-element
+# glob (htdocs/luci-static) `cp -r <one> dest/` where dest is missing renames
+# the source INTO dest — collapsing the luci-static path level so views land at
+# www/resources/view/... instead of www/luci-static/resources/view/... (a 404).
+mkdir -p "$BUILD_DIR/luci_src/www"
+[ -d luci-app-splify/htdocs ] && cp -r luci-app-splify/htdocs/* "$BUILD_DIR/luci_src/www/" || true
 mkdir -p "$BUILD_DIR/luci_src/www/luci-static/resources/splify"
 cp -r luci-app-splify/ui/dist/* "$BUILD_DIR/luci_src/www/luci-static/resources/splify/"
+
+# Cache-busting for the React bundles. Two things carry the release identity:
+#   1. build-id.txt — fetched by the loader shims (main.js/advanced.js) with
+#      cache:'no-store' and appended as ?v= to every bundle URL.
+#   2. the ?v= query the entry bundles (splify-index.js/splify-settings.js) use
+#      to import their shared chunk (splify-x.js) — npm build bakes a placeholder
+#      "?v=0.0.0"; stamping the real VERSION keeps the entry+chunk pair pinned to
+#      one release so a stale HTTP cache can't mix a new entry with an old chunk.
+printf '%s\n' "$VERSION" > "$BUILD_DIR/luci_src/www/luci-static/resources/splify/build-id.txt"
+sed -i -E "s/\?v=[0-9]+\.[0-9]+\.[0-9]+/?v=$VERSION/g" \
+    "$BUILD_DIR/luci_src/www/luci-static/resources/splify/splify-index.js" \
+    "$BUILD_DIR/luci_src/www/luci-static/resources/splify/splify-settings.js"
 
 read -r -d '' LUCI_POSTINST << 'EOF_LUCI_POSTINST' || true
 #!/bin/sh

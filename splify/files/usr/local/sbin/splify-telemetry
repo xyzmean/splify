@@ -1,13 +1,87 @@
 #!/bin/sh
 # splify-telemetry — gathers debug information and sends it to the dashboard.
-# Runs only if TELEMETRY=1 was selected during installation or set in config.
+# Runs only if telemetry=1 is configured (chosen during easyinstall or set in
+# config), OR auto-enabled for a Cloudflare WARP node set up WITHOUT easyinstall
+# (where no one was prompted to opt in). See _maybe_autosubscribe() below.
 . /usr/share/libubox/jshn.sh
 . /usr/local/lib/splify/common.sh 2>/dev/null || true
 
-# Only run if TELEMETRY=1 is configured
-[ "$(uci -q get splify.global.telemetry)" = "1" ] || exit 0
+# Cloudflare's IPv4 ranges (mirrors lists/cloudflare.lst in
+# xyzmean/ru-bypass-ipsets). WARP's UDP endpoint is anycast across these, so an
+# endpoint pinned to a literal CF IP here is a WARP node. engage.cloudflareclient
+# .com is the stable anycast hostname and is matched as a literal too.
+CF_NETS="1.0.0.0/24 1.1.1.0/24 35.200.0.0/14 103.21.244.0/22 103.22.200.0/22 \
+103.31.4.0/22 104.16.0.0/13 104.24.0.0/14 108.162.192.0/18 131.0.72.0/22 \
+141.101.64.0/18 162.158.0.0/15 172.64.0.0/13 173.245.48.0/20 188.114.96.0/20 \
+190.93.240.0/20 197.234.240.0/22 198.41.128.0/17"
 
-# Also check if warp0 exists (user requested to collect only if warp0 is auto-created)
+# Is $1 a Cloudflare IPv4? busybox awk provides and()/compl()/rshift()
+# (verified on the OpenWrt toolchain), so the prefix-mask math is one awk pass
+# and needs no extra tools. Non-IPv4 input returns false.
+_ip_in_cf() {
+    case "$1" in
+        *[!0-9.]*|"") return 1 ;;   # not a dotted-quad literal
+    esac
+    awk -v ip="$1" -v nets="$CF_NETS" '
+        function i2n(s,   a) { split(s,a,"."); return (a[1]*16777216)+(a[2]*65536)+(a[3]*256)+a[4] }
+        BEGIN {
+            if (split(ip, p, ".") != 4) exit 1
+            for (i = 1; i <= 4; i++) if (p[i] !~ /^[0-9]+$/ || p[i] > 255) exit 1
+            pip = i2n(ip)
+            m = split(nets, c, " ")
+            for (i = 1; i <= m; i++) {
+                split(c[i], e, "/"); pl = e[2] + 0
+                mask = and(compl(rshift(0xffffffff, pl)), 0xffffffff)
+                if (and(pip, mask) == and(i2n(e[1]), mask)) exit 0
+            }
+            exit 1
+        }
+    ' 2>/dev/null
+}
+
+# Is the warp0 tunnel a Cloudflare WARP endpoint? True iff it exists AND its
+# peer endpoint host is the stable WARP anycast hostname OR a literal CF IP.
+_warp_is_cloudflare() {
+    [ -n "$(uci -q get network.warp0)" ] || return 1
+    # endpoint_host for warp0 may sit on its amneziawg peer section(s) or, for a
+    # plain WireGuard iface, directly on the interface section. uci show network
+    # dumps every option regardless of section type/naming, so one sed over it
+    # catches both placements AND survives uci's enumerated-section quirks (the
+    # `@amneziawg_warp0[N]` selectors depend on uci's own section enumeration,
+    # which is fragile here). First endpoint_host wins.
+    _host="$(uci -q show network 2>/dev/null \
+        | sed -n "s/^network\.\(amneziawg_warp0\[[0-9]\+\]\|warp0\)\.endpoint_host='\(.*\)'\$/\2/p" \
+        | head -1)"
+    [ -n "$_host" ] || return 1
+    case "$_host" in
+        engage.cloudflareclient.com) return 0 ;;
+    esac
+    _ip_in_cf "$_host"
+}
+
+# Auto-subscribe a Cloudflare WARP node that was NOT installed via easyinstall.
+# easyinstall always writes splify.global.telemetry (0 or 1, from the prompt), so
+# an UNSET option is a reliable "no one opted in or out" marker. When that is the
+# case AND warp0 points at Cloudflare WARP, opt telemetry in by default so these
+# auto-created tunnels can be debugged. Idempotent: once set (by us, easyinstall
+# or a user) it never flips again. Safe to run on every cron tick.
+_maybe_autosubscribe() {
+    [ -z "$(uci -q get splify.global.telemetry)" ] || return 0
+    _warp_is_cloudflare || return 0
+    uci -q set splify.global.telemetry='1'
+    uci -q commit splify
+    logger -t splify "telemetry auto-enabled (Cloudflare WARP detected, non-easyinstall)"
+}
+
+# Only run if telemetry=1 is configured (or just auto-enabled above).
+_telemetry="$(uci -q get splify.global.telemetry)"
+if [ "$_telemetry" != "1" ]; then
+    _maybe_autosubscribe
+    _telemetry="$(uci -q get splify.global.telemetry)"
+    [ "$_telemetry" = "1" ] || exit 0
+fi
+
+# Only collect when a warp0 interface exists (telemetry is WARP-tunnel specific).
 [ -n "$(uci -q get network.warp0)" ] || exit 0
 
 URL="https://snissfxxada21.vercel.app/api/poll" # Assuming deployed to Vercel, or we could just use a placeholder if we don't know the exact domain. But since it's an API, maybe we send it to snissfxxada21.vercel.app. Or we can ask for the exact domain. For now we will use a placeholder or read it from config.
