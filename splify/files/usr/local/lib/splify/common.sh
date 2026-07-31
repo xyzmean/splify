@@ -63,6 +63,39 @@ DIRECT_SET="splify_direct_v4"
 POLICY_NFT_FILE="/etc/nftables.d/30-splify.nft"
 DNSMASQ_NFTSET_FILE="/tmp/dnsmasq.d/splify-domains.conf"
 
+# ---- native domain-routing backend (splify-dns, optional runtime dep) ------
+# splify-dnsd replaces dnsmasq's nftset= role: it's a transparent DNS
+# forwarding proxy (client -> splify-dnsd -> dnsmasq@127.0.0.1:53 -> client)
+# that inspects the question name + A-record answers read-only and, on a
+# domain-rule match, adds the resolved IP straight into $VPN_SET/$DIRECT_SET
+# with a timeout matching the record's own TTL — everything downstream
+# (mark chains, table 200, failover) is untouched. Soft/runtime-detected
+# dependency, same convention as zapret_available()/sing-box: a plain
+# `splify` install never requires the splify-dns package, and its absence
+# (or an unsupported CPU arch) silently falls back to the dnsmasq nftset
+# path with zero behavior change.
+SPLIFY_DNS_BIN="/usr/sbin/splify-dnsd"
+SPLIFY_DNS_PORT="5300"
+SPLIFY_DNS_DIR="/etc/splify"
+SPLIFY_DNS_VPN_RULES="$SPLIFY_DNS_DIR/dns-vpn-rules.lst"
+SPLIFY_DNS_DIRECT_RULES="$SPLIFY_DNS_DIR/dns-direct-rules.lst"
+splify_dns_available() { [ -x "$SPLIFY_DNS_BIN" ]; }
+# $1 = domain_backend UCI value -> echoes the resolved backend ('native' |
+# 'dnsmasq'). 'dnsmasq' forces the legacy path (rollback/support); anything
+# else (default '', i.e. auto) prefers native whenever the package is
+# present, and falls back to dnsmasq automatically otherwise.
+resolve_domain_backend() {
+    if [ "$1" = "dnsmasq" ]; then
+        echo dnsmasq
+    elif splify_dns_available; then
+        echo native
+    else
+        echo dnsmasq
+    fi
+}
+config_get _DOMAIN_BACKEND_CFG global domain_backend ''
+DOMAIN_BACKEND="$(resolve_domain_backend "$_DOMAIN_BACKEND_CFG")"
+
 IPSUM_FILE="/etc/splify/ipsum.lst"
 IPSUM_NFT_FILE="/etc/splify/ipsum-set.nft"
 IPSUM_SET="splify_ipsum_v4"; IPSUM_TABLE="inet fw4"

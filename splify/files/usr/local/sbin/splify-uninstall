@@ -22,6 +22,12 @@ if [ -x /etc/init.d/splify ]; then
     /etc/init.d/splify stop    >/dev/null 2>&1 || true
     /etc/init.d/splify disable >/dev/null 2>&1 || true
 fi
+# splify-dns (native domain-routing backend) is a separate package with its
+# own lifecycle — this only stops its runtime, never `apk del`s it.
+if [ -x /etc/init.d/splify-dns ]; then
+    /etc/init.d/splify-dns stop    >/dev/null 2>&1 || true
+    /etc/init.d/splify-dns disable >/dev/null 2>&1 || true
+fi
 
 # 1. runtime routing state
 while ip -4 rule del priority "$WG_RULE_PRIO"   >/dev/null 2>&1; do :; done
@@ -42,6 +48,7 @@ fi
 # 3. generated files + runtime state
 rm -f /etc/nftables.d/30-splify.nft
 rm -f /tmp/dnsmasq.d/splify-*.conf /tmp/dnsmasq.cfg*.d/splify-*.conf
+rm -f /etc/splify/dns-vpn-rules.lst /etc/splify/dns-direct-rules.lst
 rm -f "$STATE_FILE" "$FAIL_COUNTER_FILE"
 
 # 4. reload to drop the chains/sets + domain tags

@@ -605,7 +605,7 @@ if [ "$ZAPRET_ENABLED" = 1 ]; then
     fi
 fi
 
-# ---- dnsmasq domain tagging ------------------------------------------------
+# ---- domain tagging (native splify-dns backend, or legacy dnsmasq nftset) --
 # A configured download URL counts as "domains expected" even before the first
 # fetch lands a file — otherwise a URL-only setup whose list hasn't downloaded yet
 # would silently report no domain tagging at all.
@@ -613,11 +613,31 @@ fi
 [ -n "$IGNORE_DOMAINS_URL" ] && [ ! -s "$DOMAINS_IGNORE_FILE" ] && add FIXABLE dnsmasq "ignore/direct domains URL set but the list is not downloaded yet ($DOMAINS_IGNORE_FILE)" "splify-update-domains"
 _have_domains=false
 { [ -n "$VPN_DOMAINS$DIRECT_DOMAINS$VPN_DOMAINS_URL$IGNORE_DOMAINS_URL" ] || [ -s "$DOMAINS_VPN_FILE" ] || [ -s "$DOMAINS_IGNORE_FILE" ]; } && _have_domains=true
-if [ "$_have_domains" = true ]; then
-    _dir="$(sed -n 's/^conf-dir=//p' /var/etc/dnsmasq.conf* 2>/dev/null | head -1)"
-    [ -n "$_dir" ] || _dir="$(dirname "$DNSMASQ_NFTSET_FILE")"
-    [ -s "$_dir/$(basename "$DNSMASQ_NFTSET_FILE")" ] \
-        || add FIXABLE dnsmasq "domain tagging configured but the dnsmasq nftset drop-in is missing from $_dir" "run splify-apply (regenerates and reloads dnsmasq)"
+
+if [ "$DOMAIN_BACKEND" = "native" ]; then
+    add OK splify-dns "native domain-routing backend active ($SPLIFY_DNS_BIN)"
+    if [ "$_have_domains" = true ]; then
+        pgrep -f "$SPLIFY_DNS_BIN" >/dev/null 2>&1 \
+            || add FIXABLE splify-dns "domain tagging configured but splify-dnsd is not running" "/etc/init.d/splify-dns start"
+        [ -s "$SPLIFY_DNS_VPN_RULES" ] || [ -s "$SPLIFY_DNS_DIRECT_RULES" ] \
+            || add FIXABLE splify-dns "rule files missing/empty in $SPLIFY_DNS_DIR" "run splify-apply (regenerates them)"
+        nft list chain inet fw4 splify_dns_redirect_prerouting >/dev/null 2>&1 \
+            || add FIXABLE splify-dns "DNS redirect rule missing from the live ruleset" "run splify-apply (regenerates 30-splify.nft)"
+    fi
+elif [ "$_have_domains" = true ]; then
+    # legacy path: dnsmasq's own nftset= directive. Only works when dnsmasq is
+    # built with nftset support ("dnsmasq-full" on OpenWrt — plain "dnsmasq"
+    # does NOT have it compiled in and silently tags nothing). splify-dns
+    # removes this requirement entirely (native backend never touches
+    # dnsmasq's config) — installing it is the fix, not switching packages.
+    if command -v dnsmasq >/dev/null 2>&1 && ! dnsmasq --version 2>&1 | grep -qw nftset; then
+        add FAIL dnsmasq "domains configured but this dnsmasq build has no nftset support (need dnsmasq-full, or install splify-dns for the native backend)" "opkg/apk install dnsmasq-full  —  or: install splify-dns"
+    else
+        _dir="$(sed -n 's/^conf-dir=//p' /var/etc/dnsmasq.conf* 2>/dev/null | head -1)"
+        [ -n "$_dir" ] || _dir="$(dirname "$DNSMASQ_NFTSET_FILE")"
+        [ -s "$_dir/$(basename "$DNSMASQ_NFTSET_FILE")" ] \
+            || add FIXABLE dnsmasq "domain tagging configured but the dnsmasq nftset drop-in is missing from $_dir" "run splify-apply (regenerates and reloads dnsmasq)"
+    fi
 fi
 
 # ---- remote control agent --------------------------------------------------

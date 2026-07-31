@@ -99,6 +99,23 @@ if [ ! -f ipkg-build ]; then
     chmod +x ipkg-build
 fi
 
+# splify-dns (native domain-routing backend) is the one compiled package in
+# this repo — everything else is noarch shell/Lua/static assets built with no
+# compiler at all. apk's arch check on OpenWrt is an EXACT string match
+# against the board's own /etc/apk/arch (confirmed empirically: a real
+# aarch64_cortex-a53 board's /etc/apk/arch contains ONLY that string, no
+# generic-ISA fallback) — so this ships a few common, EXACT OpenWrt target
+# arch strings rather than one generic-per-ISA build. Not every board is
+# covered (see docs); `apk add splify-dns` simply fails cleanly on an
+# unlisted arch, and splify's DOMAIN_BACKEND auto-detection (common.sh)
+# falls back to the dnsmasq nftset path with zero behavior change.
+NATIVE_TARGETS="
+aarch64_cortex-a53:aarch64-linux-gnu-gcc:gcc-aarch64-linux-gnu
+arm_cortex-a7:arm-linux-gnueabihf-gcc:gcc-arm-linux-gnueabihf
+mipsel_24kc:mipsel-linux-gnu-gcc-10:gcc-10-mipsel-linux-gnu
+x86_64:gcc:
+"
+
 build_pkg() {
     local pkg_name=$1
     local version=$2
@@ -164,6 +181,76 @@ EOF3
     docker run --rm -v "$PWD":/workspace -w /workspace alpine:latest sh -c "apk update && apk add apk-tools && apk mkpkg --info name:$pkg_name --info version:$version-r1 --info description:'$description' --info arch:noarch --info depends:'$clean_deps' $apk_script_args -F $src_dir -o $out_apk"
     
     rm -f "$src_dir/.post-install" "$src_dir/.pre-deinstall"
+}
+
+# Cross-compiles the splify-dnsd binary for one OpenWrt target arch and packages
+# it (ipk + apk), Architecture-tagged with that exact arch string — mirrors
+# build_pkg's shape but with a real compiled binary instead of noarch files.
+# $1=arch $2=cc-binary $3=apt-package-providing-cc (empty for the native/x86_64 case)
+build_native_pkg() {
+    local arch=$1
+    local cc=$2
+    local cc_apt_pkg=$3
+
+    if ! command -v "$cc" >/dev/null 2>&1; then
+        if [ -n "$cc_apt_pkg" ] && command -v apt-get >/dev/null 2>&1; then
+            echo "splify-dns/$arch: installing $cc_apt_pkg..."
+            apt-get install -y "$cc_apt_pkg" >/dev/null 2>&1 || true
+        fi
+    fi
+    if ! command -v "$cc" >/dev/null 2>&1; then
+        echo "splify-dns/$arch: '$cc' not available — skipping this target (other packages are unaffected)"
+        return 0
+    fi
+
+    local pkg_dir="$BUILD_DIR/splify-dns_$arch"
+    mkdir -p "$pkg_dir/usr/sbin" "$pkg_dir/etc/init.d"
+    if ! "$cc" -static -O2 -Wall -Wextra -o "$pkg_dir/usr/sbin/splify-dnsd" splify-dns/src/splify-dnsd.c; then
+        echo "splify-dns/$arch: compile failed — skipping this target"
+        return 0
+    fi
+    chmod 0755 "$pkg_dir/usr/sbin/splify-dnsd"
+    cp splify-dns/files/etc/init.d/splify-dns "$pkg_dir/etc/init.d/splify-dns"
+    chmod 0755 "$pkg_dir/etc/init.d/splify-dns"
+
+    local pkg_name="splify-dns"
+    local ctrl_dir="$pkg_dir/CONTROL"
+    mkdir -p "$ctrl_dir"
+    cat <<EOF4 > "$ctrl_dir/control"
+Package: $pkg_name
+Version: $VERSION-1
+Depends: splify, nftables
+Architecture: $arch
+Maintainer: xyzmean
+Section: net
+Description: Native domain-routing backend for splify (replaces dnsmasq nftset tagging)
+EOF4
+
+    read -r -d '' _DNS_POSTINST << 'EOF_DNS_POSTINST' || true
+#!/bin/sh
+[ -n "${IPKG_INSTROOT}" ] && exit 0
+[ -x /usr/local/sbin/splify-apply ] && /usr/local/sbin/splify-apply >/dev/null 2>&1 || true
+exit 0
+EOF_DNS_POSTINST
+    read -r -d '' _DNS_PRERM << 'EOF_DNS_PRERM' || true
+#!/bin/sh
+[ -n "${IPKG_INSTROOT}" ] && exit 0
+/etc/init.d/splify-dns stop    >/dev/null 2>&1 || true
+/etc/init.d/splify-dns disable >/dev/null 2>&1 || true
+exit 0
+EOF_DNS_PRERM
+    echo "$_DNS_POSTINST" > "$ctrl_dir/postinst"; chmod +x "$ctrl_dir/postinst"
+    echo "$_DNS_PRERM"    > "$ctrl_dir/prerm";    chmod +x "$ctrl_dir/prerm"
+
+    ./ipkg-build "$pkg_dir" "$PWD/$OUT_DIR"
+    mv "$PWD/$OUT_DIR/${pkg_name}_${VERSION}-1_${arch}.ipk" "$PWD/$OUT_DIR/${pkg_name}-${VERSION}-1_${arch}.ipk" 2>/dev/null || true
+
+    echo "$_DNS_POSTINST" > "$pkg_dir/.post-install"; chmod +x "$pkg_dir/.post-install"
+    echo "$_DNS_PRERM"    > "$pkg_dir/.pre-deinstall"; chmod +x "$pkg_dir/.pre-deinstall"
+    local out_apk="$OUT_DIR/${pkg_name}-${VERSION}-1_${arch}.apk"
+    docker run --rm -v "$PWD":/workspace -w /workspace alpine:latest sh -c \
+        "apk update && apk add apk-tools && apk mkpkg --info name:$pkg_name --info version:$VERSION-r1 --info description:'native domain-routing backend for splify' --info arch:$arch --info depends:'splify nftables' --script post-install:$pkg_dir/.post-install --script pre-deinstall:$pkg_dir/.pre-deinstall -F $pkg_dir -o $out_apk"
+    rm -f "$pkg_dir/.post-install" "$pkg_dir/.pre-deinstall"
 }
 
 # 1. splify
@@ -262,6 +349,16 @@ EOF_I18N_DEFAULTS
 chmod +x "$BUILD_DIR/i18n_src/etc/uci-defaults/luci-i18n-splify-ru"
 
 build_pkg "luci-i18n-splify-ru" "$VERSION" "luci-app-splify" "Russian translation for splify" "$BUILD_DIR/i18n_src" "" "" ""
+
+# 4. splify-dns (native domain-routing backend; one .ipk/.apk per target arch)
+echo "Building splify-dns (native domain-routing backend)..."
+echo "$NATIVE_TARGETS" | while IFS=: read -r _arch _cc _apt; do
+    [ -n "$_arch" ] || continue
+    # A failure building ONE target (missing toolchain, a docker hiccup, ...)
+    # must never abort the other 3 native targets or the noarch packages
+    # already built above — `|| true` suspends set -e for the whole call.
+    build_native_pkg "$_arch" "$_cc" "$_apt" || echo "splify-dns/$_arch: build step failed, skipping"
+done
 
 echo "All packages built in $OUT_DIR/"
 ls -la $OUT_DIR/

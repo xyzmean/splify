@@ -558,3 +558,61 @@ setup_ep_singbox() {
     }
     run fw_zone_is_tunnel_only vpn;  [ "$status" -eq 0 ]
 }
+
+# ---- splify-dns native backend: availability + backend resolution ----------
+# splify_dns_available is a plain [-x] check on $SPLIFY_DNS_BIN; resolve_domain_backend
+# is the pure decision (UCI override vs. auto-prefer-native-when-present) that
+# splify-apply/splify-doctor/splify-dns's init.d all key off of.
+@test "splify_dns_available reflects whether the binary exists and is executable" {
+    load_fn "$COMMON_SH" splify_dns_available
+    SPLIFY_DNS_BIN="$BATS_TEST_TMPDIR/missing"
+    run splify_dns_available; [ "$status" -ne 0 ]
+
+    SPLIFY_DNS_BIN="$BATS_TEST_TMPDIR/splify-dnsd"
+    printf '#!/bin/sh\n' > "$SPLIFY_DNS_BIN"
+    run splify_dns_available; [ "$status" -ne 0 ]   # present but not executable
+
+    chmod +x "$SPLIFY_DNS_BIN"
+    run splify_dns_available; [ "$status" -eq 0 ]
+}
+
+@test "resolve_domain_backend: dnsmasq override always wins, auto follows availability" {
+    load_fn "$COMMON_SH" resolve_domain_backend
+
+    splify_dns_available() { return 0; }
+    [ "$(resolve_domain_backend dnsmasq)" = dnsmasq ]  # explicit override, even though available
+    [ "$(resolve_domain_backend '')" = native ]        # auto + available -> native
+    [ "$(resolve_domain_backend garbage)" = native ]   # any other value behaves as auto
+
+    splify_dns_available() { return 1; }
+    [ "$(resolve_domain_backend '')" = dnsmasq ]        # auto + unavailable -> falls back
+    [ "$(resolve_domain_backend native)" = dnsmasq ]    # no separate "native" override in v1 — falls back too
+}
+
+# splify-dnsd's own rule matcher (domain/namespace/wildcard/regex), exercised
+# through its --selftest/--match CLI — CI compiles it first (test.yml) and
+# passes the path via SPLIFY_DNSD_BIN; a local run without a C toolchain skips.
+@test "splify-dnsd --selftest passes" {
+    [ -x "${SPLIFY_DNSD_BIN:-}" ] || skip "splify-dnsd not built (set SPLIFY_DNSD_BIN)"
+    run "$SPLIFY_DNSD_BIN" --selftest
+    [ "$status" -eq 0 ]
+}
+
+@test "splify-dnsd --match: namespace/wildcard/regex/exact rule types" {
+    [ -x "${SPLIFY_DNSD_BIN:-}" ] || skip "splify-dnsd not built (set SPLIFY_DNSD_BIN)"
+    rules="$BATS_TEST_TMPDIR/rules.lst"
+    cat > "$rules" <<'EOF'
+# comment line, and a blank line below
+
+example.com
+=exact-only.com
+*.wild.example.net
+re:^.*\.regex\.example$
+EOF
+    run "$SPLIFY_DNSD_BIN" --match "$rules" sub.example.com;      [ "$status" -eq 0 ]
+    run "$SPLIFY_DNSD_BIN" --match "$rules" notexample.com;       [ "$status" -eq 1 ]
+    run "$SPLIFY_DNSD_BIN" --match "$rules" exact-only.com;       [ "$status" -eq 0 ]
+    run "$SPLIFY_DNSD_BIN" --match "$rules" sub.exact-only.com;   [ "$status" -eq 1 ]
+    run "$SPLIFY_DNSD_BIN" --match "$rules" a.wild.example.net;   [ "$status" -eq 0 ]
+    run "$SPLIFY_DNSD_BIN" --match "$rules" a.b.regex.example;    [ "$status" -eq 0 ]
+}

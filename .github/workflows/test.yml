@@ -23,6 +23,8 @@ jobs:
             splify/files/usr/local/lib/splify/*.sh \
             splify/files/usr/libexec/rpcd/splify \
             splify/files/etc/init.d/splify \
+            splify/files/etc/init.d/splify-* \
+            splify-dns/files/etc/init.d/splify-dns \
             splify/files/etc/uci-defaults/*
 
   test:
@@ -31,7 +33,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: doctor self-test (pure logic, off-box)
         run: SPLIFY_SELFTEST=1 sh splify/files/usr/local/sbin/splify-doctor
+      - name: build splify-dnsd (native, for --selftest)
+        run: |
+          gcc -Wall -Wextra -O2 -o /tmp/splify-dnsd splify-dns/src/splify-dnsd.c
+          /tmp/splify-dnsd --selftest
       - name: Install bats
         run: sudo apt-get update -qq && sudo apt-get install -y bats
       - name: bats unit tests
-        run: bats tests/
+        run: SPLIFY_DNSD_BIN=/tmp/splify-dnsd bats tests/
