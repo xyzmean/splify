@@ -43,8 +43,24 @@ const RU: Record<string, string> = {
   'Split routing enabled': 'Split-маршрутизация включена',
   'Split routing disabled': 'Split-маршрутизация выключена',
 
+  'stopped': 'не запущен',
+
+  // ── диалог подтверждения ─────────────────────────────────────────────
+  'Cancel': 'Отмена',
+  'Confirm': 'Подтвердить',
+  'Install update now?': 'Установить обновление сейчас?',
+  'Fix the firewall for %s?': 'Починить firewall для %s?',
+
   // ── toolbar ──────────────────────────────────────────────────────────
   'Refresh': 'Обновить',
+  'Re-run diagnostics': 'Перепроверить состояние и диагностику',
+  'domains': 'домены',
+  // Свежесть данных: живые значения тикают каждые несколько секунд, а
+  // диагностика — кэшированный «обход», у него есть реальный возраст.
+  'Diagnostics: refreshing…': 'Диагностика: обновляется…',
+  'Diagnostics: %s old': 'Диагностика: %s назад',
+  'Diagnostics: loading…': 'Диагностика: загружается…',
+  'Diagnostics unavailable:': 'Диагностика недоступна:',
   'Apply': 'Применить',
   'Apply the splify configuration now': 'Применить конфигурацию splify сейчас',
   'Restart': 'Перезапустить',
@@ -81,8 +97,16 @@ const RU: Record<string, string> = {
   'Blocked — kill switch': 'заблокировано — kill switch',
   'none': 'нет',
 
+  // ── Списки ───────────────────────────────────────────────────────────
+  'List': 'Список',
+  'Entries': 'Записей',
+  'Min': 'Мин',
+  'Age': 'Возраст',
+  'State': 'Состояние',
+
   // ── Туннели ──────────────────────────────────────────────────────────
   'Tunnels (failover)': 'Туннели (failover)',
+  'absent': 'нет',
   'online': 'онлайн',
   'Prio': 'Прио',
   'Handshake': 'Handshake',

@@ -1,5 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { uci, arr, wgIfaces, ipHints, type Section } from '@/lib/uci'
+import {
+  isSubnet, isDomain, isHostOrCidr, isPingTarget, isPositiveInt, isHttpUrl, isIfaceName,
+} from '@/lib/validate'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -29,6 +32,7 @@ interface GeneralForm {
   mode: string; interval: string; killswitch: boolean
   lan_iface: string; lan_cidr: string; health_url: string
   health_target: string[]
+  telemetry: boolean
 }
 interface ListsForm {
   ipsum_enabled: boolean; ipsum_url: string
@@ -85,8 +89,16 @@ function Field({ label, children, helpText }: { label: string; children: React.R
 // Reusable add/remove text-row editor — ports the DynamicList UX from the old
 // settings.js form (green "+" to add, red "×" to remove) used for ping
 // targets, manual CIDRs and manual domains.
-function ListEditor({ values, onChange, placeholder }: { values: string[]; onChange: (v: string[]) => void; placeholder?: string }) {
+function ListEditor({ values, onChange, placeholder, validate, invalidHint }: {
+  values: string[]; onChange: (v: string[]) => void; placeholder?: string
+  /** Marks a row red when it can't work on the router (see lib/validate.ts). */
+  validate?: (v: string) => boolean
+  invalidHint?: string
+}) {
   const rows = [...values, '']
+  const bad = (v: string, isLast: boolean) =>
+    !!validate && v.trim() !== '' && !validate(v) && !isLast ? true
+      : !!validate && isLast && v.trim() !== '' && !validate(v)
   function update(i: number, v: string) {
     const next = [...values]
     next[i] = v
@@ -103,9 +115,12 @@ function ListEditor({ values, onChange, placeholder }: { values: string[]; onCha
     <div className="space-y-2">
       {rows.map((v, i) => {
         const isLast = i === rows.length - 1
+        const invalid = bad(v, isLast)
         return (
           <div key={i} className="flex gap-2">
-            <input className={field} value={v} placeholder={placeholder}
+            <input className={cn(field, invalid && 'border-destructive')} value={v} placeholder={placeholder}
+              aria-invalid={invalid || undefined}
+              title={invalid ? invalidHint : undefined}
               onChange={(e) => update(i, e.target.value)}
               onKeyDown={(e) => {
                 // Enter commits the trailing draft row. add() appends to the
@@ -150,6 +165,7 @@ export default function SettingsPage() {
 
   const [general, setGeneral] = useState<GeneralForm>({
     mode: 'blocklist', interval: '', killswitch: false, lan_iface: '', lan_cidr: '', health_url: '', health_target: [],
+    telemetry: false,
   })
   const [lists, setLists] = useState<ListsForm>({
     ipsum_enabled: true, ipsum_url: '', ru_enabled: true, ru_url: '', vpn_domains_url: '', ignore_domains_url: '', zapret_enabled: true,
@@ -176,6 +192,10 @@ export default function SettingsPage() {
         mode: g('mode', 'blocklist'), interval: g('interval'), killswitch: g('killswitch') === '1',
         lan_iface: g('lan_iface'), lan_cidr: g('lan_cidr'), health_url: g('health_url'),
         health_target: arr(uci.get('global', 'health_target')),
+        // Telemetry landed in the shell (splify-telemetry, cron every 6h) with no
+        // UI at all — the only way to see or change it was `uci set`. Default
+        // here matches the script: unset is treated as off.
+        telemetry: g('telemetry') === '1',
       })
       setLists({
         ipsum_enabled: g('ipsum_enabled', '1') === '1', ipsum_url: g('ipsum_url'),
@@ -225,6 +245,7 @@ export default function SettingsPage() {
     g('mode', general.mode); g('interval', general.interval); g('killswitch', general.killswitch)
     g('lan_iface', general.lan_iface); g('lan_cidr', general.lan_cidr); g('health_url', general.health_url)
     g('health_target', general.health_target)
+    g('telemetry', general.telemetry)
     g('ipsum_enabled', lists.ipsum_enabled); g('ipsum_url', lists.ipsum_url)
     g('ru_enabled', lists.ru_enabled); g('ru_url', lists.ru_url)
     g('vpn_domains_url', lists.vpn_domains_url); g('ignore_domains_url', lists.ignore_domains_url)
@@ -255,7 +276,51 @@ export default function SettingsPage() {
     }
   }
 
+  // Everything the form can get wrong in a way the router would silently ignore
+  // (a bad prefix is dropped from the nft set, a non-numeric interval falls back
+  // to the default). Collected here so Save can refuse instead of "succeeding"
+  // and quietly discarding the entry.
+  const problems = useMemo(() => {
+    const out: string[] = []
+    const bad = (label: string, values: string[], ok: (v: string) => boolean) => {
+      const wrong = values.filter((v) => v.trim() !== '' && !ok(v))
+      if (wrong.length) out.push(`${label}: ${wrong.join(', ')}`)
+    }
+    if (general.interval.trim() !== '' && !isPositiveInt(general.interval)) out.push('Интервал проверки — целое число секунд')
+    if (!isHttpUrl(general.health_url)) out.push('URL проверки WAN — http(s)://…')
+    if (general.lan_iface.trim() !== '' && !isIfaceName(general.lan_iface)) out.push('LAN-интерфейс — имя устройства (например br-lan)')
+    if (general.lan_cidr.trim() !== '' && !isSubnet(general.lan_cidr)) out.push('Подсеть LAN — CIDR, например 192.168.1.0/24')
+    bad('Адреса для проверки', general.health_target, isPingTarget)
+    if (!isHttpUrl(lists.ipsum_url)) out.push('URL списка ipsum — http(s)://…')
+    if (!isHttpUrl(lists.ru_url)) out.push('URL списка ru/cn — http(s)://…')
+    if (!isHttpUrl(lists.vpn_domains_url)) out.push('URL доменов для VPN — http(s)://…')
+    if (!isHttpUrl(lists.ignore_domains_url)) out.push('URL доменов напрямую — http(s)://…')
+    bad('Подсети для VPN', manual.vpn_cidr, isSubnet)
+    bad('Подсети напрямую', manual.direct_cidr, isSubnet)
+    bad('Домены для VPN', manual.vpn_domain, isDomain)
+    bad('Домены напрямую', manual.direct_domain, isDomain)
+    bad('IP устройств', devices.map((d) => d.ip), isHostOrCidr)
+    const noIface = endpoints.filter((e) => !e.iface.trim())
+    if (noIface.length) out.push('Туннели: не выбран интерфейс')
+    bad('Приоритет туннеля', endpoints.map((e) => e.priority), isPositiveInt)
+    return out
+  }, [general, lists, manual, devices, endpoints])
+
+  // Unsaved edits are easy to lose on a router page: LuCI's own nav is a full
+  // page load, so React state (and the staged uci change-set this form builds)
+  // goes with it. Warn on the way out.
+  useEffect(() => {
+    if (!dirty) return
+    const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [dirty])
+
   async function save(apply: boolean) {
+    if (problems.length) {
+      notify('Проверьте поля: ' + problems.join('; '), 'warning')
+      return
+    }
     setBusy(apply ? 'apply' : 'save')
     try {
       commit()
@@ -291,7 +356,10 @@ export default function SettingsPage() {
           <Button size="sm" variant="outline" onClick={() => load()}>Повторить</Button>
         </CardContent></Card>
       )}
-      <Card>
+      {/* Sticky so Save is reachable from every tab without scrolling back up —
+          the tunnels and manual-list tabs are taller than a router admin's
+          viewport, and losing edits to a forgotten Save was easy. */}
+      <Card className="sticky top-0 z-20 shadow-sm">
         <CardContent className="flex flex-wrap items-start justify-between gap-3 p-5">
           <div>
             <h1 className="text-base font-semibold tracking-tight">Дополнительные настройки</h1>
@@ -301,14 +369,24 @@ export default function SettingsPage() {
               затем добавляются по приоритету в разделе «Туннели». Простое управление и состояние — на вкладке «Главная».
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            {dirty && <Badge variant="outline" className="border-warning text-warning">не сохранено</Badge>}
-            <Button size="sm" variant="outline" disabled={!!busy} onClick={() => save(false)}>
-              {busy === 'save' ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}Сохранить
-            </Button>
-            <Button size="sm" disabled={!!busy} onClick={() => save(true)}>
-              {busy === 'apply' ? <Loader2 className="size-4 animate-spin" /> : <CheckIcon className="size-4" />}Сохранить и применить
-            </Button>
+          <div className="flex flex-col items-end gap-2">
+            <div className="flex items-center gap-2">
+              {dirty && <Badge variant="outline" className="border-warning text-warning">не сохранено</Badge>}
+              <Button size="sm" variant="outline" disabled={!!busy || problems.length > 0} onClick={() => save(false)}>
+                {busy === 'save' ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}Сохранить
+              </Button>
+              <Button size="sm" disabled={!!busy || problems.length > 0} onClick={() => save(true)}>
+                {busy === 'apply' ? <Loader2 className="size-4 animate-spin" /> : <CheckIcon className="size-4" />}Сохранить и применить
+              </Button>
+            </div>
+            {/* Say WHAT is wrong right where the disabled button is, instead of
+                leaving the operator to hunt for the red field. */}
+            {problems.length > 0 && (
+              <ul className="max-w-md list-disc space-y-0.5 pl-4 text-right text-xs text-destructive">
+                {problems.slice(0, 4).map((p) => <li key={p} className="text-left">{p}</li>)}
+                {problems.length > 4 && <li className="text-left">…и ещё {problems.length - 4}</li>}
+              </ul>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -353,30 +431,53 @@ export default function SettingsPage() {
               </Section>
 
               <Section title="Проверка связности" icon={Activity}>
-                <Field label="Интервал проверки (сек)" helpText="Секунды между проверками туннелей и переключением при сбое.">
-                  <input className={cn(field, 'w-32')} value={general.interval} placeholder="180"
+                <Field label="Интервал проверки (сек)" helpText="Секунды между проверками туннелей и переключением при сбое. Меньше — быстрее реакция на сбой, но чаще пинги.">
+                  <input className={cn(field, 'w-32', general.interval.trim() !== '' && !isPositiveInt(general.interval) && 'border-destructive')}
+                    inputMode="numeric" value={general.interval} placeholder="180"
                     onChange={(e) => mark(setGeneral)({ ...general, interval: e.target.value })} />
                 </Field>
                 <Field label="Адреса для проверки туннеля (ping)" helpText="Пингуются через каждый туннель для проверки (любой ответ = туннель жив).">
-                  <ListEditor values={general.health_target} placeholder="1.1.1.1" onChange={(v) => mark(setGeneral)({ ...general, health_target: v })} />
+                  <ListEditor values={general.health_target} placeholder="1.1.1.1"
+                    validate={isPingTarget} invalidHint="IP-адрес или имя хоста"
+                    onChange={(v) => mark(setGeneral)({ ...general, health_target: v })} />
                 </Field>
                 <Field label="URL проверки WAN" helpText="Запрашивается через WAN, чтобы выбрать между обходом DPI и прямым WAN.">
-                  <input className={field} value={general.health_url} placeholder="https://1.1.1.1/cdn-cgi/trace"
+                  <input className={cn(field, !isHttpUrl(general.health_url) && 'border-destructive')}
+                    value={general.health_url} placeholder="https://1.1.1.1/cdn-cgi/trace"
                     onChange={(e) => mark(setGeneral)({ ...general, health_url: e.target.value })} />
                 </Field>
               </Section>
 
-              <Section title="LAN" icon={Globe}>
+              <Section title="LAN" icon={Globe}
+                desc="Оставьте пустым — splify определит подсеть сам по адресам LAN-интерфейса.">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <Field label="LAN-интерфейс">
-                    <input className={field} value={general.lan_iface} placeholder="br-lan"
+                    <input className={cn(field, general.lan_iface.trim() !== '' && !isIfaceName(general.lan_iface) && 'border-destructive')}
+                      value={general.lan_iface} placeholder="br-lan"
                       onChange={(e) => mark(setGeneral)({ ...general, lan_iface: e.target.value })} />
                   </Field>
                   <Field label="Подсеть LAN (CIDR)">
-                    <input className={field} value={general.lan_cidr} placeholder="192.168.1.0/24"
+                    <input className={cn(field, general.lan_cidr.trim() !== '' && !isSubnet(general.lan_cidr) && 'border-destructive')}
+                      value={general.lan_cidr} placeholder="192.168.1.0/24"
                       onChange={(e) => mark(setGeneral)({ ...general, lan_cidr: e.target.value })} />
                   </Field>
                 </div>
+              </Section>
+
+              {/* Telemetry has existed in the shell since the July releases
+                  (splify-telemetry, cron every 6h) but had NO switch anywhere in
+                  the UI — the only way to see or change it was `uci get
+                  splify.global.telemetry`. Opt-in state belongs in front of the
+                  user, not in a config file. */}
+              <Section title="Диагностическая телеметрия" icon={Activity}
+                right={<Switch on={general.telemetry}
+                  onClick={() => mark(setGeneral)({ ...general, telemetry: !general.telemetry })}
+                  aria-label="Диагностическая телеметрия" />}>
+                <p className="text-xs text-muted-foreground">
+                  Раз в 6 часов отправляет обезличенный отчёт (версии splify/OpenWrt, режим, состояние туннеля,
+                  параметры обфускации, ping и загрузку) — он помогает подбирать рабочие настройки обхода.
+                  Ключи, пароли, адреса сайтов и трафик не передаются. Выключение действует сразу.
+                </p>
               </Section>
             </>
           )}
@@ -384,28 +485,34 @@ export default function SettingsPage() {
           {tab === 'lists' && (
             <>
               <Section title="ipsum — список IP для VPN" icon={ListChecks}
+                desc="Заблокированные подсети. Обновляется по расписанию (04:30) и подгружается в набор nft."
                 right={<Switch on={lists.ipsum_enabled} onClick={() => mark(setLists)({ ...lists, ipsum_enabled: !lists.ipsum_enabled })} aria-label={t('ipsum — список IP для VPN')} />}>
                 <Field label="URL списка ipsum">
-                  <input className={field} disabled={!lists.ipsum_enabled} value={lists.ipsum_url}
+                  <input className={cn(field, !isHttpUrl(lists.ipsum_url) && 'border-destructive')}
+                    disabled={!lists.ipsum_enabled} value={lists.ipsum_url}
                     onChange={(e) => mark(setLists)({ ...lists, ipsum_url: e.target.value })} />
                 </Field>
               </Section>
 
               <Section title="ru/cn — список напрямую" icon={ListChecks}
+                desc="Российские и китайские подсети идут мимо туннеля и попадают в исключения zapret."
                 right={<Switch on={lists.ru_enabled} onClick={() => mark(setLists)({ ...lists, ru_enabled: !lists.ru_enabled })} aria-label={t('ru/cn — список напрямую')} />}>
                 <Field label="URL списка ru/cn">
-                  <input className={field} disabled={!lists.ru_enabled} value={lists.ru_url}
+                  <input className={cn(field, !isHttpUrl(lists.ru_url) && 'border-destructive')}
+                    disabled={!lists.ru_enabled} value={lists.ru_url}
                     onChange={(e) => mark(setLists)({ ...lists, ru_url: e.target.value })} />
                 </Field>
               </Section>
 
               <Section title="Домены" icon={Globe}>
                 <Field label="URL списка доменов для VPN" helpText="Скачиваемые домены направляются в VPN на этапе DNS-разрешения (dnsmasq).">
-                  <input className={field} value={lists.vpn_domains_url}
+                  <input className={cn(field, !isHttpUrl(lists.vpn_domains_url) && 'border-destructive')}
+                    value={lists.vpn_domains_url}
                     onChange={(e) => mark(setLists)({ ...lists, vpn_domains_url: e.target.value })} />
                 </Field>
                 <Field label="URL списка доменов напрямую">
-                  <input className={field} value={lists.ignore_domains_url}
+                  <input className={cn(field, !isHttpUrl(lists.ignore_domains_url) && 'border-destructive')}
+                    value={lists.ignore_domains_url}
                     onChange={(e) => mark(setLists)({ ...lists, ignore_domains_url: e.target.value })} />
                 </Field>
               </Section>
@@ -421,16 +528,24 @@ export default function SettingsPage() {
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
               <Section title="Подсети для VPN" icon={Network}
                 desc="Удалённые подсети, которые должны идти через туннель — обычно LAN соседнего роутера для site-to-site (например 10.8.2.0/24).">
-                <ListEditor values={manual.vpn_cidr} placeholder="10.8.2.0/24" onChange={(v) => mark(setManual)({ ...manual, vpn_cidr: v })} />
+                <ListEditor values={manual.vpn_cidr} placeholder="10.8.2.0/24"
+                  validate={isSubnet} invalidHint="Нужен CIDR с маской, например 10.8.2.0/24"
+                  onChange={(v) => mark(setManual)({ ...manual, vpn_cidr: v })} />
               </Section>
               <Section title="Подсети напрямую" icon={Network} desc="Подсети, которые держатся вне туннеля (всегда через WAN).">
-                <ListEditor values={manual.direct_cidr} placeholder="192.168.50.0/24" onChange={(v) => mark(setManual)({ ...manual, direct_cidr: v })} />
+                <ListEditor values={manual.direct_cidr} placeholder="192.168.50.0/24"
+                  validate={isSubnet} invalidHint="Нужен CIDR с маской, например 192.168.50.0/24"
+                  onChange={(v) => mark(setManual)({ ...manual, direct_cidr: v })} />
               </Section>
-              <Section title="Домены для VPN" icon={Globe}>
-                <ListEditor values={manual.vpn_domain} placeholder="example.com" onChange={(v) => mark(setManual)({ ...manual, vpn_domain: v })} />
+              <Section title="Домены для VPN" icon={Globe} desc="Домен и его поддомены пойдут через туннель (метка ставится при DNS-запросе).">
+                <ListEditor values={manual.vpn_domain} placeholder="example.com"
+                  validate={isDomain} invalidHint="Домен, например example.com"
+                  onChange={(v) => mark(setManual)({ ...manual, vpn_domain: v })} />
               </Section>
               <Section title="Домены напрямую" icon={Globe}>
-                <ListEditor values={manual.direct_domain} placeholder="example.com" onChange={(v) => mark(setManual)({ ...manual, direct_domain: v })} />
+                <ListEditor values={manual.direct_domain} placeholder="example.com"
+                  validate={isDomain} invalidHint="Домен, например example.com"
+                  onChange={(v) => mark(setManual)({ ...manual, direct_domain: v })} />
               </Section>
             </div>
           )}
@@ -462,7 +577,8 @@ export default function SettingsPage() {
                           )}
                         </TableCell>
                         <TableCell>
-                          <input className={cn(field, 'w-20')} value={e.priority} placeholder="1"
+                          <input className={cn(field, 'w-20', e.priority.trim() !== '' && !isPositiveInt(e.priority) && 'border-destructive')}
+                            inputMode="numeric" value={e.priority} placeholder="1"
                             onChange={(ev) => mark(setEndpoints)(endpoints.map((x, j) => j === i ? { ...x, priority: ev.target.value } : x))} />
                         </TableCell>
                         <TableCell>
@@ -500,7 +616,8 @@ export default function SettingsPage() {
                     {devices.map((d, i) => (
                       <TableRow key={d.sid}>
                         <TableCell>
-                          <input className={field} list="splify-host-hints" value={d.ip} placeholder="192.168.1.50"
+                          <input className={cn(field, d.ip.trim() !== '' && !isHostOrCidr(d.ip) && 'border-destructive')}
+                            list="splify-host-hints" value={d.ip} placeholder="192.168.1.50"
                             onChange={(ev) => mark(setDevices)(devices.map((x, j) => j === i ? { ...x, ip: ev.target.value } : x))} />
                         </TableCell>
                         <TableCell>

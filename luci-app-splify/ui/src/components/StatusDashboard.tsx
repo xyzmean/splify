@@ -1,9 +1,12 @@
-import { useMemo, useRef } from 'react'
-import type { Status, EventRow, Check, Sev } from '@/lib/rpc'
+import { useMemo, useState } from 'react'
+import type { Status, EventRow, Check, Sev, Live, LiveEndpoint } from '@/lib/rpc'
 import { rpc } from '@/lib/rpc'
+import type { Rate } from '@/lib/useSplifyData'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { SkeletonRows } from '@/components/ui/skeleton'
+import { useConfirm } from '@/components/ui/confirm'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
@@ -16,7 +19,7 @@ import {
   Activity, ListChecks, Network, History, Stethoscope, ExternalLink,
 } from 'lucide-react'
 import {
-  fmtAge, fmtRate, fmtWhen, pathLabel, EVENT_META, ratesFor, type RateSample,
+  fmtAge, fmtRate, fmtWhen, pathLabel, EVENT_META,
 } from '@/lib/format'
 
 // Severity → semantic styling. One source of truth so the hero, badges and
@@ -53,72 +56,99 @@ function HealthState({ health }: { health: string }) {
   return <span className="text-muted-foreground">—</span>
 }
 
+// A tunnel row as displayed: live numbers (state, handshake, traffic) merged
+// with the firewall facts that only the diagnostic sweep knows.
+interface Row extends LiveEndpoint {
+  zone?: string
+  masq?: boolean
+  forwarding?: boolean
+  /** false until the diagnostics arrive — the zone columns show a dash, not a lie */
+  fwKnown: boolean
+}
+
 interface Props {
+  live: Live | null
   status: Status | null
   events: EventRow[]
-  busy: string
-  setBusy: (s: string) => void
+  rates: Record<string, Rate>
+  overall: Sev
+  diagError: string | null
+  diagAge: number
+  diagPending: boolean
   refresh: () => void
+  refreshing: boolean
+  afterAction: () => void
+}
+
+// Placeholder for a section fed by the diagnostics half: skeleton while it is on
+// its way, an explicit message with a retry once it has actually failed. Never a
+// skeleton that spins forever — that lies about what is happening.
+function Pending({ error, rows, onRetry }: { error: string | null; rows: number; onRetry: () => void }) {
+  if (!error) return <SkeletonRows rows={rows} />
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+      <span className="text-destructive">{t('Diagnostics unavailable:')} {error}</span>
+      <Button size="sm" variant="outline" onClick={onRetry}><RefreshCw className="size-4" />{t('Retry')}</Button>
+    </div>
+  )
 }
 
 export default function StatusDashboard(p: Props) {
-  const { status, events } = p
-  const ratesRef = useRef<RateSample>({})
+  const { live, status, events, rates, overall } = p
+  const [busy, setBusy] = useState('')
+  const [ask, confirmDialog] = useConfirm()
 
-  // ⚡ Bolt: Memoize derived state and rate calculations.
-  // This prevents expensive array operations (filtering/reducing) on every re-render
-  // (e.g. when 'busy' state changes) and fixes a bug where ratesFor would artificially
-  // drop to 0 if re-evaluated between status polls.
-  const derived = useMemo(() => {
-    if (!status || !status.summary) return null
-    const s = status.summary
-    const now = Date.now()
-    const eps = status.endpoints || []
-    const rates: Record<string, { rx: number; tx: number }> = {}
-    eps.forEach((e) => { rates[e.iface] = ratesFor(e, now, ratesRef.current) })
-
-    const overall = status.overall || 'FAIL'
-    const path = pathLabel(s.state || '')
-    const HeroIcon = stateIcon(s.state || '')
-    const isOn = /^vpn:/.test(s.state) || s.state === 'zapret' || s.state === 'killswitch'
-
-    // ── KPI aggregates for the stat blocks ──────────────────────
-    const activeEp = eps.find((e) => s.state === 'vpn:' + e.iface)
-    const totRx = eps.reduce((a, e) => a + (rates[e.iface]?.rx || 0), 0)
-    const totTx = eps.reduce((a, e) => a + (rates[e.iface]?.tx || 0), 0)
-    const onlineTun = eps.filter((e) => e.present).length
-    const lists = status.lists || []
+  // Everything derived, in one place. Recomputed when live/status/rates change —
+  // i.e. once per poll — never on an unrelated re-render (a spinner starting).
+  const d = useMemo(() => {
+    const s = live?.summary
+    const eps: LiveEndpoint[] = live?.endpoints || []
+    const snapEps = status?.endpoints || []
+    const rows: Row[] = eps.map((e) => {
+      const se = snapEps.find((x) => x.iface === e.iface)
+      return {
+        ...e,
+        zone: se?.zone, masq: se?.masq, forwarding: se?.forwarding,
+        fwKnown: !!se,
+      }
+    })
+    const state = s?.state || ''
+    const activeEp = rows.find((e) => state === 'vpn:' + e.iface)
+    const totRx = rows.reduce((a, e) => a + (rates[e.iface]?.rx || 0), 0)
+    const totTx = rows.reduce((a, e) => a + (rates[e.iface]?.tx || 0), 0)
+    const onlineTun = rows.filter((e) => e.present).length
+    const lists = status?.lists || []
     const enabledLists = lists.filter((l) => l.enabled)
     const okLists = enabledLists.filter((l) => l.ok).length
+    return {
+      s, rows, state, path: pathLabel(state), HeroIcon: stateIcon(state),
+      isOn: /^vpn:/.test(state) || state === 'zapret' || state === 'killswitch',
+      activeEp, totRx, totTx, onlineTun, lists, enabledLists, okLists,
+    }
+  }, [live, status, rates])
 
-    return { s, eps, rates, overall, path, HeroIcon, isOn, activeEp, totRx, totTx, onlineTun, lists, enabledLists, okLists }
-  }, [status])
-
-  const derivedProps = derived
-
-  if (!derivedProps) {
+  // Nothing at all yet (first paint before the first live reply lands, ~0.2s).
+  if (!d.s) {
     return (
-      <Card>
-        <CardContent className="p-8 text-center text-destructive">
-          Диагностика недоступна — служба splify установлена и запущена?
-        </CardContent>
-      </Card>
+      <div className="space-y-4">
+        <Card className="border-l-4 border-l-muted"><CardContent className="p-4"><SkeletonRows rows={2} /></CardContent></Card>
+        <Card><CardContent className="p-4"><SkeletonRows rows={4} /></CardContent></Card>
+      </div>
     )
   }
 
-  const { s, eps, rates, overall, path, HeroIcon, isOn, activeEp, totRx, totTx, onlineTun, lists, enabledLists, okLists } = derivedProps
+  const { s, rows, path, HeroIcon, isOn, activeEp, totRx, totTx, onlineTun, lists, enabledLists, okLists } = d
 
-  async function run(action: string, confirmMsg?: string, toast?: string) {
-    if (confirmMsg && !window.confirm(confirmMsg)) return
-    p.setBusy(action)
+  async function run(action: string, toast?: string) {
+    setBusy(action)
     try {
       const res = await rpc.action(action)
       notify((toast || action) + (res?.code !== 0 && res?.stdout ? ': ' + res.stdout : ''), res?.code === 0 ? 'info' : 'warning')
-      p.refresh()
+      p.afterAction()
     } catch (e: any) {
       notify(action + ': ' + (e?.message || e), 'error')
     } finally {
-      p.setBusy('')
+      setBusy('')
     }
   }
 
@@ -126,41 +156,50 @@ export default function StatusDashboard(p: Props) {
     const m = /^([A-Za-z0-9_.-]+):/.exec(c.message || '')
     if (!m) return
     const iface = m[1]
-    if (!window.confirm(t('Create/repair the firewall zone for “%s” (accept-all + masquerading + lan↔tunnel↔wan forwarding) and reload the firewall?').replace('%s', iface))) return
-    p.setBusy('fw_fix')
+    const ok = await ask({
+      title: t('Fix the firewall for %s?').replace('%s', iface),
+      body: t('Create/repair the firewall zone for “%s” (accept-all + masquerading + lan↔tunnel↔wan forwarding) and reload the firewall?').replace('%s', iface),
+      confirmLabel: t('Fix'),
+      tone: 'default',
+    })
+    if (!ok) return
+    setBusy('fw_fix')
     try {
       const res = await rpc.action('fw_fix', iface)
       const okMsg = t('Firewall fixed for %s').replace('%s', iface)
       const errMsg = t('Could not fix firewall for %s').replace('%s', iface)
       notify((res?.code === 0 ? okMsg : errMsg) + (res?.stdout ? ': ' + res.stdout : ''), res?.code === 0 ? 'info' : 'warning')
-      p.refresh()
+      p.afterAction()
     } catch (e: any) {
       notify(t('Firewall fix error:') + ' ' + (e?.message || e), 'error')
     } finally {
-      p.setBusy('')
+      setBusy('')
     }
   }
 
   // A toolbar action button that shows a spinner while its action is running.
-  function ActBtn({ a, label, icon: Icon, variant = 'outline', confirm, toast, className }: {
+  function ActBtn({ a, label, icon: Icon, variant = 'outline', toast, className, title }: {
     a: string; label: string; icon: React.ComponentType<{ className?: string }>
     variant?: 'default' | 'outline' | 'secondary' | 'destructive' | 'ghost'
-    confirm?: string; toast?: string; className?: string
+    toast?: string; className?: string; title?: string
   }) {
     return (
-      <Button size="sm" variant={variant} className={className} disabled={!!p.busy}
-        onClick={() => run(a, confirm, toast)}>
-        {p.busy === a ? <RefreshCw className="size-4 animate-spin" /> : <Icon className="size-4" />}
+      <Button size="sm" variant={variant} className={className} disabled={!!busy} title={title}
+        onClick={() => run(a, toast)}>
+        {busy === a ? <RefreshCw className="size-4 animate-spin" /> : <Icon className="size-4" />}
         {label}
       </Button>
     )
   }
 
-  const checks = (status!.checks || []).filter((c) => c.severity !== 'OK')
-  const firstRun = eps.length === 0
+  const checks = (status?.checks || []).filter((c) => c.severity !== 'OK')
+  const haveDiag = !!status
+  const firstRun = rows.length === 0
 
   return (
     <div className="space-y-4">
+      {confirmDialog}
+
       {/* ── Hero + KPI (compact single-row header) ─────────────── */}
       <Card className={cn('border-l-4', SEV[overall].ring)}>
         <CardContent className="flex flex-wrap items-center gap-4 p-4">
@@ -171,9 +210,9 @@ export default function StatusDashboard(p: Props) {
             <div className="min-w-0">
               <div className="truncate text-sm font-semibold tracking-tight">{path.title}</div>
               <div className="mt-0.5 text-xs text-muted-foreground">
-                {t('Mode')} <b className="text-foreground">{s.mode || '?'}</b> · {t('Kill switch')} <b className="text-foreground">{String(s.killswitch) === '1' ? t('on') : t('off')}</b>
+                {t('Mode')} <b className="text-foreground">{s.mode || '?'}</b> · {t('Kill switch')} <b className="text-foreground">{String(s.killswitch) === '1' || s.killswitch === 1 ? t('on') : t('off')}</b>
                 {' · DPI: '}{s.zapret_version
-                  ? <b className="text-foreground">{s.zapret_version}</b>
+                  ? <b className={s.zapret_running ? 'text-foreground' : 'text-warning'}>{s.zapret_version}{s.zapret_running ? '' : ' (' + t('stopped') + ')'}</b>
                   : <b className="text-muted-foreground/70">{t('none')}</b>}
               </div>
             </div>
@@ -185,20 +224,30 @@ export default function StatusDashboard(p: Props) {
             <MiniStat label={t('RX')} value={fmtRate(totRx)} />
             <MiniStat label={t('TX')} value={fmtRate(totTx)} />
             <MiniStat label={t('Failures')} value={String(s.fail_count ?? '?')} tone={(s.fail_count ?? 0) > 0 ? SEV.WARN.text : undefined} />
-            <MiniStat label={t('Lists OK')} value={`${okLists}/${enabledLists.length}`} tone={okLists < enabledLists.length ? SEV.WARN.text : undefined} />
+            <MiniStat label={t('Lists OK')}
+              value={haveDiag ? `${okLists}/${enabledLists.length}` : '…'}
+              tone={haveDiag && okLists < enabledLists.length ? SEV.WARN.text : undefined} />
           </div>
 
           <div className="flex items-center gap-2">
             <SevBadge sev={overall} />
-            <Button size="sm" disabled={!!p.busy}
+            <Button size="sm" disabled={!!busy}
               variant={isOn ? 'outline' : 'default'}
               className={isOn
                 ? 'border-destructive text-destructive hover:bg-destructive/10'
                 : 'bg-success text-white hover:bg-success/90'}
-              onClick={() => run(isOn ? 'off' : 'on',
-                isOn ? t('Turn off split routing? All LAN traffic will go via WAN until the service re-enables it.') : undefined,
-                isOn ? t('Split routing disabled') : t('Split routing enabled'))}>
-              <Power className="size-4" />{isOn ? t('Disable') : t('Enable')}
+              onClick={async () => {
+                if (isOn && !await ask({
+                  title: t('Turn off split routing?'),
+                  body: t('Turn off split routing? All LAN traffic will go via WAN until the service re-enables it.'),
+                  confirmLabel: t('Disable'),
+                })) return
+                run(isOn ? 'off' : 'on', isOn ? t('Split routing disabled') : t('Split routing enabled'))
+              }}>
+              {busy === 'on' || busy === 'off'
+                ? <RefreshCw className="size-4 animate-spin" />
+                : <Power className="size-4" />}
+              {isOn ? t('Disable') : t('Enable')}
             </Button>
           </div>
         </CardContent>
@@ -206,25 +255,50 @@ export default function StatusDashboard(p: Props) {
 
       {/* ── Toolbar (carded, so it reads as one control block) ── */}
       <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card/50 p-2 shadow-sm">
-        <Button size="sm" variant="outline" className="border-dashed bg-transparent hover:bg-muted" disabled={!!p.busy} onClick={p.refresh}>
-          <RefreshCw className="size-4" />{t('Refresh')}
+        <Button size="sm" variant="outline" className="border-dashed bg-transparent hover:bg-muted"
+          disabled={!!busy} onClick={p.refresh} title={t('Re-run diagnostics')}>
+          <RefreshCw className={cn('size-4', p.refreshing && 'animate-spin')} />{t('Refresh')}
         </Button>
-        <ActBtn a="apply" label={t('Apply')} icon={Play} variant="default" className="shadow-sm" toast={t('Configuration applied')} />
-        <ActBtn a="restart" label={t('Restart')} icon={RotateCw} variant="secondary" className="shadow-sm" toast={t('Service restarted')} />
+        <ActBtn a="apply" label={t('Apply')} icon={Play} variant="default" className="shadow-sm"
+          toast={t('Configuration applied')} title={t('Apply the splify configuration now')} />
+        <ActBtn a="restart" label={t('Restart')} icon={RotateCw} variant="secondary" className="shadow-sm"
+          toast={t('Service restarted')} title={t('Restart the splify service')} />
 
         <div className="ml-2 flex items-center gap-1 rounded-lg bg-muted/50 p-1">
           <span className="px-2 text-xs font-medium text-muted-foreground">{t('Lists')}</span>
-          <ActBtn a="update_ipsum" label="ipsum" icon={Download} variant="ghost" className="h-7 px-2 text-xs" toast={t('ipsum updated')} />
-          <ActBtn a="update_ru" label="ru/cn" icon={Download} variant="ghost" className="h-7 px-2 text-xs" toast={t('ru/cn updated')} />
-          <ActBtn a="update_domains" label="домены" icon={Download} variant="ghost" className="h-7 px-2 text-xs" toast={t('domains updated')} />
+          <ActBtn a="update_ipsum" label="ipsum" icon={Download} variant="ghost" className="h-7 px-2 text-xs"
+            toast={t('ipsum updated')} title={t('Update the ipsum (blocked IP) list')} />
+          <ActBtn a="update_ru" label="ru/cn" icon={Download} variant="ghost" className="h-7 px-2 text-xs"
+            toast={t('ru/cn updated')} title={t('Update the ru/cn (direct) list')} />
+          <ActBtn a="update_domains" label={t('domains')} icon={Download} variant="ghost" className="h-7 px-2 text-xs"
+            toast={t('domains updated')} title={t('Update the VPN domains list')} />
         </div>
 
         <div className="flex-1" />
 
-        <ActBtn a="disable" label={t('Emergency disable')} icon={Power} variant="destructive"
-          className="shadow-sm"
-          confirm={t('Disable split routing now? All LAN traffic will exit via WAN until the service re-enables it (or you stop it).')}
-          toast={t('Split routing disabled')} />
+        {/* Where the numbers come from, in one glance: live values tick every few
+            seconds, diagnostics are a cached sweep with a real age. */}
+        <span className="hidden items-center gap-1.5 px-1 text-xs text-muted-foreground sm:flex">
+          <span className={cn('size-1.5 rounded-full', p.refreshing || p.diagPending ? 'bg-warning' : 'bg-success')} />
+          {p.diagPending
+            ? t('Diagnostics: refreshing…')
+            : p.diagAge >= 0
+              ? t('Diagnostics: %s old').replace('%s', fmtAge(p.diagAge))
+              : t('Diagnostics: loading…')}
+        </span>
+
+        <Button size="sm" variant="destructive" className="shadow-sm" disabled={!!busy}
+          onClick={async () => {
+            if (!await ask({
+              title: t('Emergency disable'),
+              body: t('Disable split routing now? All LAN traffic will exit via WAN until the service re-enables it (or you stop it).'),
+              confirmLabel: t('Emergency disable'),
+            })) return
+            run('disable', t('Split routing disabled'))
+          }}>
+          {busy === 'disable' ? <RefreshCw className="size-4 animate-spin" /> : <Power className="size-4" />}
+          {t('Emergency disable')}
+        </Button>
       </div>
 
       {/* ── Update notification ──────────────────────────────── */}
@@ -234,8 +308,17 @@ export default function StatusDashboard(p: Props) {
             <Download className="size-4" />
             <span>{t('Update available:')} <b className="font-medium">{s.update_version}</b></span>
           </div>
-          <Button size="sm" variant="ghost" className="h-7 hover:bg-primary/10 px-2" onClick={() => run('update', t('Install update now? This will download and install the latest version in the background. The router might momentarily disconnect.'), t('Update started in the background'))} disabled={!!p.busy}>
-            {p.busy === 'update' ? <RefreshCw className="size-3 animate-spin mr-1.5" /> : null}
+          <Button size="sm" variant="ghost" className="h-7 px-2 hover:bg-primary/10" disabled={!!busy}
+            onClick={async () => {
+              if (!await ask({
+                title: t('Install update now?'),
+                body: t('Install update now? This will download and install the latest version in the background. The router might momentarily disconnect.'),
+                confirmLabel: t('Install'),
+                tone: 'default',
+              })) return
+              run('update', t('Update started in the background'))
+            }}>
+            {busy === 'update' ? <RefreshCw className="mr-1.5 size-3 animate-spin" /> : null}
             {t('Install')}
           </Button>
         </div>
@@ -258,12 +341,12 @@ export default function StatusDashboard(p: Props) {
 
       {/* ── Routing chain (full width) ───────────────────────── */}
       <Section title={t('Traffic path')} icon={Activity}>
-        <Chain status={status!} rates={rates} />
+        <Chain live={live!} rates={rates} />
       </Section>
 
       {/* ── Tunnels + Lists side by side ─────────────────────── */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <Section title={`${t('Tunnels (failover)')} · ${onlineTun}/${eps.length} ${t('online')}`} icon={Network}>
+        <Section title={`${t('Tunnels (failover)')} · ${onlineTun}/${rows.length} ${t('online')}`} icon={Network}>
           <Hint className="mb-2">{t('Failover hint')}.</Hint>
           <Table>
             <TableHeader>
@@ -275,18 +358,18 @@ export default function StatusDashboard(p: Props) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {eps.map((e) => {
+              {rows.map((e) => {
                 const r = rates[e.iface] || { rx: 0, tx: 0 }
                 return (
                   <TableRow key={e.iface}>
-                    <TableCell className="font-medium">{e.present ? e.iface : <span className="text-destructive">{e.iface} (нет)</span>}</TableCell>
+                    <TableCell className="font-medium">{e.present ? e.iface : <span className="text-destructive">{e.iface} ({t('absent')})</span>}</TableCell>
                     <TableCell>{e.priority || '—'}</TableCell>
                     <TableCell>{e.present ? fmtAge(e.handshake_age) : '—'}</TableCell>
                     <TableCell className="whitespace-nowrap">{e.present ? <><span className="text-success">↓{fmtRate(r.rx)}</span> <span className="text-info">↑{fmtRate(r.tx)}</span></> : '—'}</TableCell>
                     <TableCell><HealthState health={e.health} /></TableCell>
-                    <TableCell>{e.zone || <span className="text-destructive">нет</span>}</TableCell>
-                    <TableCell><YesNo v={e.masq} /></TableCell>
-                    <TableCell><YesNo v={e.forwarding} /></TableCell>
+                    <TableCell>{!e.fwKnown ? <span className="text-muted-foreground">…</span> : e.zone || <span className="text-destructive">{t('none')}</span>}</TableCell>
+                    <TableCell>{!e.fwKnown ? <span className="text-muted-foreground">…</span> : <YesNo v={!!e.masq} />}</TableCell>
+                    <TableCell>{!e.fwKnown ? <span className="text-muted-foreground">…</span> : <YesNo v={!!e.forwarding} />}</TableCell>
                   </TableRow>
                 )
               })}
@@ -294,32 +377,34 @@ export default function StatusDashboard(p: Props) {
           </Table>
         </Section>
 
-        <Section title="Списки" icon={ListChecks}>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Список</TableHead><TableHead>Записей</TableHead><TableHead>Мин</TableHead><TableHead>Возраст</TableHead><TableHead>Состояние</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {lists.map((l) => (
-                <TableRow key={l.name}>
-                  <TableCell>{l.name}</TableCell>
-                  <TableCell>{l.enabled ? l.count : <span className="text-muted-foreground">(выкл)</span>}</TableCell>
-                  <TableCell>{l.min}</TableCell>
-                  <TableCell>{fmtAge(l.age)}</TableCell>
-                  <TableCell>{l.enabled ? <YesNo v={l.ok} /> : '—'}</TableCell>
+        <Section title={t('Lists')} icon={ListChecks}>
+          {!haveDiag ? <Pending error={p.diagError} rows={3} onRetry={p.refresh} /> : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{t('List')}</TableHead><TableHead>{t('Entries')}</TableHead><TableHead>{t('Min')}</TableHead><TableHead>{t('Age')}</TableHead><TableHead>{t('State')}</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {lists.map((l) => (
+                  <TableRow key={l.name}>
+                    <TableCell>{l.name}</TableCell>
+                    <TableCell>{l.enabled ? l.count : <span className="text-muted-foreground">({t('off')})</span>}</TableCell>
+                    <TableCell>{l.min}</TableCell>
+                    <TableCell>{fmtAge(l.age)}</TableCell>
+                    <TableCell>{l.enabled ? <YesNo v={l.ok} /> : '—'}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
         </Section>
       </div>
 
       {/* ── Diagnostics + Events side by side ────────────────── */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <Section title={checks.length ? `${t('Diagnostics')} · ${checks.length}` : t('Diagnostics')} icon={Stethoscope}>
-          {checks.length === 0 ? (
+          {!haveDiag ? <Pending error={p.diagError} rows={2} onRetry={p.refresh} /> : checks.length === 0 ? (
             <p className="flex items-center gap-2 font-medium text-success">
               <CheckIcon className="size-4" />{t('No problems detected.')}
             </p>
@@ -333,8 +418,8 @@ export default function StatusDashboard(p: Props) {
                     {c.fix && <div className="mt-0.5 text-sm text-muted-foreground">→ {c.fix}</div>}
                   </div>
                   {c.category === 'firewall' && !/in the shared |device wildcard|non-tunnel networks/.test(c.message) && /^([A-Za-z0-9_.-]+):/.test(c.message) && (
-                    <Button size="sm" variant="outline" className="border-primary text-primary" disabled={!!p.busy} onClick={() => fixFirewall(c)}>
-                      <Wrench className="size-4" />{t('Fix')}
+                    <Button size="sm" variant="outline" className="border-primary text-primary" disabled={!!busy} onClick={() => fixFirewall(c)}>
+                      {busy === 'fw_fix' ? <RefreshCw className="size-4 animate-spin" /> : <Wrench className="size-4" />}{t('Fix')}
                     </Button>
                   )}
                   {c.category === 'firewall' && (
@@ -349,7 +434,7 @@ export default function StatusDashboard(p: Props) {
         </Section>
 
         <Section title={t('Event history')} icon={History}>
-          {events.length === 0 ? (
+          {!haveDiag ? <Pending error={p.diagError} rows={2} onRetry={p.refresh} /> : events.length === 0 ? (
             <p className="text-sm text-muted-foreground">{t('No failover events recorded yet.')}</p>
           ) : (
             <Table>
@@ -446,16 +531,17 @@ function PathCard({ title, dest, sub, tone }: {
   )
 }
 
-function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: number; tx: number }> }) {
-  const s = status.summary
+function Chain({ live, rates }: { live: Live; rates: Record<string, Rate> }) {
+  const s = live.summary
   const state = s.state || ''
   const mode = s.mode || ''
-  const eps = status.endpoints || []
+  const eps = live.endpoints || []
 
   const activeEp = eps.find((e) => state === 'vpn:' + e.iface)
-  // zapret «работает», если в lists есть запись nozapret с enabled (его presence
-  // в статусе выражается именно так) ИЛИ мы прямо в состоянии zapret.
-  const zapretInstalled = (status.lists || []).some((l) => l.name === 'nozapret' && l.enabled)
+  // zapret's presence now comes straight from the live read (the package is
+  // detected and the daemon checked there), instead of being inferred from a
+  // nozapret list row in the heavy snapshot.
+  const zapretInstalled = !!s.zapret_version
   const zapretLabel = s.zapret_version || 'zapret'
 
   const isVpn = !!activeEp
@@ -477,9 +563,7 @@ function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: 
     card1 = { dest: t('Blocked — kill switch'), tone: 'destructive' }
   } else if (isVpn) {
     card1 = { dest: `#${activeEp!.priority || '?'} ${activeEp!.iface}`, sub: vpnSub, tone: 'success' }
-  } else if (isZapretState) {
-    card1 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'success' }
-  } else if (zapretInstalled) {
+  } else if (isZapretState || zapretInstalled) {
     card1 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'success' }
   } else {
     card1 = { dest: t('Open (WAN)'), sub: t('Direct (WAN)'), tone: 'neutral' }
