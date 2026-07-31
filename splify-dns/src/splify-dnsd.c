@@ -340,30 +340,84 @@ static void nft_family_table(char *out_fam, char *out_tbl, size_t out_tbl_sz) {
     }
 }
 
-/* argv-based exec — never a shell, so none of the strings we pass through
- * (all validated/clamped by the caller before reaching here) can inject
- * anything even if they somehow didn't validate cleanly.
+/* Every nft mutation goes through a bounded queue with AT MOST ONE `nft`
+ * child running at a time. Two things converged to make this necessary,
+ * both confirmed on real hardware: (1) `nft add element` against a real
+ * router's live ruleset (tens of thousands of existing set/map elements —
+ * ipsum/nozapret alone routinely run 5-6 figures) can take several seconds,
+ * so a synchronous wait would stall every LAN client's DNS resolution, not
+ * just the one triggering the add (measured up to ~35s for two sequential
+ * blocking calls) — the first fix was firing children without waiting at
+ * all. But (2) each `nft` invocation loads/parses that ruleset into its OWN
+ * memory (measured 15-70MB per process) — a burst of new domains (e.g.
+ * importing a large list) previously fired one child per resolved query
+ * with no limit, and two such children running concurrently on a memory-
+ * constrained router (~240MB total) is exactly what got one OOM-killed
+ * live during testing. Serializing bounds peak memory to one `nft` process
+ * regardless of how bursty the traffic is — mutations simply queue and
+ * land slightly later, which is fine: they were always best-effort/
+ * eventually-consistent (see the timeout-clamp comment below).
  *
- * Truly fire-and-forget: does NOT wait for the child. Measured against a
- * real router's live ruleset (tens of thousands of existing set/map
- * elements — ipsum/nozapret alone routinely run 5-6 figures), a single `nft
- * add element` can take several seconds; this proxy is single-threaded, so
- * a synchronous wait here would stall EVERY LAN client's DNS resolution for
- * that whole duration, not just the one triggering the add — measured at
- * up to ~35s end-to-end for two sequential blocking calls on real hardware.
- * run_proxy() sets SIGCHLD to SIG_IGN, which per POSIX makes the kernel
- * auto-reap these children with no zombies and no wait() needed at all. A
- * failed add is logged by nft itself to stderr/journal and must never be
- * treated as a reason to block or alter the DNS transaction anyway. */
-static void nft_run(char *const argv[]) {
+ * No SIGCHLD tracking needed: run_proxy() sets it to SIG_IGN (auto-reap,
+ * per POSIX), so completion is instead detected via kill(pid, 0) — ESRCH
+ * once the kernel has reaped it. That poll happens once per main-loop
+ * iteration (nft_pump()), which runs at least every ~1s (epoll_wait's
+ * timeout) even under zero other traffic. */
+#define NFT_QUEUE_MAX 512
+
+struct nft_queued_cmd {
+    char *fam, *tbl, *name, *spec;
+};
+
+static struct nft_queued_cmd *g_nft_queue;
+static size_t g_nft_queue_n, g_nft_queue_cap;
+static pid_t g_nft_current_pid = -1;
+
+static void nft_enqueue(const char *fam, const char *tbl, const char *name, const char *spec) {
+    if (g_nft_queue_n >= NFT_QUEUE_MAX) return; /* fail open: drop, never block on a full queue */
+    if (g_nft_queue_n == g_nft_queue_cap) {
+        size_t newcap = g_nft_queue_cap ? g_nft_queue_cap * 2 : 32;
+        struct nft_queued_cmd *nq = realloc(g_nft_queue, newcap * sizeof(*nq));
+        if (!nq) return;
+        g_nft_queue = nq;
+        g_nft_queue_cap = newcap;
+    }
+    struct nft_queued_cmd *c = &g_nft_queue[g_nft_queue_n];
+    c->fam = strdup(fam);
+    c->tbl = strdup(tbl);
+    c->name = strdup(name);
+    c->spec = strdup(spec);
+    if (!c->fam || !c->tbl || !c->name || !c->spec) {
+        free(c->fam); free(c->tbl); free(c->name); free(c->spec);
+        return;
+    }
+    g_nft_queue_n++;
+}
+
+/* Call once per main-loop iteration. Starts the next queued command only
+ * once the previous one has actually exited, so at most one `nft` process
+ * ever runs at a time. */
+static void nft_pump(void) {
+    if (g_nft_current_pid != -1) {
+        if (kill(g_nft_current_pid, 0) == 0) return; /* still running */
+        g_nft_current_pid = -1;
+    }
+    if (g_nft_queue_n == 0) return;
+
+    struct nft_queued_cmd c = g_nft_queue[0];
+    memmove(g_nft_queue, g_nft_queue + 1, (--g_nft_queue_n) * sizeof(*g_nft_queue));
+
     pid_t pid = fork();
-    if (pid < 0) return;
     if (pid == 0) {
         int devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) { dup2(devnull, 1); dup2(devnull, 2); close(devnull); }
+        char *argv[] = {(char *)g_nft_path, (char *)"add", (char *)"element",
+                         c.fam, c.tbl, c.name, (char *)"{", c.spec, (char *)"}", NULL};
         execv(g_nft_path, argv);
         _exit(127);
     }
+    if (pid > 0) g_nft_current_pid = pid;
+    free(c.fam); free(c.tbl); free(c.name); free(c.spec);
 }
 
 static void nft_add_element(const char *set_name, const char *ip_str, uint32_t ttl) {
@@ -375,10 +429,7 @@ static void nft_add_element(const char *set_name, const char *ip_str, uint32_t t
 
     char spec[160];
     snprintf(spec, sizeof(spec), "%s timeout %us", ip_str, ttl);
-
-    char *argv[] = {(char *)g_nft_path, (char *)"add", (char *)"element",
-                     fam, tbl, (char *)set_name, (char *)"{", spec, (char *)"}", NULL};
-    nft_run(argv);
+    nft_enqueue(fam, tbl, set_name, spec);
 }
 
 /* Maps a fake IP to its real backend for the DNAT chain splify-apply installs
@@ -394,10 +445,7 @@ static void nft_add_map_element(const char *map_name, const char *fake_ip_str,
 
     char spec[96];
     snprintf(spec, sizeof(spec), "%s : %s", fake_ip_str, real_ip_str);
-
-    char *argv[] = {(char *)g_nft_path, (char *)"add", (char *)"element",
-                     fam, tbl, (char *)map_name, (char *)"{", spec, (char *)"}", NULL};
-    nft_run(argv);
+    nft_enqueue(fam, tbl, map_name, spec);
 }
 
 static int is_valid_ipv4_str(const char *s) {
@@ -746,6 +794,7 @@ static int run_proxy(int listen_port, int upstream_port) {
             else
                 handle_upstream_response((struct pending *)events[i].data.ptr);
         }
+        nft_pump(); /* start the next queued nft mutation, if the previous one has exited */
     }
 
     close(g_listen_fd);
