@@ -623,6 +623,10 @@ if [ "$DOMAIN_BACKEND" = "native" ]; then
             || add FIXABLE splify-dns "rule files missing/empty in $SPLIFY_DNS_DIR" "run splify-apply (regenerates them)"
         nft list chain inet fw4 splify_dns_redirect_prerouting >/dev/null 2>&1 \
             || add FIXABLE splify-dns "DNS redirect rule missing from the live ruleset" "run splify-apply (regenerates 30-splify.nft)"
+        nft list chain inet fw4 splify_fakeip_dnat_prerouting >/dev/null 2>&1 \
+            || add FIXABLE splify-dns "fake-IP DNAT rule missing from the live ruleset" "run splify-apply (regenerates 30-splify.nft)"
+        nft list map inet fw4 "$SPLIFY_DNS_FAKEIP_MAP" >/dev/null 2>&1 \
+            || add FIXABLE splify-dns "fake-IP map missing from the live ruleset" "run splify-apply (regenerates 30-splify.nft)"
     fi
 elif [ "$_have_domains" = true ]; then
     # legacy path: dnsmasq's own nftset= directive. Only works when dnsmasq is

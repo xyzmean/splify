@@ -79,6 +79,13 @@ SPLIFY_DNS_PORT="5300"
 SPLIFY_DNS_DIR="/etc/splify"
 SPLIFY_DNS_VPN_RULES="$SPLIFY_DNS_DIR/dns-vpn-rules.lst"
 SPLIFY_DNS_DIRECT_RULES="$SPLIFY_DNS_DIR/dns-direct-rules.lst"
+# Fake-IP: a matched domain gets a synthetic, domain-exclusive IP from this
+# pool instead of its real (possibly CDN-shared, collision-prone) address —
+# see splify-dnsd.c's own comment for why. RFC 2544 benchmarking range, same
+# convention already used by Clash/sing-box/mihomo for this exact purpose.
+SPLIFY_DNS_FAKEIP_POOL="198.18.0.0/15"
+SPLIFY_DNS_FAKEIP_MAP="splify_fakeip_map"
+SPLIFY_DNS_FAKEIP_STATE="$SPLIFY_DNS_DIR/dns-fakeip.state"
 splify_dns_available() { [ -x "$SPLIFY_DNS_BIN" ]; }
 # $1 = domain_backend UCI value -> echoes the resolved backend ('native' |
 # 'dnsmasq'). 'dnsmasq' forces the legacy path (rollback/support); anything

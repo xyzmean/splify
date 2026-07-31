@@ -222,19 +222,39 @@ DEV_LINES="$(config_foreach emit_devices device)"
         echo "    type nat hook prerouting priority dstnat; policy accept;"
         echo "    ip saddr { $LAN_CIDR } udp dport 53 redirect to :$SPLIFY_DNS_PORT"
         echo "}"
+
+        # Fake-IP DNAT: splify-dnsd hands matched domains a synthetic,
+        # domain-exclusive IP from $SPLIFY_DNS_FAKEIP_POOL instead of the real
+        # answer (collision-free even when real CDN IPs are shared across
+        # domains, and immune to ECH since the decision is made from the DNS
+        # question name, not the TLS SNI). This rewrites that synthetic IP
+        # back to whichever real backend splify-dnsd last saw for it — the
+        # map itself is declared empty here and filled live by splify-dnsd
+        # (same "declared empty, filled live" pattern as $IPSUM_SET/$RU_SET
+        # above, which already relies on fw4 reload never wiping content for
+        # a set/map with no inline `elements =`).
+        echo "map $SPLIFY_DNS_FAKEIP_MAP { type ipv4_addr : ipv4_addr; }"
+        echo "chain splify_fakeip_dnat_prerouting {"
+        echo "    type nat hook prerouting priority dstnat; policy accept;"
+        echo "    ip daddr $SPLIFY_DNS_FAKEIP_POOL dnat ip to ip daddr map @$SPLIFY_DNS_FAKEIP_MAP"
+        echo "}"
     fi
 } > "${POLICY_NFT_FILE}.tmp"
 _APPLY_FAIL=0
 mv "${POLICY_NFT_FILE}.tmp" "$POLICY_NFT_FILE" || { warn "failed to install $POLICY_NFT_FILE — policy ruleset NOT updated"; _APPLY_FAIL=1; }
 
-# `fw4 reload` does NOT prune a nat-hooked chain that's no longer declared in
-# any nftables.d include (unlike the filter/mangle chains above, which do get
-# their rule content refreshed in place every run) — confirmed empirically: a
-# previous run's splify_dns_redirect_prerouting otherwise lingers, empty, once
-# the native backend is turned off. Deleting it here and letting the fw4
-# reload below re-add it (only if this run's generated file still declares
-# it) guarantees convergence either way.
+# `fw4 reload` does NOT prune a nat-hooked chain (or a map) that's no longer
+# declared in any nftables.d include (unlike the filter/mangle chains above,
+# which do get their rule content refreshed in place every run) — confirmed
+# empirically: a previous run's splify_dns_redirect_prerouting otherwise
+# lingers, empty, once the native backend is turned off. Deleting them here
+# and letting the fw4 reload below re-add them (only if this run's generated
+# file still declares them) guarantees convergence either way. The chain that
+# REFERENCES the map is deleted before the map itself, or nft refuses the
+# delete ("map in use").
+nft delete chain inet fw4 splify_fakeip_dnat_prerouting  >/dev/null 2>&1 || true
 nft delete chain inet fw4 splify_dns_redirect_prerouting >/dev/null 2>&1 || true
+nft delete map   inet fw4 "$SPLIFY_DNS_FAKEIP_MAP"        >/dev/null 2>&1 || true
 
 # ---- domain -> nftset (resolve-time tagging) -------------------------------
 DOMAINS_ACTIVE=0; { [ "$HAS_VPN" = 1 ] || [ "$HAS_DIRECT" = 1 ]; } && DOMAINS_ACTIVE=1

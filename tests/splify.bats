@@ -616,3 +616,31 @@ EOF
     run "$SPLIFY_DNSD_BIN" --match "$rules" a.wild.example.net;   [ "$status" -eq 0 ]
     run "$SPLIFY_DNSD_BIN" --match "$rules" a.b.regex.example;    [ "$status" -eq 0 ]
 }
+
+# Fake-IP pool: one stable, exclusive 198.18.0.0/15 address per domain,
+# persisted across process restarts — the property that makes it collision-
+# free even when real CDN IPs are shared across unrelated domains.
+@test "splify-dnsd --fakeip: persistent per domain, distinct across domains, in-pool" {
+    [ -x "${SPLIFY_DNSD_BIN:-}" ] || skip "splify-dnsd not built (set SPLIFY_DNSD_BIN)"
+    state="$BATS_TEST_TMPDIR/fakeip.state"
+
+    run "$SPLIFY_DNSD_BIN" --fakeip "$state" example.com
+    [ "$status" -eq 0 ]
+    ip1="$output"
+    case "$ip1" in 198.1[89].*) : ;; *) echo "not in pool: $ip1"; return 1 ;; esac
+
+    # same domain, fresh process, same state file -> same address
+    run "$SPLIFY_DNSD_BIN" --fakeip "$state" example.com
+    [ "$status" -eq 0 ]
+    [ "$output" = "$ip1" ]
+
+    # different domain -> a different address, never the same slot
+    run "$SPLIFY_DNSD_BIN" --fakeip "$state" other.com
+    [ "$status" -eq 0 ]
+    [ "$output" != "$ip1" ]
+
+    # original domain still resolves to its original address after a third
+    # domain has been allocated in between
+    run "$SPLIFY_DNSD_BIN" --fakeip "$state" example.com
+    [ "$output" = "$ip1" ]
+}

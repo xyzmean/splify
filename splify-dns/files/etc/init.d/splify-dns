@@ -31,6 +31,7 @@ start_service() {
         --listen-port "$SPLIFY_DNS_PORT" --upstream-port 53 \
         --vpn-set "$VPN_SET" --direct-set "$DIRECT_SET" \
         --vpn-rules "$SPLIFY_DNS_VPN_RULES" --direct-rules "$SPLIFY_DNS_DIRECT_RULES" \
+        --fakeip-state "$SPLIFY_DNS_FAKEIP_STATE" --fakeip-map "$SPLIFY_DNS_FAKEIP_MAP" \
         --table "inet fw4"
     procd_set_param respawn 3600 5 0
     procd_set_param stdout 1

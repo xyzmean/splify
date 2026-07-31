@@ -1,23 +1,40 @@
 /*
- * splify-dnsd — transparent DNS forwarding proxy that tags resolved IPv4
- * addresses into splify's existing nftables sets (splify_vpn_v4 /
- * splify_direct_v4) at resolve time, based on richer domain-rule matching
- * (exact / namespace / wildcard / regex) than dnsmasq's `nftset=` directive
- * supports.
+ * splify-dnsd — transparent DNS forwarding proxy that routes matched domains
+ * into splify's existing nftables sets (splify_vpn_v4 / splify_direct_v4) at
+ * resolve time, based on richer domain-rule matching (exact / namespace /
+ * wildcard / regex) than dnsmasq's `nftset=` directive supports.
  *
  * It NEVER resolves anything itself: every client query is forwarded
- * byte-for-byte to the real resolver (dnsmasq, 127.0.0.1:53) and its answer
- * is relayed back byte-for-byte, unmodified. Only the question name and the
- * A-record answers are inspected, read-only, to decide whether to add an
- * element to an nft set. A parsing failure or rule miss NEVER blocks or
- * alters the DNS transaction — fail open, always.
+ * byte-for-byte to the real resolver (dnsmasq, 127.0.0.1:53). For a domain
+ * that does NOT match a rule (the overwhelming majority), the answer is
+ * relayed back byte-for-byte, unmodified. For a domain that DOES match, the
+ * real answer is NOT relayed — the client is instead handed a synthetic,
+ * domain-exclusive "fake" IPv4 from a private pool (198.18.0.0/15) that this
+ * daemon allocates and persists 1:1 per domain (see the fakeip_* pool
+ * below); an nftables DNAT rule (installed by splify-apply) then rewrites
+ * that fake IP back to the real backend before the packet leaves the
+ * router. This sidesteps two problems a real-IP-based approach can't: real
+ * CDN IPs (Cloudflare etc.) are shared across many unrelated domains from a
+ * dynamic pool, so tagging the real IP is collision-prone; and the decision
+ * here is made from the DNS question name — always visible in plaintext —
+ * rather than from the TLS SNI, so it works even when ECH hides the SNI.
+ * AAAA answers for a matched domain are suppressed (NODATA) rather than
+ * relayed, since splify has no IPv6 routing at all and letting a real AAAA
+ * through would let a dual-stack client bypass the split entirely.
+ *
+ * A parsing failure, an unmatched domain, or anything this daemon can't
+ * substitute (pool exhausted, no real A answer yet, non-A/AAAA query type)
+ * NEVER blocks or alters the DNS transaction — fail open, always: relay the
+ * real answer unchanged.
  *
  * Usage:
  *   splify-dnsd --listen-port P --upstream-port P --vpn-set NAME
  *               --direct-set NAME --vpn-rules PATH --direct-rules PATH
+ *               --fakeip-state PATH [--fakeip-map NAME]
  *               [--table inet fw4] [--nft /usr/sbin/nft]
  *   splify-dnsd --selftest
- *   splify-dnsd --match PATH HOSTNAME
+ *   splify-dnsd --match RULES_PATH HOSTNAME
+ *   splify-dnsd --fakeip STATE_PATH DOMAIN
  *
  * SIGHUP reloads both rule files without dropping in-flight queries.
  */
@@ -235,41 +252,43 @@ static int parse_name_adv(const uint8_t *pkt, size_t len, size_t pos, char *out,
     return 0;
 }
 
+#define DNS_TYPE_A    1
+#define DNS_TYPE_AAAA 28
+
 struct answer_ip {
     uint32_t addr; /* network byte order */
     uint32_t ttl;
 };
 
-/* Parses a DNS response: extracts the question name (out_qname) and every
- * A-record (class IN) answer IP+TTL, up to max_ips entries. Returns the
- * number of A-record IPs found, or -1 on a malformed/short packet (caller
- * must still relay the raw bytes to the client regardless). */
+/* Parses a DNS response: extracts the question name (out_qname), question
+ * type (out_qtype), the stream offset right after the question section
+ * (out_qend — the header[0,12) + question[12,*out_qend) prefix is byte-
+ * identical between the real response and anything we build to replace it,
+ * so callers can reuse it verbatim), and every A-record (class IN) answer
+ * IP+TTL, up to max_ips entries. Only correct for qdcount==1 (universally
+ * true for a resolver's own queries) — anything else is treated as
+ * unparseable. Returns the number of A-record IPs found, or -1 on a
+ * malformed/short/multi-question packet (caller must still relay the raw
+ * bytes to the client regardless). */
 static int parse_response(const uint8_t *pkt, size_t len, char *out_qname,
-                           size_t qname_len, struct answer_ip *ips,
+                           size_t qname_len, uint16_t *out_qtype,
+                           size_t *out_qend, struct answer_ip *ips,
                            int max_ips) {
     if (len < 12) return -1;
     uint16_t qdcount = (pkt[4] << 8) | pkt[5];
     uint16_t ancount = (pkt[6] << 8) | pkt[7];
 
     size_t pos = 12;
-    if (qdcount < 1) return -1;
+    if (qdcount != 1) return -1;
 
     size_t next = 0;
     if (parse_name_adv(pkt, len, pos, out_qname, qname_len, &next) != 0)
         return -1;
     pos = next;
     if (pos + 4 > len) return -1;
+    *out_qtype = (uint16_t)((pkt[pos] << 8) | pkt[pos + 1]);
     pos += 4; /* qtype + qclass */
-
-    /* remaining questions (rare, but be correct) */
-    for (uint16_t q = 1; q < qdcount; q++) {
-        char tmp[MAX_HOSTNAME];
-        if (parse_name_adv(pkt, len, pos, tmp, sizeof(tmp), &next) != 0)
-            return -1;
-        pos = next;
-        if (pos + 4 > len) return -1;
-        pos += 4;
-    }
+    *out_qend = pos;
 
     int found = 0;
     for (uint16_t a = 0; a < ancount && pos < len; a++) {
@@ -285,7 +304,7 @@ static int parse_response(const uint8_t *pkt, size_t len, char *out_qname,
         uint16_t rdlen = (pkt[pos + 8] << 8) | pkt[pos + 9];
         pos += 10;
         if (pos + rdlen > len) break;
-        if (rtype == 1 /* A */ && rclass == 1 /* IN */ && rdlen == 4 &&
+        if (rtype == DNS_TYPE_A && rclass == 1 /* IN */ && rdlen == 4 &&
             found < max_ips) {
             uint32_t addr;
             memcpy(&addr, pkt + pos, 4);
@@ -305,39 +324,181 @@ static int parse_response(const uint8_t *pkt, size_t len, char *out_qname,
 static const char *g_nft_path = "/usr/sbin/nft";
 static const char *g_nft_table = "inet fw4";
 
-/* argv-based exec — never a shell, so the ip/ttl/set strings (all of which we
- * validate the shape of before calling this) cannot inject anything even if
- * they somehow didn't validate cleanly. */
-static void nft_add_element(const char *set_name, const char *ip_str, uint32_t ttl) {
-    if (ttl < 1) ttl = 1;
-    if (ttl > 86400) ttl = 86400; /* clamp: never let a hostile/huge TTL pin an entry forever */
+/* Splits g_nft_table ("inet fw4") into family/table for argv — shared by
+ * every nft_add_* call below. */
+static void nft_family_table(char *out_fam, char *out_tbl, size_t out_tbl_sz) {
+    char copy[64];
+    snprintf(copy, sizeof(copy), "%s", g_nft_table);
+    char *sp = strchr(copy, ' ');
+    if (sp) {
+        *sp = '\0';
+        strcpy(out_fam, copy);
+        snprintf(out_tbl, out_tbl_sz, "%s", sp + 1);
+    } else {
+        strcpy(out_fam, copy);
+        snprintf(out_tbl, out_tbl_sz, "fw4");
+    }
+}
 
-    char table_copy[64];
-    snprintf(table_copy, sizeof(table_copy), "%s", g_nft_table);
-    char *fam = table_copy;
-    char *tbl = strchr(table_copy, ' ');
-    if (tbl) { *tbl = '\0'; tbl++; } else { tbl = (char *)"fw4"; }
-
-    char spec[160];
-    snprintf(spec, sizeof(spec), "%s timeout %us", ip_str, ttl);
-
+/* argv-based exec — never a shell, so none of the strings we pass through
+ * (all validated/clamped by the caller before reaching here) can inject
+ * anything even if they somehow didn't validate cleanly.
+ *
+ * Truly fire-and-forget: does NOT wait for the child. Measured against a
+ * real router's live ruleset (tens of thousands of existing set/map
+ * elements — ipsum/nozapret alone routinely run 5-6 figures), a single `nft
+ * add element` can take several seconds; this proxy is single-threaded, so
+ * a synchronous wait here would stall EVERY LAN client's DNS resolution for
+ * that whole duration, not just the one triggering the add — measured at
+ * up to ~35s end-to-end for two sequential blocking calls on real hardware.
+ * run_proxy() sets SIGCHLD to SIG_IGN, which per POSIX makes the kernel
+ * auto-reap these children with no zombies and no wait() needed at all. A
+ * failed add is logged by nft itself to stderr/journal and must never be
+ * treated as a reason to block or alter the DNS transaction anyway. */
+static void nft_run(char *const argv[]) {
     pid_t pid = fork();
     if (pid < 0) return;
     if (pid == 0) {
         int devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) { dup2(devnull, 1); dup2(devnull, 2); close(devnull); }
-        char *argv[] = {(char *)g_nft_path, (char *)"add", (char *)"element",
-                         fam, tbl, (char *)set_name, (char *)"{", spec, (char *)"}", NULL};
         execv(g_nft_path, argv);
         _exit(127);
     }
-    int status;
-    waitpid(pid, &status, 0);
+}
+
+static void nft_add_element(const char *set_name, const char *ip_str, uint32_t ttl) {
+    if (ttl < 1) ttl = 1;
+    if (ttl > 86400) ttl = 86400; /* clamp: never let a hostile/huge TTL pin an entry forever */
+
+    char fam[32], tbl[32];
+    nft_family_table(fam, tbl, sizeof(tbl));
+
+    char spec[160];
+    snprintf(spec, sizeof(spec), "%s timeout %us", ip_str, ttl);
+
+    char *argv[] = {(char *)g_nft_path, (char *)"add", (char *)"element",
+                     fam, tbl, (char *)set_name, (char *)"{", spec, (char *)"}", NULL};
+    nft_run(argv);
+}
+
+/* Maps a fake IP to its real backend for the DNAT chain splify-apply installs
+ * (`ip daddr 198.18.0.0/15 dnat ip to ip daddr map @<map_name>`). No timeout
+ * here — the fake IP is a stable, exclusive, persistent allocation for this
+ * domain (see the fakeip_* pool below), so its map entry should live as long
+ * as the mapping does; it's simply overwritten with a fresh real IP on the
+ * next query if the backend moves. */
+static void nft_add_map_element(const char *map_name, const char *fake_ip_str,
+                                 const char *real_ip_str) {
+    char fam[32], tbl[32];
+    nft_family_table(fam, tbl, sizeof(tbl));
+
+    char spec[96];
+    snprintf(spec, sizeof(spec), "%s : %s", fake_ip_str, real_ip_str);
+
+    char *argv[] = {(char *)g_nft_path, (char *)"add", (char *)"element",
+                     fam, tbl, (char *)map_name, (char *)"{", spec, (char *)"}", NULL};
+    nft_run(argv);
 }
 
 static int is_valid_ipv4_str(const char *s) {
     struct in_addr a;
     return inet_aton(s, &a) != 0;
+}
+
+/* ---------------------------------------------------------------------- */
+/* fake-IP pool: one stable, exclusive synthetic IPv4 per matched domain    */
+/* ---------------------------------------------------------------------- */
+/* Real CDN-fronted IPs (Cloudflare etc.) are shared across many unrelated
+ * customer domains from a dynamic anycast pool — there is no fixed 1:1
+ * domain->IP mapping, so tagging the real resolved IP into a set (as
+ * nft_add_element above does) is collision-prone: two configured domains
+ * can end up sharing one real IP, and then whichever one's set entry is
+ * freshest decides routing for BOTH. Handing the client a synthetic IP that
+ * THIS daemon allocates and owns 1:1 per domain makes that collision
+ * structurally impossible, and — since the decision is made from the DNS
+ * question name, always visible in plaintext — sidesteps ECH entirely (no
+ * TLS/SNI parsing needed at all). Pool: 198.18.0.0/15, the RFC 2544
+ * benchmarking range, the same convention already used by Clash/sing-box/
+ * mihomo for this exact purpose; effectively never a real destination. */
+#define FAKEIP_POOL_BASE 0xC6120000u /* 198.18.0.0 */
+#define FAKEIP_POOL_SIZE 131072u     /* 198.18.0.0 - 198.19.255.255 */
+
+struct fakeip_entry {
+    char *domain; /* lowercased, matches the ruleset's own lowercasing */
+    uint32_t addr; /* host byte order */
+};
+
+struct fakeip_table {
+    struct fakeip_entry *entries;
+    size_t n, cap;
+};
+
+static struct fakeip_table g_fakeip;
+static const char *g_fakeip_state_path;
+
+static uint32_t fakeip_index_to_addr(size_t idx) { return FAKEIP_POOL_BASE + (uint32_t)idx; }
+
+static int fakeip_table_add(struct fakeip_table *t, const char *domain, uint32_t addr) {
+    if (t->n == t->cap) {
+        size_t newcap = t->cap ? t->cap * 2 : 64;
+        struct fakeip_entry *ne = realloc(t->entries, newcap * sizeof(*ne));
+        if (!ne) return -1;
+        t->entries = ne;
+        t->cap = newcap;
+    }
+    t->entries[t->n].domain = strdup(domain);
+    if (!t->entries[t->n].domain) return -1;
+    t->entries[t->n].addr = addr;
+    t->n++;
+    return 0;
+}
+
+/* One line per entry, "domain\tip". Missing file -> empty table, not an
+ * error (first run). A malformed line is skipped, not fatal — the domain
+ * simply gets re-allocated (a fresh index) on next match. */
+static void fakeip_state_load(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[MAX_HOSTNAME + 32];
+    while (fgets(line, sizeof(line), f)) {
+        char *nl = strchr(line, '\n'); if (nl) *nl = '\0';
+        char *tab = strchr(line, '\t');
+        if (!tab) continue;
+        *tab = '\0';
+        struct in_addr a;
+        if (inet_aton(tab + 1, &a) == 0) continue;
+        fakeip_table_add(&g_fakeip, line, ntohl(a.s_addr));
+    }
+    fclose(f);
+}
+
+static void fakeip_state_append(const char *path, const char *domain, uint32_t addr) {
+    FILE *f = fopen(path, "a");
+    if (!f) return;
+    struct in_addr a; a.s_addr = htonl(addr);
+    char ipstr[INET_ADDRSTRLEN];
+    if (inet_ntop(AF_INET, &a, ipstr, sizeof(ipstr)))
+        fprintf(f, "%s\t%s\n", domain, ipstr);
+    fclose(f);
+}
+
+/* Looks up domain's existing fake IP, or allocates the next free one and
+ * persists it. Returns 0 and fills *out_addr (host order) on success; -1 if
+ * the pool is exhausted (caller falls back to relaying the real answer
+ * unchanged — fail open, never block DNS over an exhausted pool). */
+static int fakeip_lookup_or_alloc(const char *domain, uint32_t *out_addr) {
+    for (size_t i = 0; i < g_fakeip.n; i++) {
+        if (strcmp(g_fakeip.entries[i].domain, domain) == 0) {
+            *out_addr = g_fakeip.entries[i].addr;
+            return 0;
+        }
+    }
+    if (g_fakeip.n >= FAKEIP_POOL_SIZE) return -1;
+    uint32_t addr = fakeip_index_to_addr(g_fakeip.n);
+    if (fakeip_table_add(&g_fakeip, domain, addr) != 0) return -1;
+    if (g_fakeip_state_path) fakeip_state_append(g_fakeip_state_path, domain, addr);
+    *out_addr = addr;
+    return 0;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -361,6 +522,7 @@ static const char *g_vpn_set = "splify_vpn_v4";
 static const char *g_direct_set = "splify_direct_v4";
 static const char *g_vpn_rules_path;
 static const char *g_direct_rules_path;
+static const char *g_fakeip_map = "splify_fakeip_map";
 static volatile int g_reload_pending = 0;
 static volatile int g_running = 1;
 
@@ -419,6 +581,46 @@ static void handle_client_query(int upstream_port) {
     epoll_ctl(g_epfd, EPOLL_CTL_ADD, fd, &ev);
 }
 
+/* FAKEIP_ANSWER_TTL is independent of the real record's TTL — the fake IP
+ * itself never needs to expire from the client's cache the way a real
+ * record does (it's a stable, persistent allocation); this just needs to be
+ * short enough that the client re-queries periodically, e.g. after a NAT-map
+ * refresh. */
+#define FAKEIP_ANSWER_TTL 60
+
+/* Builds a reply reusing the original response's header+question bytes
+ * verbatim ([0, qend) — same transaction ID, same echoed question), with
+ * ancount/nscount/arcount patched and (if with_answer) exactly one A record
+ * appended pointing at fake_addr_host. nscount/arcount are always zeroed:
+ * dropping any authority/additional section (e.g. an upstream EDNS OPT
+ * record) is fine, our substitute answer is tiny and needs neither. Returns
+ * the built length, or 0 if it wouldn't fit (defensive only — qend is
+ * bounded by MAX_HOSTNAME and the answer is a fixed 16 bytes, so this never
+ * actually happens with out_cap sized as callers use it below). */
+static size_t build_rewritten_response(const uint8_t *orig, size_t qend,
+                                        uint8_t *out, size_t out_cap,
+                                        int with_answer, uint32_t fake_addr_host) {
+    if (qend > out_cap) return 0;
+    memcpy(out, orig, qend);
+    out[6] = 0; out[7] = with_answer ? 1 : 0;               /* ancount */
+    out[8] = 0; out[9] = 0; out[10] = 0; out[11] = 0;       /* nscount, arcount */
+
+    size_t pos = qend;
+    if (with_answer) {
+        if (pos + 16 > out_cap) return 0;
+        out[pos++] = 0xC0; out[pos++] = 0x0C; /* name: pointer to question @ offset 12 */
+        out[pos++] = 0x00; out[pos++] = 0x01; /* type A */
+        out[pos++] = 0x00; out[pos++] = 0x01; /* class IN */
+        out[pos++] = 0x00; out[pos++] = 0x00;
+        out[pos++] = 0x00; out[pos++] = FAKEIP_ANSWER_TTL;  /* ttl (fits in one byte) */
+        out[pos++] = 0x00; out[pos++] = 0x04;               /* rdlength */
+        uint32_t addr_net = htonl(fake_addr_host);
+        memcpy(out + pos, &addr_net, 4);
+        pos += 4;
+    }
+    return pos;
+}
+
 static void handle_upstream_response(struct pending *p) {
     uint8_t buf[MAX_PKT];
     ssize_t n = recv(p->fd, buf, sizeof(buf), 0);
@@ -429,28 +631,66 @@ static void handle_upstream_response(struct pending *p) {
 
     if (n <= 0) return;
 
-    /* Relay to the client FIRST and unconditionally — inspection below must
-     * never delay or gate delivery of the real answer. */
-    sendto(g_listen_fd, buf, (size_t)n, 0, (struct sockaddr *)&p->client, p->client_len);
-
     char qname[MAX_HOSTNAME];
+    uint16_t qtype = 0;
+    size_t qend = 0;
     struct answer_ip ips[32];
-    int nips = parse_response(buf, (size_t)n, qname, sizeof(qname), ips, 32);
-    if (nips <= 0) return;
+    int nips = parse_response(buf, (size_t)n, qname, sizeof(qname), &qtype, &qend, ips, 32);
 
-    int is_vpn = ruleset_match(&g_vpn_rules, qname);
-    int is_direct = ruleset_match(&g_direct_rules, qname);
-    if (!is_vpn && !is_direct) return;
-
-    for (int i = 0; i < nips; i++) {
-        struct in_addr a;
-        a.s_addr = ips[i].addr;
-        char ipstr[INET_ADDRSTRLEN];
-        if (!inet_ntop(AF_INET, &a, ipstr, sizeof(ipstr))) continue;
-        if (!is_valid_ipv4_str(ipstr)) continue; /* defense in depth */
-        if (is_vpn) nft_add_element(g_vpn_set, ipstr, ips[i].ttl);
-        if (is_direct) nft_add_element(g_direct_set, ipstr, ips[i].ttl);
+    /* Unparseable (malformed, or the rare qdcount != 1) or no rule match:
+     * relay the real answer unchanged, exactly as before this feature. */
+    int is_vpn = 0, is_direct = 0;
+    if (nips >= 0) {
+        is_vpn = ruleset_match(&g_vpn_rules, qname);
+        is_direct = ruleset_match(&g_direct_rules, qname);
     }
+    if (nips < 0 || (!is_vpn && !is_direct)) {
+        sendto(g_listen_fd, buf, (size_t)n, 0, (struct sockaddr *)&p->client, p->client_len);
+        return;
+    }
+
+    /* Matched a rule. AAAA is suppressed outright (NODATA) rather than
+     * relayed: splify has no IPv6 routing at all (VPN_SET/DIRECT_SET are
+     * IPv4-only, same as the rest of the project), so letting a real AAAA
+     * answer through would hand a dual-stack client a real, completely
+     * unmanaged address that bypasses the split entirely — and Happy-
+     * Eyeballs-style clients commonly PREFER IPv6 when it's offered. */
+    if (qtype == DNS_TYPE_AAAA) {
+        uint8_t out[512];
+        size_t len = build_rewritten_response(buf, qend, out, sizeof(out), 0, 0);
+        sendto(g_listen_fd, len ? out : buf, len ? len : (size_t)n, 0,
+               (struct sockaddr *)&p->client, p->client_len);
+        return;
+    }
+
+    if (qtype == DNS_TYPE_A && nips > 0) {
+        uint32_t fake_addr;
+        if (fakeip_lookup_or_alloc(qname, &fake_addr) == 0) {
+            struct in_addr fa; fa.s_addr = htonl(fake_addr);
+            struct in_addr ra; ra.s_addr = ips[0].addr;
+            char fake_str[INET_ADDRSTRLEN], real_str[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, &fa, fake_str, sizeof(fake_str)) &&
+                inet_ntop(AF_INET, &ra, real_str, sizeof(real_str)) &&
+                is_valid_ipv4_str(real_str)) {
+                nft_add_map_element(g_fakeip_map, fake_str, real_str);
+                if (is_vpn)    nft_add_element(g_vpn_set,    fake_str, ips[0].ttl);
+                if (is_direct) nft_add_element(g_direct_set, fake_str, ips[0].ttl);
+
+                uint8_t out[512];
+                size_t len = build_rewritten_response(buf, qend, out, sizeof(out), 1, fake_addr);
+                if (len > 0) {
+                    sendto(g_listen_fd, out, len, 0, (struct sockaddr *)&p->client, p->client_len);
+                    return;
+                }
+            }
+        }
+    }
+
+    /* Fallback: matched but nothing to substitute (qtype other than A/AAAA
+     * — e.g. HTTPS/SVCB — zero real A answers yet, or the fake-IP pool is
+     * exhausted). Relay the real answer unchanged — fail open, never block
+     * the DNS transaction. */
+    sendto(g_listen_fd, buf, (size_t)n, 0, (struct sockaddr *)&p->client, p->client_len);
 }
 
 static int run_proxy(int listen_port, int upstream_port) {
@@ -483,10 +723,14 @@ static int run_proxy(int listen_port, int upstream_port) {
     signal(SIGTERM, on_sigterm);
     signal(SIGINT, on_sigterm);
     signal(SIGPIPE, SIG_IGN);
+    /* Auto-reap nft_run()'s children (kernel does it, per POSIX, when
+     * SIGCHLD is SIG_IGN) — no zombies, no blocking wait anywhere. */
+    signal(SIGCHLD, SIG_IGN);
 
     reload_rules();
-    fprintf(stderr, "splify-dnsd: listening on :%d -> upstream 127.0.0.1:%d\n",
-            listen_port, upstream_port);
+    if (g_fakeip_state_path) fakeip_state_load(g_fakeip_state_path);
+    fprintf(stderr, "splify-dnsd: listening on :%d -> upstream 127.0.0.1:%d (fakeip: %zu loaded)\n",
+            listen_port, upstream_port, g_fakeip.n);
 
     struct epoll_event events[32];
     while (g_running) {
@@ -564,14 +808,36 @@ static int cmd_selftest(void) {
     return fails ? 1 : 0;
 }
 
+/* --fakeip STATE_PATH DOMAIN: loads (or creates) the state file, allocates or
+ * looks up DOMAIN's fake IP exactly as the running daemon would, persists it,
+ * and prints it. A second invocation against the same path/domain must print
+ * the SAME address (persistence); a different domain must print a different
+ * one (collision-freedom) — that's what the bats coverage exercises. */
+static int cmd_fakeip(const char *state_path, const char *domain) {
+    g_fakeip_state_path = state_path;
+    fakeip_state_load(state_path);
+    uint32_t addr;
+    if (fakeip_lookup_or_alloc(domain, &addr) != 0) {
+        fprintf(stderr, "fake-ip pool exhausted\n");
+        return 1;
+    }
+    struct in_addr a; a.s_addr = htonl(addr);
+    char ipstr[INET_ADDRSTRLEN];
+    if (!inet_ntop(AF_INET, &a, ipstr, sizeof(ipstr))) return 1;
+    printf("%s\n", ipstr);
+    return 0;
+}
+
 static void usage(const char *argv0) {
     fprintf(stderr,
         "usage: %s --listen-port P --upstream-port P --vpn-set NAME\n"
         "          --direct-set NAME --vpn-rules PATH --direct-rules PATH\n"
+        "          --fakeip-state PATH [--fakeip-map NAME]\n"
         "          [--table \"inet fw4\"] [--nft /usr/sbin/nft]\n"
         "       %s --selftest\n"
-        "       %s --match RULES_PATH HOSTNAME\n",
-        argv0, argv0, argv0);
+        "       %s --match RULES_PATH HOSTNAME\n"
+        "       %s --fakeip STATE_PATH DOMAIN\n",
+        argv0, argv0, argv0, argv0);
 }
 
 int main(int argc, char **argv) {
@@ -583,6 +849,8 @@ int main(int argc, char **argv) {
             return cmd_selftest();
         } else if (strcmp(argv[i], "--match") == 0 && i + 2 < argc) {
             return cmd_match(argv[i + 1], argv[i + 2]);
+        } else if (strcmp(argv[i], "--fakeip") == 0 && i + 2 < argc) {
+            return cmd_fakeip(argv[i + 1], argv[i + 2]);
         } else if (strcmp(argv[i], "--listen-port") == 0 && i + 1 < argc) {
             listen_port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--upstream-port") == 0 && i + 1 < argc) {
@@ -595,6 +863,10 @@ int main(int argc, char **argv) {
             g_vpn_rules_path = argv[++i];
         } else if (strcmp(argv[i], "--direct-rules") == 0 && i + 1 < argc) {
             g_direct_rules_path = argv[++i];
+        } else if (strcmp(argv[i], "--fakeip-state") == 0 && i + 1 < argc) {
+            g_fakeip_state_path = argv[++i];
+        } else if (strcmp(argv[i], "--fakeip-map") == 0 && i + 1 < argc) {
+            g_fakeip_map = argv[++i];
         } else if (strcmp(argv[i], "--table") == 0 && i + 1 < argc) {
             g_nft_table = argv[++i];
         } else if (strcmp(argv[i], "--nft") == 0 && i + 1 < argc) {
@@ -605,7 +877,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (!g_vpn_rules_path || !g_direct_rules_path) {
+    if (!g_vpn_rules_path || !g_direct_rules_path || !g_fakeip_state_path) {
         usage(argv[0]);
         return 2;
     }
