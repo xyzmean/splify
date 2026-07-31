@@ -29,16 +29,14 @@ cat "$TMP/clean.lst" > "$RU_FILE"
 log "ru_subnets refresh OK: $count prefixes from $RU_URL"
 
 # Optional nft set refresh — only if RU_SET is actually defined live (full mode).
-# RU_NFT_FILE is the replay source for failover; like ipsum it's regenerated from
-# the daily, min-count-gated download, so no separate backups are kept.
-if nft list set "$RU_TABLE" "$RU_SET" >/dev/null 2>&1; then
-    mkdir -p "$(dirname "$RU_NFT_FILE")"
-    emit_nft_set_block "$RU_TABLE" "$RU_SET" < "$TMP/clean.lst" > "$TMP/live.nft"
-    nft -f "$TMP/live.nft" || {
-        cp "$TMP/live.nft" /tmp/splify-ru-failed.nft 2>/dev/null || true
-        die "atomic ru nft update failed (kept: /tmp/splify-ru-failed.nft)"
-    }
-    cat "$TMP/live.nft" > "$RU_NFT_FILE"
+# RU_FILE (persisted above) is the replay source; the pre-rendered .nft file an
+# older version kept is gone (see splify-update-ipsum's header for why).
+# `nft -t list` is terse: it reports whether the set EXISTS without dumping its
+# elements, so this probe stays cheap even on a fully populated set.
+if nft -t list set "$RU_TABLE" "$RU_SET" >/dev/null 2>&1; then
+    rm -f "$RU_NFT_FILE" 2>/dev/null || true
+    nft_load_set "$RU_TABLE" "$RU_SET" "$RU_FILE" \
+        || die "ru nft update failed (list kept at $RU_FILE; failover will retry)"
     log "ru nft set refreshed: $count entries"
 fi
 

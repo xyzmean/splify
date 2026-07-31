@@ -41,15 +41,64 @@ fi
 
 TMP="/tmp/splify-sync-nozapret.$$"
 NOZAPRET_SIG="/var/run/splify-nozapret.sig"
+# The list actually loaded into the set, kept on tmpfs (not flash: it is derived
+# from ru/ipsum on every run, and rewriting ~700KB of overlay per sync is wear
+# for nothing). nft_load_set reads it chunk by chunk, and a partial load needs it
+# to still be there when the next tick retries.
+NOZAPRET_LIST="/var/run/splify-nozapret.lst"
 mkdir -p "$TMP"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
+# Built in two tiers, because the destination set has a HARD CAPACITY (zapret
+# declares nozapret with `size 65536`) and ru+ipsum together now exceed it:
+#
+#   must  = private ranges + the ru/cn list. These are the reason the bypass
+#           exists: RU traffic has to stay direct and unmangled.
+#   extra = the VPN (ipsum) prefixes, included only while a tunnel is up. They
+#           matter least: that traffic is inside the tunnel, so what zapret does
+#           to a plain-WAN packet toward those addresses is moot until the
+#           fallback state — and in the fallback state INCLUDE_VPN is 0 and they
+#           are meant to drop out anyway.
+#
+# If everything fits, nothing is dropped and behaviour is exactly as before.
 {
     for p in $ZAPRET_PRIVATES; do echo "$p"; done
     [ -r "$RU_FILE" ] && cat "$RU_FILE" || true
-    [ "$INCLUDE_VPN" = "1" ] && [ -r "$IPSUM_FILE" ] && cat "$IPSUM_FILE" || true
 } | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' \
-  | sort -u > "$TMP/all.lst"
+  | sort -u > "$TMP/must.lst"
+# The tiers may overlap; the final `sort -u` below dedups. (No `comm` here — it is
+# absent from this busybox, and subtracting the tiers up front would only make the
+# room arithmetic marginally tighter.)
+: > "$TMP/extra.lst"
+if [ "$INCLUDE_VPN" = "1" ] && [ -r "$IPSUM_FILE" ]; then
+    grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' "$IPSUM_FILE" \
+        | sort -u > "$TMP/extra.lst"
+fi
+
+# Fit to the destination set. The kernel merges adjacent ranges (auto-merge), so
+# the stored count can end up lower than what we offer — we cannot predict that
+# from here, so cap on the offered count and leave a small margin.
+CAPACITY="$(nft_set_capacity "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET")"
+_must_n="$(wc -l < "$TMP/must.lst")"
+_extra_n="$(wc -l < "$TMP/extra.lst")"
+if [ -n "$CAPACITY" ] && [ "$CAPACITY" -gt 0 ] 2>/dev/null; then
+    _room=$(( CAPACITY - CAPACITY / 50 - _must_n ))     # 2% margin for merging slack
+    if [ "$_room" -lt 0 ]; then
+        # Even the must-have tier overflows: keep what fits and say so — a
+        # truncated bypass is recoverable, a failed load leaves zapret mangling
+        # everything it should have skipped.
+        warn "nozapret: ru/cn list alone ($_must_n) exceeds the set capacity ($CAPACITY) — truncating; RU traffic beyond the cut may be DPI-mangled"
+        head -n $(( CAPACITY - CAPACITY / 50 )) "$TMP/must.lst" > "$TMP/all.lst"
+    elif [ "$_extra_n" -gt "$_room" ]; then
+        warn_throttled nozapret-cap 3600 \
+            "nozapret: $(( _must_n + _extra_n )) entries offered but the set holds $CAPACITY — keeping privates+ru and $_room of $_extra_n VPN prefixes"
+        { cat "$TMP/must.lst"; head -n "$_room" "$TMP/extra.lst"; } | sort -u > "$TMP/all.lst"
+    else
+        cat "$TMP/must.lst" "$TMP/extra.lst" | sort -u > "$TMP/all.lst"
+    fi
+else
+    cat "$TMP/must.lst" "$TMP/extra.lst" | sort -u > "$TMP/all.lst"
+fi
 
 count=$(wc -l < "$TMP/all.lst")
 # The min-count floor guards the NORMAL set against a botched list refresh. In
@@ -70,18 +119,36 @@ NEW_SIG="$INCLUDE_VPN:$(md5sum < "$TMP/all.lst" | cut -d' ' -f1)"
 # — before the rebuild — leaving nozapret with only zapret's own private nets
 # (and the sig is written last, so every subsequent tick died the same way).
 OLD_SIG="$(cat "$NOZAPRET_SIG" 2>/dev/null || true)"
-LIVE="$(set_count "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET")"
+# "Is the live set still healthy?" used to be answered by COUNTING it —
+# `nft list set` on this set (44k entries in practice) expands every interval
+# into text and cost 54-65MB of RSS, which is precisely the allocation the
+# OOM-killer kept shooting on a 240MB router, right before this script then
+# reloaded the same set with a second such allocation. nozapret_current() only
+# compares the count against the floor, so a probe answers the same question:
+# healthy → report the floor, drained/partial → report 0. Same decision, O(1)
+# lookups instead of a full dump. (The pure decision function keeps its exact
+# signature and its unit tests.)
+if set_healthy "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET" "$TMP/all.lst"; then
+    LIVE="$ZAPRET_NOZAPRET_MIN"
+else
+    LIVE=0
+fi
 if nozapret_current "$NEW_SIG" "$OLD_SIG" "${LIVE:-0}" "$ZAPRET_NOZAPRET_MIN" "${SPLIFY_FORCE_SYNC:-0}"; then
     exit 0
 fi
 
-emit_nft_set_block "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET" < "$TMP/all.lst" > "$TMP/sync.nft"
-
-# On failure keep the payload OUTSIDE $TMP — the EXIT trap wipes $TMP, so a
-# path inside it would be gone before anyone can inspect it.
-nft -f "$TMP/sync.nft" || {
-    cp "$TMP/sync.nft" /tmp/splify-nozapret-failed.nft 2>/dev/null || true
-    die "atomic nft sync failed (kept: /tmp/splify-nozapret-failed.nft)"
-}
+# The candidate list has to outlive $TMP's EXIT trap: nft_load_set reads it, and
+# on a partial load the next tick needs to see the same bytes to retry.
+cat "$TMP/all.lst" > "$NOZAPRET_LIST"
+nft_load_set "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET" "$NOZAPRET_LIST"
+case $? in
+    0) : ;;
+    # 2 = does not fit in this router's memory. nft_load_set has already said so
+    # (throttled) and splify-doctor reports it; the PREVIOUS set contents are
+    # untouched, so the bypass keeps working with what it had. Exiting non-zero
+    # here would only add an ERROR line to the log on every failover tick.
+    2) exit 0 ;;
+    *) die "nft sync failed (list kept at $NOZAPRET_LIST; the next tick retries)" ;;
+esac
 printf '%s\n' "$NEW_SIG" > "$NOZAPRET_SIG"
 log "nozapret synced: $count entries"

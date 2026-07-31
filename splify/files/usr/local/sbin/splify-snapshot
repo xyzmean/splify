@@ -1,0 +1,163 @@
+#!/bin/sh
+# splify-snapshot — the diagnostic snapshot ({"status":…,"events":…}) served from
+# a TTL cache instead of forking splify-doctor on every dashboard read.
+#
+# WHY: doctor is a full sweep (counts every element of the live nft sets, walks
+# the firewall config, greps the list files). Measured on a real filogic box with
+# production lists: 4-5s idle, 19-24s while the failover tick or the agent runs.
+# The dashboard called it on mount AND on every "Обновить", blocking the whole
+# page — and `rpcd -t 30` turns the slow case into a hard error instead of a slow
+# load. Diagnostics are also exactly the kind of data that does NOT need to be
+# instantaneous: a firewall zone or a stale list does not change between two
+# clicks.
+#
+# So: serve-stale-while-revalidate.
+#   * cache fresh (age <= TTL)      -> cat it, no fork at all
+#   * cache stale                   -> cat it NOW, refresh in the background
+#   * no cache at all (first visit) -> compute inline (nothing else to serve)
+# A directory lock keeps concurrent readers from stampeding N doctors: whoever
+# loses the race just serves the current cache. The dashboard polls splify-live,
+# which reports this cache's age and whether a refresh is in flight, so the UI
+# can show the real data age and swap in fresh output the moment it lands.
+#
+#   splify-snapshot              cached snapshot (the LuCI read path)
+#   splify-snapshot --refresh    kick a background refresh, print an ack
+#   splify-snapshot --wait       force a synchronous refresh (CLI / agent)
+#
+# TTL is overridable for testing: SPLIFY_SNAPSHOT_TTL=0 forces a refresh path.
+
+DOCTOR=/usr/local/sbin/splify-doctor
+CACHE=/var/run/splify-snapshot.json
+LOCK=/var/run/splify-snapshot.lock
+TTL="${SPLIFY_SNAPSHOT_TTL:-25}"
+# A doctor run killed mid-flight (rpcd timeout, reboot, OOM) would otherwise
+# leave the lock dir behind and wedge every later refresh. Anything older than
+# this is treated as abandoned — comfortably above doctor's worst measured run.
+LOCK_MAX_AGE=90
+
+now() { date +%s; }
+mtime() { stat -c %Y "$1" 2>/dev/null || date -r "$1" +%s 2>/dev/null; }
+
+cache_age() {
+    [ -s "$CACHE" ] || { echo 999999; return; }
+    _m="$(mtime "$CACHE")"
+    [ -n "$_m" ] || { echo 999999; return; }
+    echo $(( $(now) - _m ))
+}
+
+# mkdir is the only atomic test-and-set busybox gives us without flock.
+lock_take() {
+    if [ -d "$LOCK" ]; then
+        _lm="$(mtime "$LOCK")"
+        if [ -n "$_lm" ] && [ $(( $(now) - _lm )) -gt "$LOCK_MAX_AGE" ]; then
+            rmdir "$LOCK" 2>/dev/null || return 1
+        else
+            return 1
+        fi
+    fi
+    mkdir "$LOCK" 2>/dev/null
+}
+lock_free() { rmdir "$LOCK" 2>/dev/null || true; }
+
+# Run "$@" at minimum CPU (and, where available, IO) priority.
+_nice_run() {
+    if command -v ionice >/dev/null 2>&1; then
+        ionice -c 3 nice -n 19 "$@"
+    elif command -v nice >/dev/null 2>&1; then
+        nice -n 19 "$@"
+    else
+        "$@"
+    fi
+}
+
+# Write the cache atomically: a reader must never see a half-written object, so
+# doctor's output lands in a temp file in the same directory and is renamed in.
+#
+# The sweep runs at the lowest priority available. Measured: while a doctor run
+# is in flight, an interactive `live` read went from 0.28s to 14s on a 4-core
+# filogic box — on a single-core router that is the difference between a page
+# that ticks and a page that hangs. Diagnostics are never urgent; the poll that
+# the operator is watching always is. `nice` is in busybox; ionice may not be,
+# hence the fallback chain.
+regen() {
+    _tmp="$CACHE.$$"
+    if _nice_run "$DOCTOR" --snapshot >"$_tmp" 2>/dev/null && [ -s "$_tmp" ]; then
+        mv "$_tmp" "$CACHE"
+        return 0
+    fi
+    rm -f "$_tmp"
+    return 1
+}
+
+# Detached refresh: rpcd's plugin process exits as soon as it has printed the
+# cached object, so this subshell must survive being orphaned (all fds closed,
+# no controlling terminal). Only ever started while holding the lock.
+regen_bg() {
+    ( regen; lock_free ) </dev/null >/dev/null 2>&1 &
+}
+
+case "${1:-}" in
+    --refresh)
+        # Explicit user-driven refresh ("Обновить"). Non-blocking BY DESIGN: it
+        # returns immediately and the UI notices the new data via splify-live's
+        # diagnostics.age / .pending, so a 20s doctor run can never hit rpcd's
+        # 30s timeout or leave the button spinning on a dead request.
+        if lock_take; then
+            regen_bg
+            printf '{"queued":true}\n'
+        else
+            printf '{"queued":false,"reason":"refresh already in flight"}\n'
+        fi
+        exit 0
+        ;;
+    --wait)
+        # Synchronous: for CLI users and the remote agent, where a fresh answer
+        # matters more than latency. Still lock-guarded — if a refresh is already
+        # running we wait for it rather than start a second doctor.
+        if lock_take; then
+            regen; lock_free
+        else
+            _i=0
+            while [ -d "$LOCK" ] && [ "$_i" -lt "$LOCK_MAX_AGE" ]; do
+                sleep 1; _i=$(( _i + 1 ))
+            done
+        fi
+        [ -s "$CACHE" ] && cat "$CACHE" && exit 0
+        exec "$DOCTOR" --snapshot
+        ;;
+esac
+
+AGE="$(cache_age)"
+if [ -s "$CACHE" ] && [ "$AGE" -le "$TTL" ] 2>/dev/null; then
+    cat "$CACHE"
+    exit 0
+fi
+
+if [ -s "$CACHE" ]; then
+    # Stale but usable: answer instantly, then refresh out of band. This is the
+    # common dashboard case and the whole point of the script.
+    cat "$CACHE"
+    lock_take && regen_bg
+    exit 0
+fi
+
+# Cold start (first visit after boot/install): there is nothing to serve, so pay
+# the full cost once and populate the cache for everyone else.
+if lock_take; then
+    if regen; then
+        lock_free
+        cat "$CACHE"
+        exit 0
+    fi
+    lock_free
+    exec "$DOCTOR" --snapshot
+fi
+
+# Someone else is already computing the first snapshot — wait for it briefly
+# rather than fork a competing doctor on a memory-constrained box.
+_i=0
+while [ ! -s "$CACHE" ] && [ "$_i" -lt 30 ]; do
+    sleep 1; _i=$(( _i + 1 ))
+done
+[ -s "$CACHE" ] && exec cat "$CACHE"
+exec "$DOCTOR" --snapshot

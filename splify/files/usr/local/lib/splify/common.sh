@@ -125,6 +125,25 @@ FAIL_COUNTER_FILE="/var/run/splify-failcount"
 log()  { logger -t "$LOG_TAG" "$*"; }
 die()  { log "ERROR: $*"; echo "ERROR: $*" >&2; exit 1; }
 warn() { log "WARN: $*"; }
+# warn once per EVERY seconds for a given key. For conditions the failover daemon
+# re-discovers on every tick (a list too large to load, see nft_set_fits): the
+# operator needs to see it, but not 480 times a day, and on a small box the log
+# ring itself is memory.
+warn_throttled() {  # KEY EVERY_SECONDS MESSAGE…
+    _wt_key="$1"; _wt_every="$2"; shift 2
+    _wt_stamp="/var/run/splify-warn.$(printf '%s' "$_wt_key" | tr -c 'A-Za-z0-9._-' '_')"
+    _wt_now="$(date +%s)"
+    # `|| true` is load-bearing, exactly as for the nozapret sig: the stamp lives
+    # on tmpfs, so the FIRST call after a boot reads a missing file, the bare `cat`
+    # exits 1, and callers running with `set -e` (every updater, sync-nozapret) die
+    # right there — which is how a first-ever throttled warning aborted the whole
+    # nozapret rebuild it was only supposed to annotate.
+    _wt_last="$(cat "$_wt_stamp" 2>/dev/null || true)"
+    case "$_wt_last" in ''|*[!0-9]*) _wt_last=0 ;; esac
+    [ $(( _wt_now - _wt_last )) -ge "$_wt_every" ] || return 0
+    echo "$_wt_now" > "$_wt_stamp" 2>/dev/null || true
+    warn "$*"
+}
 
 # ---- failover endpoints (UCI 'endpoint' sections, lowest priority wins) -----
 # emit "priority<TAB>iface" per section; callers sort.
@@ -508,7 +527,224 @@ iface_src_ip() {
     ip -4 -o addr show dev "$1" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1
 }
 
-# ---- nft / routing helpers (unchanged) -------------------------------------
+# ---- nft: keeping `nft` inside this router's memory -------------------------
+#
+# THE PROBLEM, measured on a 240MB filogic box with production lists (ipsum
+# ~24k prefixes, nozapret ~44k): every `nft` process that touches a large set
+# builds the whole thing in its OWN address space. Observed RSS 54-65MB per
+# process — against ~96MB free with dnsmasq already holding ~28MB. The kernel
+# OOM-killer fired four times in one hour, killing `nft` mid-load every time
+# (and `dnsmasq` in earlier rounds). A killed loader leaves the set PARTIALLY
+# populated, which is worse than not reloading at all: zapret's bypass is then
+# wrong, traffic that should be direct rides the tunnel or vice versa, and the
+# box looks "up" while splify behaves incorrectly.
+#
+# Two habits were feeding it, both fixed below:
+#   1. COUNTING. `nft list set` expands every interval into text just to count
+#      lines. The failover loop did that on the ipsum set EVERY tick, and
+#      sync-nozapret did it on the 44k bypass set before every rebuild. Neither
+#      needs a count — they need "is this set populated?", which `nft get
+#      element` answers with an O(1) lookup and a few hundred KB.
+#   2. LOADING. One `add element { … }` block with 44k entries is a single
+#      command nft must parse whole. Loading in chunks of a few thousand keeps
+#      each process small; the set is briefly incomplete mid-load, which is an
+#      acceptable trade against being OOM-killed at an arbitrary point.
+#
+# Elements per `nft` invocation, and the address-space ceiling each one runs
+# under. The cap is a backstop: if a chunk somehow still grows past it, nft dies
+# with ENOMEM and we log a failure, instead of the kernel choosing a victim
+# process elsewhere on the box.
+NFT_CHUNK_ELEMS="${SPLIFY_NFT_CHUNK:-4000}"
+
+# Chunking bounds the LOADER. It does nothing about the other half of the cost:
+# the set itself, which the kernel keeps in an unswappable rbtree — measured
+# ~150 bytes per interval element, so a 24k-prefix ipsum set is ~3.5MB of kernel
+# memory that must stay resident for as long as the set exists.
+#
+# On a Xiaomi Mi Router 4C (MT7628AN, 58MB RAM, ~13MB available) that is enough,
+# together with the loader and whatever else is running, to take the box into an
+# OOM reboot — a reboot which then replays the same load on the next failover
+# tick, i.e. a boot loop. A router that reboots is worse than a router without a
+# blocklist, so a load that cannot fit is REFUSED and reported, loudly, instead
+# of being attempted.
+#
+# NFT_ELEM_BYTES: total memory a set element costs while it is being worked on.
+#   It is NOT just the kernel's rbtree node, and this is the part that makes small
+#   routers fail: libnftables builds a CACHE OF THE WHOLE TABLE — every element of
+#   every set — before it executes ANY command. Measured on a Mi Router 4C against
+#   a 13 886-element ipsum set:
+#
+#     nft get element … { 1.2.3.4 }        15 MB      <- a single lookup!
+#     nft -a -t list table inet fw4         2 MB      <- terse: no elements fetched
+#     nft flush set …                       2 MB
+#     nft get element (same set, emptied)    1 MB
+#
+#   ~1.1KB per element, per invocation. Two consequences: (1) an element-level
+#   "cheap probe" does not exist at this layer, which is why set health is tracked
+#   with a stamp below instead; (2) CHUNKED LOADING DOES NOT BOUND MEMORY on its
+#   own — chunk N pays for the N-1 chunks already in the set, so the last chunk of
+#   a 30k list is the expensive one. Chunking still helps (early chunks are cheap,
+#   each process is short-lived and the ulimit contains it), but the only thing
+#   that keeps a small router alive is refusing a list that cannot fit at all.
+#   Calibrated from BOTH sides, because this number has two ways to be wrong: too
+#   low and the router OOMs, too high and a healthy router is denied a list it can
+#   actually hold (which silently disables the bypass).
+#
+#     upper bound  Mi 4C, ~13MB free: a 30 726-prefix load OOM-rebooted it.
+#                  To refuse that, the estimate must exceed ~443 B/prefix.
+#     lower bound  filogic, 85MB free: a 74 648-prefix load COMPLETED — 19 chunks,
+#                  71MB peak RSS on the last one, and MemAvailable troughed at
+#                  61MB (i.e. it cost ~330 B/prefix of actual headroom; nft's RSS
+#                  is much larger than the pressure it adds, because a good part
+#                  of what MemAvailable reports is reclaimable). To allow that,
+#                  the estimate must stay under ~845 B/prefix.
+#
+#   800 sits inside that window, deliberately toward the cautious end: the 4C is
+#   refused until it has >24MB free (it never does — 58MB of RAM total, ~16-20MB
+#   free in practice), while the filogic load still passes with room to spare
+#   (58MB needed vs 85MB). At 600 the 4C would have started that load again as
+#   soon as free memory drifted to ~18MB, and the one data point we have says a
+#   load of that size killed it.
+# NFT_MEM_RESERVE_KB: the floor under which the box counts as already critical and
+#   we will not start a big load at all, whatever the arithmetic says.
+# NFT_ELEM_KERNEL_BYTES: the part of the above that the KERNEL holds for as long
+#   as the set exists (rbtree nodes; an interval element is two of them). It
+#   matters for one thing: a reload flushes the old contents first, so that memory
+#   comes back before the new load needs it. Without crediting it, a router in its
+#   normal steady state — sets loaded, memory accounted for — would refuse every
+#   subsequent refresh of a list it is already successfully holding.
+NFT_ELEM_BYTES="${SPLIFY_NFT_ELEM_BYTES:-800}"
+NFT_ELEM_KERNEL_BYTES="${SPLIFY_NFT_ELEM_KERNEL_BYTES:-300}"
+NFT_MEM_RESERVE_KB="${SPLIFY_NFT_MEM_RESERVE_KB:-10240}"
+
+# NO ulimit here, deliberately. Two attempts at an address-space backstop were
+# tried and both broke real loads, because `ulimit -v` bounds VIRTUAL address
+# space and nft's VA sits far above its RSS:
+#
+#   * a fixed 32MB cap: flushing an already-populated set failed outright, and the
+#     set was left empty;
+#   * a cap derived from MemAvailable (70MB on a box with 80MB free): the nozapret
+#     load died at chunk 15 of 19 with "src/utils.c:33: Memory allocation failure"
+#     while MemAvailable never dropped below 73MB — i.e. the cap, not the router,
+#     was the limit.
+#
+# A backstop that fails loads the box could actually complete is worse than none:
+# it leaves sets half-loaded, which is the exact failure mode all of this exists
+# to prevent. The real guard is nft_set_fits() below — it refuses up front, from
+# measured per-element cost, and never interrupts a load in progress.
+
+mem_available_kb() { awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || echo 0; }
+
+# Can this box hold a set of $1 elements right now? Echoes a human explanation on
+# stdout when it cannot, so callers can put it straight into a log/diagnostic.
+# The comparison deliberately does NOT also subtract the reserve from the
+# estimate: the measured 74 648-prefix load needed 71MB on a box with 85MB free
+# and succeeded, so demanding need+reserve would have refused a working
+# configuration. The reserve is instead a hard floor on its own — if the router is
+# already that low, no big load starts, period.
+nft_set_fits() {  # ELEMENT_COUNT [SET_BEING_REPLACED]
+    _nsf_need_kb=$(( ($1 * NFT_ELEM_BYTES) / 1024 ))
+    _nsf_avail_kb="$(mem_available_kb)"
+    case "$_nsf_avail_kb" in ''|*[!0-9]*) return 0 ;; esac   # unknown -> don't block
+    # Replacing a set we already hold? The flush comes first, so count the kernel
+    # memory it releases as available.
+    if [ -n "${2:-}" ]; then
+        _nsf_avail_kb=$(( _nsf_avail_kb + ($(_set_prev_count "$2") * NFT_ELEM_KERNEL_BYTES) / 1024 ))
+    fi
+    if [ "$_nsf_avail_kb" -le "$NFT_MEM_RESERVE_KB" ]; then
+        printf 'only %sMB of memory is available, below the %sMB floor for loading a list at all' \
+            "$(( _nsf_avail_kb / 1024 ))" "$(( NFT_MEM_RESERVE_KB / 1024 ))"
+        return 1
+    fi
+    [ "$_nsf_avail_kb" -gt "$_nsf_need_kb" ] && return 0
+    printf '%s elements need ~%sMB to load but only %sMB is available' \
+        "$1" "$(( _nsf_need_kb / 1024 ))" "$(( _nsf_avail_kb / 1024 ))"
+    return 1
+}
+
+# ---- set health without touching the elements -------------------------------
+# What we need to know on every failover tick is "does the kernel still hold the
+# list we loaded?" — and per the measurements above, asking nft about an element
+# costs ~1.1KB per element in the set. So we do not ask. We record what we loaded
+# and compare cheap identifiers instead:
+#
+#   * the stamp lives in /var/run (tmpfs) -> a REBOOT loses it, and a reboot does
+#     drain the sets, so that is exactly right;
+#   * an fw4 reload REPLACES `table inet fw4`, which changes the table's and the
+#     set's handles -> recorded and compared, via one 2MB terse listing;
+#   * a list refresh changes the source file -> its size+mtime are in the stamp,
+#     so the loader that wrote the stamp is always the one that matches it.
+#
+# Not covered: someone flushing the set out of band (`nft flush set` by hand)
+# without touching handles. The failover tick would not notice until the next
+# reboot/reload or list refresh. That is a deliberate trade — the alternative is
+# a 15MB probe every 180s on a router with 13MB free.
+_set_stamp_file() {  # SET -> path
+    printf '/var/run/splify-set.%s' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"
+}
+# "<table handle>:<set handle>" for TABLE/SET, or empty. Terse (-t) is what keeps
+# this cheap: it lists the table's structure WITHOUT fetching set elements.
+_set_ident() {  # TABLE SET
+    nft -a -t list table "$1" 2>/dev/null | awk -v s="$2" '
+        /^table/ { for (i = 1; i <= NF; i++) if ($i == "handle") th = $(i+1) }
+        $1 == "set" && $2 == s { for (i = 1; i <= NF; i++) if ($i == "handle") sh = $(i+1) }
+        END { if (th != "" && sh != "") printf "%s:%s", th, sh }
+    '
+}
+_src_ident() {  # FILE -> "<size>:<mtime>"
+    printf '%s:%s' "$(wc -c < "$1" 2>/dev/null)" "$(stat -c %Y "$1" 2>/dev/null || date -r "$1" +%s 2>/dev/null)"
+}
+set_stamp_write() {  # TABLE SET FILE
+    printf '%s %s\n' "$(_set_ident "$1" "$2")" "$(_src_ident "$3")" > "$(_set_stamp_file "$2")" 2>/dev/null || true
+    # Companion file, not a third field in the stamp: set_healthy compares the
+    # stamp verbatim, so its format must stay exactly two fields.
+    grep -cE '^[0-9]' "$3" > "$(_set_stamp_file "$2").n" 2>/dev/null || true
+}
+set_stamp_clear() { rm -f "$(_set_stamp_file "$1")" "$(_set_stamp_file "$1").n" 2>/dev/null || true; }
+# How many elements WE last loaded into this set (0 if we never did / after a
+# reboot). Used to credit the memory a flush will hand back.
+_set_prev_count() {  # SET
+    _spc="$(cat "$(_set_stamp_file "$1").n" 2>/dev/null || true)"
+    case "$_spc" in ''|*[!0-9]*) echo 0 ;; *) echo "$_spc" ;; esac
+}
+# 0 iff the kernel still holds what we loaded from FILE.
+set_healthy() {  # TABLE SET FILE
+    [ -s "$3" ] || return 1
+    _sh_stamp="$(cat "$(_set_stamp_file "$2")" 2>/dev/null)" || return 1
+    [ -n "$_sh_stamp" ] || return 1
+    [ "$_sh_stamp" = "$(_set_ident "$1" "$2") $(_src_ident "$3")" ]
+}
+
+# Is ADDR a member of set TABLE/SET? Interval sets match a CONTAINED host address
+# against the stored prefix, so a plain address is a valid probe for a CIDR list.
+#
+# EXPENSIVE — see the cache measurements above: this costs ~1.1KB per element
+# ALREADY IN THE SET (15MB against a 14k-element set), not O(1) as the kernel-side
+# lookup would suggest. Gate every call on nft_cache_affordable, and never use it
+# on a path that runs unattended.
+set_has() { nft get element "$1" "$2" "{ $3 }" >/dev/null 2>&1; }
+
+# Can this box afford an nft command that pulls a set of ~$1 elements into the
+# CLI's cache right now?
+nft_cache_affordable() {  # ELEMENT_COUNT
+    _nca_avail="$(mem_available_kb)"
+    case "$_nca_avail" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$_nca_avail" -gt $(( ($1 * NFT_ELEM_BYTES) / 1024 + NFT_MEM_RESERVE_KB )) ]
+}
+
+# Declared maximum size of a set, or empty when it is unbounded. Cheap: terse
+# listing, no elements. Load-bearing for the zapret bypass — zapret creates its
+# `nozapret` set with `size 65536`, and once splify's ru+ipsum lists together
+# exceed that, the load fails PART WAY and leaves the bypass in whatever state it
+# reached (observed: 74 648 entries offered, set left empty, so zapret then
+# mangled traffic that was supposed to be exempt).
+nft_set_capacity() {  # TABLE SET
+    nft -t list set "$1" "$2" 2>/dev/null | awk '$1 == "size" { print $2 + 0; exit }'
+}
+
+# Exact element count. EXPENSIVE (see above) — for interactive debugging only
+# (splify-status); no automated path may call this. Capped so that even there it
+# can only ever kill itself.
 set_count() {
     _cnt="$(nft list set "$1" "$2" 2>/dev/null \
         | tr ',' '\n' \
@@ -534,14 +770,65 @@ clean_ip_list() {
     '
 }
 
-# Emit a single compact `flush set; add element { a,b,c }` nft command stream for
-# set "$1 $2" from a cleaned list on stdin. ONE comma-block (not per-line add) —
-# parses in ~10MB vs OOM at 38k+ entries on 240MB routers. Shared by ipsum/ru/noz.
-emit_nft_set_block() {
-    printf 'flush set %s %s\n' "$1" "$2"
-    printf 'add element %s %s {\n' "$1" "$2"
-    awk 'NR > 1 { printf "," } { printf "%s", $0 } END { print "" }'
-    printf '}\n'
+# Emit ONE `add element … { a,b,c }` command per NFT_CHUNK_ELEMS entries, read
+# from a cleaned list on stdin. Deliberately NOT the old single giant block: that
+# was one command nft had to parse whole (54-65MB for a 44k list, OOM-killed on a
+# 240MB box — see the nft section above). One element per `add` would be the other
+# extreme: 44k forks.
+emit_nft_set_chunks() {  # TABLE SET  (elements on stdin) -> commands on stdout
+    awk -v tbl="$1" -v set="$2" -v n="$NFT_CHUNK_ELEMS" '
+        { if (c == 0) printf "add element %s %s { %s", tbl, set, $0
+          else printf ",%s", $0
+          if (++c >= n) { print " }"; c = 0 } }
+        END { if (c > 0) print " }" }
+    '
+}
+
+# Replace the contents of set TABLE/SET with a cleaned list from FILE, chunk by
+# chunk, each chunk its own bounded nft process.
+#
+# NOT ATOMIC, by choice: `flush` lands first and the set is incomplete until the
+# last chunk applies (a second or so). The atomic alternative — one command — is
+# what the OOM-killer was interrupting at an ARBITRARY point, leaving a partial
+# set with no error and no retry. Here a failed chunk is a reported failure, the
+# caller retries on its next tick, and set_healthy() detects the partial state in
+# the meantime because chunks apply in file order (its last-element probe fails).
+nft_load_set() {  # TABLE SET FILE
+    [ -s "$3" ] || { warn "nft_load_set: empty source list $3"; return 1; }
+    # Refuse rather than reboot (see the memory notes above). Checked BEFORE the
+    # flush so a refusal leaves the current — possibly still working — set alone.
+    _nls_n="$(grep -cE '^[0-9]' "$3" 2>/dev/null || echo 0)"
+    if ! _nls_why="$(nft_set_fits "$_nls_n" "$2")"; then
+        # Throttled: the failover daemon re-checks this every tick and the answer
+        # will not change until the operator acts or memory frees up.
+        warn_throttled "nftfit.$2" 3600 \
+            "refusing to load $2: $_nls_why — shrink the list or disable it (the router would otherwise OOM)"
+        return 2
+    fi
+    printf 'flush set %s %s\n' "$1" "$2" | nft -f - 2>/dev/null \
+        || { warn "nft_load_set: cannot flush $1 $2"; return 1; }
+    # The stamp describes a set that matches its source. It stops being true the
+    # moment we flush, and stays untrue until the last chunk lands.
+    set_stamp_clear "$2"
+    _nls_cmds="/tmp/splify-nftload.$$"
+    emit_nft_set_chunks "$1" "$2" < "$3" > "$_nls_cmds" || { rm -f "$_nls_cmds"; return 1; }
+    _nls_rc=0
+    _nls_i=0
+    # Redirect (not a pipe) so the loop body runs in THIS shell and _nls_rc
+    # survives it.
+    while IFS= read -r _nls_cmd; do
+        _nls_i=$(( _nls_i + 1 ))
+        printf '%s\n' "$_nls_cmd" | nft -f - 2>/dev/null || {
+            warn "nft_load_set: chunk $_nls_i failed for $1 $2 (set is now partial; will retry)"
+            _nls_rc=1
+            break
+        }
+    done < "$_nls_cmds"
+    rm -f "$_nls_cmds"
+    # Only a COMPLETE load earns a stamp — a partial set must read as unhealthy so
+    # the next tick retries it.
+    [ "$_nls_rc" = 0 ] && set_stamp_write "$1" "$2" "$3"
+    return "$_nls_rc"
 }
 
 has_rule() { ip -4 rule show | grep -q "$1"; }

@@ -13,15 +13,28 @@ DOCTOR_SH="$REPO_ROOT/splify/files/usr/local/sbin/splify-doctor"
 FAILOVER_SH="$REPO_ROOT/splify/files/usr/local/sbin/splify-failover"
 
 # extract_fn FILE FNNAME -> prints the function's source.
+#
+# Ends at the first line that is just a closing brace in column 0 — the style
+# every function in these scripts is written in.
+#
+# It used to count braces instead, which silently mis-extracted any function
+# embedding an awk program: awk bodies carry braces of their own, and string
+# literals carry UNBALANCED ones (`printf "… { %s"`, `print " }"`). The count
+# then returned to zero early, eval got a truncated function and failed with
+# "unexpected EOF while looking for matching quote" — which is why
+# emit_nft_set_chunks appeared untestable. Tracking quote state instead is worse:
+# an apostrophe in a comment ("the peer's key") flips it and breaks a different
+# set of functions. Column-0 `}` has neither failure mode; nested closes in this
+# codebase are always indented.
 extract_fn() {
     awk -v fn="$2" '
-        !cap && $0 ~ "^"fn"\\(\\)" { cap=1 }
-        cap {
-            print
-            o = gsub(/{/, "{"); c = gsub(/}/, "}")
-            opens += o; n += o - c
-            if (opens>0 && n==0) exit
+        # A one-liner (json_esc, nft_capped, …) opens and closes on its own line.
+        !cap && $0 ~ "^"fn"\\(\\)" {
+            cap = 1; print
+            if ($0 ~ /\{.*\}/) exit
+            next
         }
+        cap { print; if (/^}[ \t]*$/) exit }
     ' "$1"
 }
 
