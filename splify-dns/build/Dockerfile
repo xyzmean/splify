@@ -15,6 +15,11 @@
 #   mipsel_24kc                   825 588 (!)  -> 135 128   (broken -> works)
 #   arm_cortex-a7                 ~848 000     ->  92 468
 #   x86_64                        ~705 000     ->  88 056
+#
+# It also removes the need for a per-architecture toolchain download (the usual
+# approach is one ~100MB musl-cross tarball per target), which is what makes it
+# practical to cover every ISA OpenWrt runs on from a single image: 11 of them
+# compile in parallel here in about a minute and a half.
 FROM alpine:3.20
 
 ARG ZIG_VERSION=0.13.0

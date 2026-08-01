@@ -81,6 +81,10 @@ jobs:
         run: |
           mkdir -p artifacts
           cp -v out/*.apk out/*.ipk artifacts/ || true
+          # splify-dns ships one package per OpenWrt arch string, so a release has
+          # dozens of files; the checksum list is how a user verifies the one they
+          # picked (same reason zapret/nfqwsc publish sha256sum.txt).
+          cp -v out/sha256sums.txt artifacts/ || true
           ls -l artifacts
 
       - name: Attach to release

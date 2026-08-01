@@ -30,32 +30,144 @@ if [ ! -f ipkg-build ]; then
     chmod +x ipkg-build
 fi
 
-# splify-dns (native domain-routing backend) is the one compiled package in
-# this repo — everything else is noarch shell/Lua/static assets built with no
-# compiler at all. apk's arch check on OpenWrt is an EXACT string match
-# against the board's own /etc/apk/arch (confirmed empirically: a real
-# aarch64_cortex-a53 board's /etc/apk/arch contains ONLY that string, no
-# generic-ISA fallback) — so this ships a few common, EXACT OpenWrt target
-# arch strings rather than one generic-per-ISA build. Not every board is
-# covered (see docs); `apk add splify-dns` simply fails cleanly on an
-# unlisted arch, and splify's DOMAIN_BACKEND auto-detection (common.sh)
-# falls back to the dnsmasq nftset path with zero behavior change.
+# splify-dns (native domain-routing backend) is the one compiled package in this
+# repo — everything else is noarch shell/Lua/static assets built with no compiler.
 #
-# Fields: arch : fallback-cc : fallback-apt-pkg : zig-target : zig-mcpu
+# TWO TABLES, because two different things are being enumerated:
 #
-# The zig fields are the PRIMARY build path (musl, in a container — see
-# splify-dns/build/Dockerfile). The cc fields are a fallback for a machine with
-# no docker; it produces a static GLIBC binary, ~9x larger, and for mipsel_24kc
-# it produces one that does not run at all: Debian's mipsel-linux-gnu is
-# hard-float while this OpenWrt target is soft-float, so the daemon dies with
-# SIGILL on the board (verified on a Mi Router 4C). That target is therefore
-# skipped rather than shipped broken when the container path is unavailable.
-NATIVE_TARGETS="
-aarch64_cortex-a53:aarch64-linux-gnu-gcc:gcc-aarch64-linux-gnu:aarch64-linux-musl:baseline
-arm_cortex-a7:arm-linux-gnueabihf-gcc:gcc-arm-linux-gnueabihf:arm-linux-musleabihf:cortex_a7
-mipsel_24kc:mipsel-linux-gnu-gcc-10:gcc-10-mipsel-linux-gnu:mipsel-linux-musl:mips32r2+soft_float
-x86_64:gcc::x86_64-linux-musl:baseline
+#   DNSD_ISAS    what actually gets COMPILED. One static musl binary per
+#                instruction set + ABI, built with zig in a container (see
+#                splify-dns/build/Dockerfile).
+#   DNSD_ARCHES  what gets PACKAGED. apk on OpenWrt matches Architecture as an
+#                EXACT string against the board's /etc/apk/arch, so every target
+#                needs its own package — but several of them can share one binary.
+#
+# Getting the ABI wrong here is silent and fatal: the binary installs and dies with
+# SIGILL on first run. That already happened — the previous Debian-cross build for
+# mipsel_24kc was hard-float while the target is soft-float, so splify-dns could
+# never start on a Mi Router 4C. Every entry below is therefore verified from the
+# produced ELF (machine, endianness, FP ABI) by dnsd_verify_elf, and the two we
+# have boards for (aarch64_cortex-a53, mipsel_24kc) were also run on hardware.
+#
+# id : zig target : zig mcpu
+DNSD_ISAS="
+aarch64:aarch64-linux-musl:baseline
+armv7hf:arm-linux-musleabihf:generic+v7a
+armv6hf:arm-linux-musleabihf:arm1176jzf_s
+armv5sf:arm-linux-musleabi:arm926ej_s
+mipselsf:mipsel-linux-musl:mips32r2+soft_float
+mipssf:mips-linux-musl:mips32r2+soft_float
+mips64:mips64-linux-musl:baseline
+i386:x86-linux-musl:i586
+x86_64:x86_64-linux-musl:baseline
+powerpc:powerpc-linux-musl:baseline
+riscv64:riscv64-linux-musl:baseline
 "
+
+# OpenWrt arch string : ISA id above.
+# The ARM split follows OpenWrt's own naming: a suffix naming an FPU (_vfp,
+# _vfpv3, _vfpv4, _neon*) means hard-float, its absence means soft-float.
+DNSD_ARCHES="
+aarch64_cortex-a53:aarch64
+aarch64_cortex-a72:aarch64
+aarch64_cortex-a76:aarch64
+aarch64_generic:aarch64
+arm_cortex-a7_neon-vfpv4:armv7hf
+arm_cortex-a7_vfpv4:armv7hf
+arm_cortex-a9_neon:armv7hf
+arm_cortex-a9_vfpv3-d16:armv7hf
+arm_cortex-a15_neon-vfpv4:armv7hf
+arm_cortex-a5_vfpv4:armv7hf
+arm_cortex-a8_vfpv3:armv7hf
+arm_arm1176jzf-s_vfp:armv6hf
+arm_arm926ej-s:armv5sf
+arm_xscale:armv5sf
+arm_mpcore:armv5sf
+arm_fa526:armv5sf
+mipsel_24kc:mipselsf
+mipsel_74kc:mipselsf
+mipsel_mips32:mipselsf
+mips_24kc:mipssf
+mips_4kec:mipssf
+mips_mips32:mipssf
+mips64_octeonplus:mips64
+i386_pentium4:i386
+i386_pentium-mmx:i386
+x86_64:x86_64
+powerpc_8540:powerpc
+powerpc_8548:powerpc
+riscv64_riscv64:riscv64
+"
+
+DNSD_IMAGE="splify-dnsd-builder:zig-0.13.0"
+DNSD_BIN_DIR="$BUILD_DIR/dnsd-bin"
+
+dnsd_builder_ready() {
+    command -v docker >/dev/null 2>&1 || return 1
+    docker image inspect "$DNSD_IMAGE" >/dev/null 2>&1 && return 0
+    echo "splify-dns: building the musl cross image (one time, ~45MB download)..."
+    docker build -q -t "$DNSD_IMAGE" splify-dns/build >/dev/null 2>&1
+}
+
+# Reads back what was actually produced. An ABI mismatch is invisible until the
+# binary runs on the board, so it is checked here instead: machine, endianness and
+# — for the architectures where it silently breaks — the float ABI.
+# $1=isa id $2=binary path
+dnsd_verify_elf() {
+    local id=$1 bin=$2 hdr attrs
+    command -v readelf >/dev/null 2>&1 || return 0   # nothing to check with
+    hdr="$(readelf -h "$bin" 2>/dev/null)"
+    attrs="$(readelf -A "$bin" 2>/dev/null)"
+    local want_machine="" want_endian="" want_fp=""
+    case "$id" in
+        aarch64)  want_machine="AArch64"; want_endian="little" ;;
+        armv7hf)  want_machine="ARM"; want_endian="little"; want_fp="hard-float" ;;
+        armv6hf)  want_machine="ARM"; want_endian="little"; want_fp="hard-float" ;;
+        armv5sf)  want_machine="ARM"; want_endian="little"; want_fp="soft-float" ;;
+        mipselsf) want_machine="MIPS"; want_endian="little"; want_fp="Soft float" ;;
+        mipssf)   want_machine="MIPS"; want_endian="big";    want_fp="Soft float" ;;
+        mips64)   want_machine="MIPS"; want_endian="big" ;;
+        i386)     want_machine="80386"; want_endian="little" ;;
+        x86_64)   want_machine="X86-64"; want_endian="little" ;;
+        powerpc)  want_machine="PowerPC"; want_endian="big" ;;
+        riscv64)  want_machine="RISC-V"; want_endian="little" ;;
+    esac
+    echo "$hdr" | grep -q "$want_machine" || { echo "splify-dns/$id: ELF machine is not $want_machine"; return 1; }
+    echo "$hdr" | grep -qi "$want_endian endian" || { echo "splify-dns/$id: ELF is not $want_endian endian"; return 1; }
+    if [ -n "$want_fp" ]; then
+        printf '%s\n%s\n' "$hdr" "$attrs" | grep -qi "$want_fp" \
+            || { echo "splify-dns/$id: float ABI is not '$want_fp' — this would SIGILL on the board"; return 1; }
+    fi
+    return 0
+}
+
+# Compiles every ISA once, IN PARALLEL — the compiles are independent and each is
+# a separate container, so serialising them just wastes wall clock (the same reason
+# a release matrix runs one job per architecture).
+dnsd_build_isas() {
+    mkdir -p "$DNSD_BIN_DIR"
+    local pids="" spec id target mcpu
+    for spec in $DNSD_ISAS; do
+        id=${spec%%:*}; spec=${spec#*:}
+        target=${spec%%:*}; mcpu=${spec#*:}
+        (
+            if docker run --rm -v "$PWD:/src" -w /src "$DNSD_IMAGE" \
+                    cc -target "$target" -mcpu="$mcpu" -static -Os -Wall -Wextra \
+                       -o "$DNSD_BIN_DIR/$id" splify-dns/src/splify-dnsd.c 2>"$DNSD_BIN_DIR/$id.err"; then
+                if dnsd_verify_elf "$id" "$DNSD_BIN_DIR/$id"; then
+                    echo "splify-dns: $id ok, $(stat -c %s "$DNSD_BIN_DIR/$id") bytes"
+                else
+                    rm -f "$DNSD_BIN_DIR/$id"
+                fi
+            else
+                echo "splify-dns: $id compile failed — $(head -1 "$DNSD_BIN_DIR/$id.err")"
+                rm -f "$DNSD_BIN_DIR/$id"
+            fi
+        ) &
+        pids="$pids $!"
+    done
+    for p in $pids; do wait "$p" || true; done
+}
 
 build_pkg() {
     local pkg_name=$1
@@ -136,63 +248,25 @@ dnsd_builder_ready() {
     docker build -q -t "$DNSD_IMAGE" splify-dns/build >/dev/null 2>&1
 }
 
-# $1=output path (repo-relative) $2=zig target triple $3=zig mcpu
-dnsd_compile_musl() {
-    docker run --rm -v "$PWD:/src" -w /src "$DNSD_IMAGE" \
-        cc -target "$2" -mcpu="$3" -static -Os -Wall -Wextra \
-           -o "$1" splify-dns/src/splify-dnsd.c
-}
-
-# Cross-compiles the splify-dnsd binary for one OpenWrt target arch and packages
-# it (ipk + apk), Architecture-tagged with that exact arch string — mirrors
-# build_pkg's shape but with a real compiled binary instead of noarch files.
-# $1=arch $2=fallback-cc $3=apt-package-providing-cc $4=zig target $5=zig mcpu
+# Packages one OpenWrt arch string (ipk + apk) from an already-built ISA binary.
+# $1=openwrt arch string $2=isa id from DNSD_ISAS
 build_native_pkg() {
     local arch=$1
-    local cc=$2
-    local cc_apt_pkg=$3
-    local ztarget=$4
-    local zmcpu=$5
+    local isa=$2
+    local bin="$DNSD_BIN_DIR/$isa"
+
+    if [ ! -f "$bin" ]; then
+        # Either the container is unavailable or that ISA failed/failed verification.
+        # Shipping nothing is correct: splify's own backend detection falls back to
+        # the dnsmasq nftset path, whereas a wrong-ABI binary would install and then
+        # die with SIGILL on first start.
+        echo "splify-dns/$arch: no verified $isa binary — skipping this target"
+        return 0
+    fi
 
     local pkg_dir="$BUILD_DIR/splify-dns_$arch"
     mkdir -p "$pkg_dir/usr/sbin" "$pkg_dir/etc/init.d"
-    local out="$pkg_dir/usr/sbin/splify-dnsd"
-
-    if [ -n "$ztarget" ] && dnsd_builder_ready; then
-        if ! dnsd_compile_musl "$out" "$ztarget" "$zmcpu"; then
-            echo "splify-dns/$arch: musl compile failed — skipping this target"
-            return 0
-        fi
-        echo "splify-dns/$arch: musl static, $(stat -c %s "$out") bytes"
-    else
-        # No container available. Static glibc instead: ~9x larger, and for
-        # mipsel_24kc simply wrong — Debian's mipsel-linux-gnu is hard-float while
-        # this target is soft-float, so the binary dies with SIGILL on the board
-        # (verified on a Mi Router 4C). Shipping nothing beats shipping that:
-        # splify falls back to the dnsmasq nftset backend on its own.
-        case "$arch" in
-            mipsel_*)
-                echo "splify-dns/$arch: needs the musl container (docker); the glibc cross builds a soft-float-incompatible binary — skipping"
-                return 0 ;;
-        esac
-        if ! command -v "$cc" >/dev/null 2>&1; then
-            if [ -n "$cc_apt_pkg" ] && command -v apt-get >/dev/null 2>&1; then
-                echo "splify-dns/$arch: installing $cc_apt_pkg..."
-                apt-get install -y "$cc_apt_pkg" >/dev/null 2>&1 || true
-            fi
-        fi
-        if ! command -v "$cc" >/dev/null 2>&1; then
-            echo "splify-dns/$arch: '$cc' not available — skipping this target (other packages are unaffected)"
-            return 0
-        fi
-        if ! "$cc" -static -Os -Wall -Wextra \
-                -ffunction-sections -fdata-sections -Wl,--gc-sections -s \
-                -o "$out" splify-dns/src/splify-dnsd.c; then
-            echo "splify-dns/$arch: compile failed — skipping this target"
-            return 0
-        fi
-        echo "splify-dns/$arch: static glibc fallback, $(stat -c %s "$out") bytes"
-    fi
+    cp "$bin" "$pkg_dir/usr/sbin/splify-dnsd"
     chmod 0755 "$pkg_dir/usr/sbin/splify-dnsd"
     cp splify-dns/files/etc/init.d/splify-dns "$pkg_dir/etc/init.d/splify-dns"
     chmod 0755 "$pkg_dir/etc/init.d/splify-dns"
@@ -338,14 +412,26 @@ build_pkg "luci-i18n-splify-ru" "$VERSION" "luci-app-splify" "Russian translatio
 
 # 4. splify-dns (native domain-routing backend; one .ipk/.apk per target arch)
 echo "Building splify-dns (native domain-routing backend)..."
-echo "$NATIVE_TARGETS" | while IFS=: read -r _arch _cc _apt _ztarget _zmcpu; do
+# splify-dns: compile each ISA once (in parallel), then package every arch string.
+if dnsd_builder_ready; then
+    dnsd_build_isas
+else
+    echo "splify-dns: docker not available — no musl toolchain, skipping every native target"
+    echo "            (splify itself is unaffected: its backend detection falls back to dnsmasq nftset)"
+fi
+echo "$DNSD_ARCHES" | while IFS=: read -r _arch _isa; do
     [ -n "$_arch" ] || continue
-    # A failure building ONE target (missing toolchain, a docker hiccup, ...)
-    # must never abort the other 3 native targets or the noarch packages
+    # A failure on ONE arch must never abort the others or the noarch packages
     # already built above — `|| true` suspends set -e for the whole call.
-    build_native_pkg "$_arch" "$_cc" "$_apt" "$_ztarget" "$_zmcpu" || echo "splify-dns/$_arch: build step failed, skipping"
+    build_native_pkg "$_arch" "$_isa" || echo "splify-dns/$_arch: packaging failed, skipping"
 done
 
+# Checksums for everything that leaves this build. splify-dns now ships one
+# package per OpenWrt arch string, so a release carries dozens of files and
+# "did I download the right one, intact?" stops being answerable by eye.
+( cd "$OUT_DIR" && sha256sum ./*.ipk ./*.apk 2>/dev/null | sed 's|\./||' > sha256sums.txt ) || true
+
 echo "All packages built in $OUT_DIR/"
+echo "  splify-dns: $(ls "$OUT_DIR"/splify-dns-*.ipk 2>/dev/null | wc -l) arch(es), $(ls "$OUT_DIR" | wc -l) files total"
 ls -la $OUT_DIR/
 
