@@ -96,6 +96,15 @@ export function useSplifyData(): SplifyData {
     try {
       const snap = await rpc.snapshot()
       if (!alive.current || id !== snapReq.current) return
+      // An explicitly empty snapshot means "the sweep is queued, nothing cached
+      // yet" (see splify-snapshot's cold-start path). That is a loading state, not
+      // a failure: the poll loop re-fetches as soon as diagnostics.age turns
+      // non-negative.
+      if (!snap || !snap.status) {
+        setDiagError(null)
+        setLoading(false)
+        return
+      }
       setStatus(snap.status)
       setEvents(snap.events || [])
       setDiagError(null)
@@ -116,8 +125,8 @@ export function useSplifyData(): SplifyData {
       // times: the usual cause is a brief drop while the tunnel re-establishes,
       // and this call is cheap.
       setDiagError(e?.message || String(e))
-      if (attempt < 2) {
-        setTimeout(() => { if (alive.current) void pullSnapshot(computedAt, attempt + 1) }, 3000 * (attempt + 1))
+      if (attempt < 3) {
+        setTimeout(() => { if (alive.current) void pullSnapshot(computedAt, attempt + 1) }, 4000 * (attempt + 1))
       }
     }
   }, [])

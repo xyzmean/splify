@@ -27,23 +27,54 @@ clean_ip_list < "$TMP/raw.lst" > "$TMP/clean.lst"
 count=$(wc -l < "$TMP/clean.lst")
 [ "$count" -ge "$IPSUM_MIN_COUNT" ] || die "only $count valid prefixes (need $IPSUM_MIN_COUNT)"
 
-# Persist FIRST: the list on disk is both the replay source and what the
-# dashboard counts, so a chunked load interrupted half-way still has the full
-# list to retry from on the next failover tick.
-cat "$TMP/clean.lst" > "$IPSUM_FILE"
+# Aggregate before storing. Published blocklists are mostly runs of adjacent
+# prefixes, so merging them costs nothing in coverage and buys a much smaller set
+# — and on a router that cannot hold the raw list at all, a slightly wider
+# aggregation is the difference between a working blocklist and none (the Mi 4C
+# case: 30k prefixes needed ~24MB, the box has ~16MB free, so before this it
+# loaded NOTHING and blocklist mode routed nothing through the VPN).
+#
+# What lands in IPSUM_FILE is exactly what goes into the kernel: it is the replay
+# source for failover, the file the dashboard counts, and the identity in the
+# set stamp — so aggregating here keeps all three consistent.
+# The ru/cn list is the exclusion: widening must never pull a Russian address into
+# the via-VPN set (see aggregate_ip_list). Measured cost of respecting it: ~800
+# extra prefixes out of 15k.
+if [ -s "$RU_FILE" ]; then
+    ip_list_ranges < "$RU_FILE" > "$TMP/exclude.r"
+else
+    : > "$TMP/exclude.r"
+fi
+# Short ladder on purpose. With the ru/cn exclusion respected, the result PLATEAUS
+# right after slack 64 — measured on the real list: 28 505 (lossless), 15 284 (64),
+# 14 254 (256), 14 354 (1024), 14 210 (4096). Levels past 256 buy nothing and each
+# one costs a full aggregation pass, which on the Mi 4C is minutes; a longer ladder
+# just made the daily update crawl before landing on the same answer. When even 256
+# does not fit, fit_list_for_set truncates, which is the better trade anyway.
+FIT_SLACK_LADDER="0 64 256"
+export FIT_SLACK_LADDER
+if fit_list_for_set "$IPSUM_SET" "$TMP/clean.lst" "$TMP/fitted.lst" "$IPSUM_SET_CAPACITY" "$TMP/exclude.r"; then
+    cat "$TMP/fitted.lst" > "$IPSUM_FILE"
+else
+    # Nothing we can do with aggregation either — keep the cleaned list so the
+    # operator (and doctor) can see what was downloaded, and let the load below
+    # report the refusal.
+    cat "$TMP/clean.lst" > "$IPSUM_FILE"
+fi
 # Stale pre-rendered block from an older version — a replay source nothing reads
 # any more (see the header). Dropping it frees ~0.5MB of overlay flash.
 rm -f "$IPSUM_NFT_FILE" 2>/dev/null || true
 
+_loaded="$(grep -cE '^[0-9]' "$IPSUM_FILE" 2>/dev/null || echo 0)"
 nft_load_set "$IPSUM_TABLE" "$IPSUM_SET" "$IPSUM_FILE"
 case $? in
-    0) log "ipsum refresh OK: $count prefixes from $IPSUM_URL" ;;
+    0) log "ipsum refresh OK: $count prefixes from $IPSUM_URL -> $_loaded in the set" ;;
     # 2 = does not fit in this router's memory. Already reported by nft_load_set
     # and surfaced by splify-doctor as an actionable FAIL; the download itself
     # succeeded, so this is not an error of THIS script and must not exit non-zero
     # (a cron/postinst wrapper treating it as a failure would just retry the load
     # that the guard exists to prevent).
-    2) log "ipsum downloaded ($count prefixes) but NOT loaded: too large for this router's memory" ;;
+    2) log "ipsum downloaded ($count prefixes) but NOT loaded: too large for this router's memory even after aggregation" ;;
     *) die "live nft update failed (list kept at $IPSUM_FILE; failover will retry)" ;;
 esac
 

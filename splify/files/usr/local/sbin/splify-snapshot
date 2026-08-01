@@ -141,23 +141,17 @@ if [ -s "$CACHE" ]; then
     exit 0
 fi
 
-# Cold start (first visit after boot/install): there is nothing to serve, so pay
-# the full cost once and populate the cache for everyone else.
-if lock_take; then
-    if regen; then
-        lock_free
-        cat "$CACHE"
-        exit 0
-    fi
-    lock_free
-    exec "$DOCTOR" --snapshot
-fi
-
-# Someone else is already computing the first snapshot — wait for it briefly
-# rather than fork a competing doctor on a memory-constrained box.
-_i=0
-while [ ! -s "$CACHE" ] && [ "$_i" -lt 30 ]; do
-    sleep 1; _i=$(( _i + 1 ))
-done
-[ -s "$CACHE" ] && exec cat "$CACHE"
-exec "$DOCTOR" --snapshot
+# Cold start (first visit after boot/install, or after a reboot cleared tmpfs):
+# there is nothing to serve — and computing it HERE is what broke the dashboard on
+# a Mi Router 4C. A sweep costs ~5s idle on that CPU and far longer while the box
+# is busy, so the browser's XHR hit its own timeout and the page showed
+# "Диагностика недоступна: XHR request timed out" over and over, one failed
+# request per visit, forever.
+#
+# So the read path NEVER computes. It queues the sweep and answers immediately
+# with an explicitly empty snapshot; the dashboard already knows how to wait for
+# diagnostics (it watches diagnostics.age from splify-live and re-fetches the
+# moment a sweep lands), and shows its loading state instead of an error.
+lock_take && regen_bg
+printf '{"status":null,"events":[],"pending":true}\n'
+exit 0

@@ -75,29 +75,34 @@ if [ "$INCLUDE_VPN" = "1" ] && [ -r "$IPSUM_FILE" ]; then
         | sort -u > "$TMP/extra.lst"
 fi
 
-# Fit to the destination set. The kernel merges adjacent ranges (auto-merge), so
-# the stored count can end up lower than what we offer — we cannot predict that
-# from here, so cap on the offered count and leave a small margin.
+# Fit to the destination set — AGGREGATION FIRST, dropping entries only if merging
+# is not enough. The union is largely runs of adjacent prefixes: on the test box
+# 74 648 raw entries merged losslessly to well under the 65 536 capacity, so what
+# used to be "the load fails and the bypass runs on an empty set" now needs no
+# truncation at all.
 CAPACITY="$(nft_set_capacity "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET")"
-_must_n="$(wc -l < "$TMP/must.lst")"
-_extra_n="$(wc -l < "$TMP/extra.lst")"
-if [ -n "$CAPACITY" ] && [ "$CAPACITY" -gt 0 ] 2>/dev/null; then
-    _room=$(( CAPACITY - CAPACITY / 50 - _must_n ))     # 2% margin for merging slack
-    if [ "$_room" -lt 0 ]; then
-        # Even the must-have tier overflows: keep what fits and say so — a
-        # truncated bypass is recoverable, a failed load leaves zapret mangling
-        # everything it should have skipped.
-        warn "nozapret: ru/cn list alone ($_must_n) exceeds the set capacity ($CAPACITY) — truncating; RU traffic beyond the cut may be DPI-mangled"
-        head -n $(( CAPACITY - CAPACITY / 50 )) "$TMP/must.lst" > "$TMP/all.lst"
-    elif [ "$_extra_n" -gt "$_room" ]; then
-        warn_throttled nozapret-cap 3600 \
-            "nozapret: $(( _must_n + _extra_n )) entries offered but the set holds $CAPACITY — keeping privates+ru and $_room of $_extra_n VPN prefixes"
-        { cat "$TMP/must.lst"; head -n "$_room" "$TMP/extra.lst"; } | sort -u > "$TMP/all.lst"
-    else
-        cat "$TMP/must.lst" "$TMP/extra.lst" | sort -u > "$TMP/all.lst"
-    fi
+cat "$TMP/must.lst" "$TMP/extra.lst" | sort -u > "$TMP/raw.lst"
+# Deliberately shallow ladder: an address wrongly inside nozapret is an address
+# zapret will NOT DPI-bypass, so a blocked site in a widened gap stops working on
+# the WAN path. Better to drop the whole ipsum tier (below) than to widen further —
+# with an unbounded ladder a 16MB box reached +225M addresses.
+FIT_SLACK_LADDER="0 64 256"
+export FIT_SLACK_LADDER
+if fit_list_for_set "$ZAPRET_NOZAPRET_SET" "$TMP/raw.lst" "$TMP/all.lst" "$CAPACITY"; then
+    :
 else
-    cat "$TMP/must.lst" "$TMP/extra.lst" | sort -u > "$TMP/all.lst"
+    # Even the widest aggregation does not fit. Now drop, and drop the right tier:
+    # the VPN (ipsum) prefixes, keeping privates + ru/cn intact.
+    _must_n="$(wc -l < "$TMP/must.lst")"
+    _extra_n="$(wc -l < "$TMP/extra.lst")"
+    warn_throttled nozapret-cap 3600 \
+        "nozapret: $(( _must_n + _extra_n )) entries do not fit this router even aggregated — dropping the $_extra_n VPN prefixes, keeping privates+ru/cn"
+    if ! fit_list_for_set "$ZAPRET_NOZAPRET_SET" "$TMP/must.lst" "$TMP/all.lst" "$CAPACITY"; then
+        # Not even ru/cn alone fits: keep the head of it rather than nothing, so
+        # the most of the bypass that can work does.
+        warn "nozapret: ru/cn alone ($_must_n) does not fit either — truncating; RU traffic beyond the cut may be DPI-mangled"
+        head -n 20000 "$TMP/must.lst" > "$TMP/all.lst"
+    fi
 fi
 
 count=$(wc -l < "$TMP/all.lst")

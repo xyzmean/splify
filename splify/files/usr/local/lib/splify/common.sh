@@ -66,6 +66,9 @@ DNSMASQ_NFTSET_FILE="/tmp/dnsmasq.d/splify-domains.conf"
 IPSUM_FILE="/etc/splify/ipsum.lst"
 IPSUM_NFT_FILE="/etc/splify/ipsum-set.nft"
 IPSUM_SET="splify_ipsum_v4"; IPSUM_TABLE="inet fw4"
+# Must match `size` in /etc/nftables.d/30-splify.nft: a load that runs past the
+# declared capacity fails part-way and leaves the set half-populated.
+IPSUM_SET_CAPACITY="65536"
 IPSUM_MIN_COUNT="5000"; IPSUM_FALLBACK_SKIP="1"
 
 RU_FILE="/etc/splify/ru_subnets.lst"
@@ -615,6 +618,14 @@ NFT_CHUNK_ELEMS="${SPLIFY_NFT_CHUNK:-4000}"
 #   subsequent refresh of a list it is already successfully holding.
 NFT_ELEM_BYTES="${SPLIFY_NFT_ELEM_BYTES:-800}"
 NFT_ELEM_KERNEL_BYTES="${SPLIFY_NFT_ELEM_KERNEL_BYTES:-300}"
+# NFT_ELEM_RESIDENT_BYTES: what an element costs for as long as the set EXISTS,
+#   as opposed to the peak during loading. Measured end to end on the Mi 4C:
+#   loading 19 021 prefixes took MemAvailable from 16MB to 6MB, i.e. ~550 bytes
+#   per prefix that never comes back. That number decides how big a list a router
+#   can KEEP, which is a different question from whether it can survive the load —
+#   and the one that matters, because a box left with 6MB free starts OOM-killing
+#   uhttpd and its own diagnostics afterwards.
+NFT_ELEM_RESIDENT_BYTES="${SPLIFY_NFT_ELEM_RESIDENT_BYTES:-550}"
 NFT_MEM_RESERVE_KB="${SPLIFY_NFT_MEM_RESERVE_KB:-10240}"
 
 # NO ulimit here, deliberately. Two attempts at an address-space backstop were
@@ -768,6 +779,232 @@ clean_ip_list() {
           if (l == "" || !valid(l) || seen[l]++) next
           print l }
     '
+}
+
+# ---- prefix aggregation: fewer set elements for the same coverage -----------
+# Every element of an nft interval set costs memory both in the kernel and, worse,
+# in each nft invocation's table cache (see the nft section above). The lists we
+# load are full of prefixes that are adjacent or contained in one another —
+# ipsum in particular is largely runs of consecutive /24s — so the SAME coverage
+# can be expressed with far fewer elements.
+#
+# Measured on the production lists (30 672-prefix ipsum, 44 023-prefix ru/cn):
+#
+#   slack      ipsum          ru/cn        union (nozapret)
+#   0          28 505 (-8%)   44 023 (0%)  70 042 (-7%)
+#   64         15 284 (-51%)  43 689 (-1%) 56 299 (-25%)
+#
+# So lossless merging alone is nearly useless here — the ru/cn list arrives
+# already aggregated, and the union stays ABOVE the 65 536 set capacity. The win
+# comes from bridging small gaps, which is why SLACK exists:
+#
+#   slack = 0   strictly lossless: only merge ranges that touch or overlap.
+#               Coverage identical. Always tried first.
+#   slack > 0   also bridge gaps up to that many addresses and round a range
+#               outward to one aligned prefix at no more than that cost. This ADDS
+#               addresses to the set, so it is used only as far as a router needs
+#               it, and the total is reported (see fit_list_for_set).
+#
+# EXCLUDE is what makes widening safe for a ROUTING set. Bridging a gap in the
+# ipsum (via-VPN) list would send every address in that gap through the tunnel —
+# including Russian addresses that must stay direct, where a foreign exit IP can
+# mean a bank or a state service simply refuses the connection. With the ru/cn
+# list passed as EXCLUDE, a gap that touches it is never bridged. Measured cost of
+# that safety: 15 284 prefixes instead of 14 477 (and slightly FEWER extra
+# addresses), i.e. essentially free.
+#
+# The intermediate sort is a PLAIN BYTE SORT over zero-padded numbers, not
+# `sort -n`. On the mipsel Mi 4C, busybox sort -n compares numerically as 32-bit
+# SIGNED: every address above 2^31 (128.0.0.0 and up) came out before the smaller
+# ones, e.g. 908522308 sorted after 3323410856. The merge pass then absorbed
+# unrelated ranges into each other and a 30 726-prefix list "aggregated" to 28
+# entries — silent, catastrophic, and invisible on aarch64, where sort -n uses
+# 64-bit longs and the same code was correct. Fixed-width zero padding makes
+# lexicographic order equal numeric order on any platform.
+#
+# Implemented as awk -> sort -> awk, and the exclusion list is walked with a
+# monotonic cursor via getline rather than loaded into an array — on a 58MB router
+# holding 27k ranges in awk would defeat the purpose. A probe that would need to
+# look BACKWARDS returns "hits" instead, so the cursor trick can only ever be
+# conservative (refuse to bridge), never wrong in the dangerous direction.
+#
+# Total extra addresses go to stderr as "#WASTE <n>" for the caller to report.
+#
+# NOTE: no apostrophes in the awk comments below (single-quoted shell).
+aggregate_ip_list() {  # SLACK [EXCLUDE_FILE]  (CIDR list on stdin) -> stdout
+    awk '
+        function ip2int(s, a) { split(s, a, "."); return ((a[1] * 256 + a[2]) * 256 + a[3]) * 256 + a[4] }
+        {
+            n = split($0, p, "/")
+            ip = ip2int(p[1]); len = (n > 1 ? p[2] + 0 : 32)
+            size = 2 ^ (32 - len)
+            start = ip - (ip % size)          # normalise to the network address
+            # Zero-padded to a FIXED WIDTH so the plain byte sort below orders them
+            # numerically. See the sort note above: -n cannot be trusted here.
+            printf "%010.0f %010.0f\n", start, start + size - 1
+        }
+    ' | sort | awk -v slack="${1:-0}" -v excl="${2:-}" '
+        function int2ip(x,   a, b, c, d) {
+            d = x % 256; x = int(x / 256); c = x % 256; x = int(x / 256)
+            b = x % 256; a = int(x / 256)
+            return a "." b "." c "." d
+        }
+        # Does [a,b] touch the exclusion list? Cursor-based: advance past ranges
+        # that end below a, then test the one in front. A probe that starts behind
+        # where the cursor already is cannot be answered without looking back, so
+        # it answers "yes" and the caller declines to widen.
+        function hits(a, b,   line, f) {
+            if (excl == "") return 0
+            if (a < probe_floor) return 1
+            probe_floor = a
+            while (!x_done && x_e < a) {
+                if ((getline line < excl) > 0) { split(line, f, " "); x_s = f[1] + 0; x_e = f[2] + 0 }
+                else x_done = 1
+            }
+            return (!x_done && x_s <= b)
+        }
+        # Cover [s,e] with ONE aligned prefix when the extra addresses fit the slack
+        # budget and the widening stays clear of the exclusion list; else decompose
+        # it exactly.
+        function emit(s, e,   len, size, bs, be, extra) {
+            for (len = 32; len >= 0; len--) {
+                size = 2 ^ (32 - len)
+                bs = s - (s % size); be = bs + size - 1
+                if (be >= e) {
+                    extra = (s - bs) + (be - e)
+                    if (extra > 0 && extra <= slack && !hits(bs, be)) {
+                        printf "%s/%d\n", int2ip(bs), len; waste += extra; return
+                    }
+                    if (extra == 0) { printf "%s/%d\n", int2ip(bs), len; return }
+                    break
+                }
+            }
+            while (s <= e) {
+                for (len = 0; len <= 32; len++) {
+                    size = 2 ^ (32 - len)
+                    if (s % size == 0 && s + size - 1 <= e) break
+                }
+                printf "%s/%d\n", int2ip(s), len
+                s += size
+            }
+        }
+        BEGIN { cs = -1; x_e = -1; probe_floor = 0 }
+        {
+            s = $1 + 0; e = $2 + 0
+            if (cs < 0) { cs = s; ce = e; next }
+            if (s <= ce + 1) {                              # touching or overlapping: always merge
+                if (e > ce) ce = e
+                next
+            }
+            if (s <= ce + 1 + slack && !hits(ce + 1, s - 1)) {   # bridgeable, and the gap is clear
+                waste += s - ce - 1
+                if (e > ce) ce = e
+                next
+            }
+            emit(cs, ce); cs = s; ce = e
+        }
+        END { if (cs >= 0) emit(cs, ce); printf "#WASTE %.0f\n", waste + 0 > "/dev/stderr" }
+    '
+}
+
+# Merged, sorted "start end" ranges for an exclusion list — the form
+# aggregate_ip_list can walk with a cursor. Written to stdout.
+ip_list_ranges() {  # (CIDR list on stdin) -> "start end" ranges on stdout
+    awk '
+        function ip2int(s, a) { split(s, a, "."); return ((a[1] * 256 + a[2]) * 256 + a[3]) * 256 + a[4] }
+        { n = split($0, p, "/"); ip = ip2int(p[1]); len = (n > 1 ? p[2] + 0 : 32)
+          size = 2 ^ (32 - len); s = ip - (ip % size)
+          printf "%010.0f %010.0f\n", s, s + size - 1 }
+    ' | sort | awk '
+        { s = $1 + 0; e = $2 + 0
+          if (cs == "") { cs = s; ce = e; next }
+          if (s <= ce + 1) { if (e > ce) ce = e; next }
+          printf "%.0f %.0f\n", cs, ce; cs = s; ce = e }
+        END { if (cs != "") printf "%.0f %.0f\n", cs, ce }
+    '
+}
+
+# Aggregate FILE just enough that the result fits both limits that apply to SET,
+# writing it to DEST:
+#   * MEMORY  — what this router can actually load (nft_set_fits);
+#   * CAPACITY — the `size N` the set was declared with, if any. Both splify's own
+#     ipsum set and zapret's nozapret are declared `size 65536`, and a load that
+#     runs past it fails part-way, leaving the set in whatever state it reached.
+#
+# Starts lossless and only widens the slack while the result still does not fit,
+# so a router with room to spare never routes one extra address, while a router
+# that would otherwise get NO blocklist at all gets one — with the cost written to
+# the log. Sets _FIT_COUNT/_FIT_SLACK/_FIT_WASTE, and _FIT_TRUNCATED=1 if entries
+# had to be dropped outright.
+#
+# FIT_SLACK_LADDER lets the CALLER bound how far widening may go, because "extra
+# addresses" mean different things per set and the acceptable amount differs:
+#   * ipsum (via-VPN): extra addresses ride the tunnel. Mildly wasteful, and the
+#     ru/cn exclusion keeps it off addresses that must stay direct.
+#   * nozapret (zapret must-not-touch): extra addresses lose their DPI bypass, so
+#     a blocked site inside a widened range becomes unreachable on the WAN path.
+#     Measured: an unbounded ladder reached slack 65536 = +225M addresses (5% of
+#     IPv4) on a 16MB box. Callers cap it low and drop a whole tier instead.
+fit_list_for_set() {  # SET SRC DEST [MAXCOUNT] [EXCLUDE_RANGES] -> 0 fitted, 1 impossible
+    _FIT_COUNT=0; _FIT_SLACK=0; _FIT_WASTE=0; _FIT_TRUNCATED=0   # never report a previous call's outcome
+    _flf_src_n="$(grep -cE '^[0-9]' "$2" 2>/dev/null || echo 0)"
+    for _flf_slack in ${FIT_SLACK_LADDER:-0 64 256 1024}; do
+        _flf_waste="$(aggregate_ip_list "$_flf_slack" "${5:-}" < "$2" 2>&1 >"$3.work" \
+            | sed -n 's/^#WASTE //p')"
+        _flf_n="$(grep -cE '^[0-9]' "$3.work" 2>/dev/null || echo 0)"
+        # Capacity first: it is a hard property of the set, not of the moment.
+        if [ -n "${4:-}" ] && [ "${4:-0}" -gt 0 ] 2>/dev/null && [ "$_flf_n" -gt "$4" ]; then
+            continue
+        fi
+        nft_set_fits "$_flf_n" "$1" >/dev/null || continue
+        # Surviving the load is not enough — the set stays resident afterwards.
+        # Require the router to still have its reserve free once it is loaded,
+        # crediting whatever the flush of the current contents gives back.
+        _flf_avail="$(mem_available_kb)"
+        case "$_flf_avail" in ''|*[!0-9]*) _flf_avail=0 ;; esac
+        if [ "$_flf_avail" -gt 0 ]; then
+            _flf_credit=$(( ($(_set_prev_count "$1") * NFT_ELEM_RESIDENT_BYTES) / 1024 ))
+            _flf_after=$(( _flf_avail + _flf_credit - (_flf_n * NFT_ELEM_RESIDENT_BYTES) / 1024 ))
+            [ "$_flf_after" -ge "$NFT_MEM_RESERVE_KB" ] || continue
+        fi
+        mv "$3.work" "$3"
+        _FIT_COUNT="$_flf_n"; _FIT_SLACK="$_flf_slack"; _FIT_WASTE="${_flf_waste:-0}"
+        if [ "$_flf_slack" = 0 ]; then
+            log "$1: $_flf_src_n -> $_flf_n prefixes (lossless aggregation)"
+        else
+            log "$1: $_flf_src_n -> $_flf_n prefixes, slack $_flf_slack (+${_FIT_WASTE} extra addresses) to fit this router"
+        fi
+        return 0
+    done
+    # No amount of (safe) widening fits. Last resort: keep as much of the most
+    # aggregated list as the router can hold, and say how much was left out.
+    #
+    # For a BLOCKLIST this degrades in the right direction — the prefixes that are
+    # kept work exactly as intended, and the rest simply behave as they did before
+    # splify was installed. It is also strictly safer than widening further: on the
+    # 4C the ru/cn exclusion (correctly) blocks the widest merges, so the list
+    # plateaus around 14k prefixes, and pushing past that would have meant either
+    # tunnelling Russian addresses or leaving the box with no memory reserve.
+    if [ -s "$3.work" ]; then
+        _flf_avail="$(mem_available_kb)"
+        case "$_flf_avail" in ''|*[!0-9]*) _flf_avail=0 ;; esac
+        _flf_credit=$(( ($(_set_prev_count "$1") * NFT_ELEM_RESIDENT_BYTES) / 1024 ))
+        _flf_room_kb=$(( _flf_avail + _flf_credit - NFT_MEM_RESERVE_KB ))
+        _flf_max=$(( (_flf_room_kb * 1024) / NFT_ELEM_RESIDENT_BYTES ))
+        [ -n "${4:-}" ] && [ "${4:-0}" -gt 0 ] 2>/dev/null && [ "$_flf_max" -gt "$4" ] && _flf_max="$4"
+        if [ "$_flf_max" -gt 1000 ]; then
+            head -n "$_flf_max" "$3.work" > "$3"
+            rm -f "$3.work"
+            _FIT_COUNT="$_flf_max"; _FIT_SLACK="$_flf_slack"; _FIT_WASTE="${_flf_waste:-0}"
+            _FIT_TRUNCATED=1
+            _flf_agg_n="$(grep -cE '^[0-9]' "$3" 2>/dev/null || echo 0)"
+            warn_throttled "fit.$1" 3600 \
+                "$1: this router can hold about $_flf_max prefixes; keeping $_flf_agg_n of the aggregated list (raw list had $_flf_src_n). Addresses beyond the cut behave as if splify were not installed"
+            return 0
+        fi
+    fi
+    rm -f "$3.work"
+    return 1
 }
 
 # Emit ONE `add element … { a,b,c }` command per NFT_CHUNK_ELEMS entries, read
