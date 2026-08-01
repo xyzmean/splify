@@ -73,6 +73,34 @@ export async function wgIfaces(): Promise<string[]> {
     .map((n: any) => n.getName())
 }
 
+// Suggestions for "which interface should this list use": the wg/awg networks
+// above PLUS live tunnel devices that are not uci networks at all.
+//
+// wgIfaces() alone is the wrong set for that question. A sing-box TUN (splify
+// supports those as endpoints, and the endpoint grid already lets you type one)
+// has no uci network, and neither does a second WAN someone wants a single list
+// to leave through — the whole point of a per-list interface is that it can be
+// something OTHER than the failover tunnels. So this is a suggestion list, not a
+// closed set: the field accepts any device name and splify-doctor reports one
+// that does not exist on the box.
+export async function tunnelDeviceHints(): Promise<string[]> {
+  const names = new Set<string>(await wgIfaces())
+  const net = window.luci_network
+  try {
+    const devs = net?.getDevices ? await net.getDevices() : []
+    ;(devs || []).forEach((d: any) => {
+      const name = d?.getName?.()
+      if (!name) return
+      // Point-to-point/tunnel devices only: a bridge, a LAN port or a wifi iface
+      // is never a sensible egress for a domain list, and offering them invites
+      // a config that silently routes nothing.
+      const type = d.getType?.()
+      if (type === 'tunnel' || /^(wg|awg|tun|tap|sb|warp|proton|nord|ovpn|ipsec)/i.test(name)) names.add(name)
+    })
+  } catch { /* no device API (older LuCI) — wg networks alone still work */ }
+  return [...names].sort()
+}
+
 // IP → "name (ip)" suggestions for the device-rules IP field, ported 1:1 from
 // the old settings.js ipHints() helper.
 export function ipHints(hints: any): [string, string][] {

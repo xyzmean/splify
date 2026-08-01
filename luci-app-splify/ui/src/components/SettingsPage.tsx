@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { uci, arr, wgIfaces, ipHints, type Section } from '@/lib/uci'
+import { uci, arr, wgIfaces, tunnelDeviceHints, ipHints, type Section } from '@/lib/uci'
 import {
   isSubnet, isDomain, isHostOrCidr, isPingTarget, isPositiveInt, isHttpUrl, isIfaceName,
 } from '@/lib/validate'
@@ -163,6 +163,7 @@ export default function SettingsPage() {
 
   const [hasLoaded, setHasLoaded] = useState(false)
   const [ifaces, setIfaces] = useState<string[]>([])
+  const [ifaceHints, setIfaceHints] = useState<string[]>([])
   const [hostHints, setHostHints] = useState<[string, string][]>([])
 
   const [general, setGeneral] = useState<GeneralForm>({
@@ -219,11 +220,13 @@ export default function SettingsPage() {
       setDevices(devSections.map((s: Section) => ({ sid: s['.name'], ip: s.ip || '', mode: s.mode || 'vpn' })))
       loadedEndpointSids.current = new Set(epSections.map((s) => s['.name']))
       loadedDeviceSids.current = new Set(devSections.map((s) => s['.name']))
-      const [ifs, hh] = await Promise.all([
+      const [ifs, hints, hh] = await Promise.all([
         wgIfaces(),
+        tunnelDeviceHints(),
         Promise.resolve(window.__splifyHostHints || {}),
       ])
       setIfaces(ifs)
+      setIfaceHints(hints)
       setHostHints(ipHints(hh))
       setError('')
       setDirty(false)
@@ -298,6 +301,10 @@ export default function SettingsPage() {
     bad('Адреса для проверки', general.health_target, isPingTarget)
     if (lists.geoblock_enabled && !lists.geoblock_iface)
       out.push('Для списка «Сайты, блокирующие по стране» не выбран туннель')
+    // Typed by hand since the field accepts devices splify does not manage
+    // (sing-box TUN, second WAN) — so it needs the same name check as lan_iface.
+    else if (lists.geoblock_enabled && !isIfaceName(lists.geoblock_iface))
+      out.push('Интерфейс для списка «Сайты, блокирующие по стране» — имя устройства (например warp0)')
     if (!isHttpUrl(lists.ipsum_url)) out.push('URL списка ipsum — http(s)://…')
     if (!isHttpUrl(lists.ru_url)) out.push('URL списка ru/cn — http(s)://…')
     if (!isHttpUrl(lists.vpn_domains_url)) out.push('URL доменов для VPN — http(s)://…')
@@ -504,15 +511,20 @@ export default function SettingsPage() {
                   aria-label="Сайты, блокирующие по стране" />}>
                 <Field label="Через какой туннель"
                   helpText="Только для этого списка. Если туннель недоступен, эти домены пойдут обычным путём (или будут заблокированы, если включён kill switch).">
-                  <select className={cn(field, 'w-auto', lists.geoblock_enabled && !lists.geoblock_iface && 'border-destructive')}
+                  {/* Free text with suggestions, not a closed select: the interface
+                      for this list is deliberately allowed to be something splify
+                      does not manage as an endpoint — a sing-box TUN, a second WAN.
+                      splify-doctor reports a name that does not exist on the box. */}
+                  <input className={cn(field, 'w-auto', lists.geoblock_enabled && !lists.geoblock_iface && 'border-destructive')}
+                    list="splify-geo-ifaces" placeholder="warp0"
                     disabled={!lists.geoblock_enabled} value={lists.geoblock_iface}
-                    onChange={(e) => mark(setLists)({ ...lists, geoblock_iface: e.target.value })}>
-                    <option value="">(не выбран)</option>
-                    {ifaces.map((n) => <option key={n} value={n}>{n}</option>)}
-                  </select>
+                    onChange={(e) => mark(setLists)({ ...lists, geoblock_iface: e.target.value })} />
+                  <datalist id="splify-geo-ifaces">
+                    {ifaceHints.map((n) => <option key={n} value={n} />)}
+                  </datalist>
                 </Field>
-                {lists.geoblock_enabled && ifaces.length === 0 && (
-                  <p className="text-xs text-destructive">Туннелей не найдено — сначала создайте интерфейс WireGuard/AmneziaWG в Сеть → Интерфейсы.</p>
+                {lists.geoblock_enabled && ifaceHints.length === 0 && (
+                  <p className="text-xs text-muted-foreground">Готовых туннелей не найдено — впишите имя устройства вручную (например, TUN от sing-box).</p>
                 )}
                 <p className="mt-2 text-xs text-muted-foreground">
                   Требует нативного DNS-бэкенда (пакет <code>splify-dns</code>): маршрутизация по доменам без него работает только с dnsmasq-full.

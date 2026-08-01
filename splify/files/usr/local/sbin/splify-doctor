@@ -675,14 +675,15 @@ fi
 [ -n "$VPN_DOMAINS_URL" ]    && [ ! -s "$DOMAINS_VPN_FILE" ]    && add FIXABLE dnsmasq "VPN domains URL set but the list is not downloaded yet ($DOMAINS_VPN_FILE)" "splify-update-domains"
 [ -n "$IGNORE_DOMAINS_URL" ] && [ ! -s "$DOMAINS_IGNORE_FILE" ] && add FIXABLE dnsmasq "ignore/direct domains URL set but the list is not downloaded yet ($DOMAINS_IGNORE_FILE)" "splify-update-domains"
 _have_domains=false
-{ [ -n "$VPN_DOMAINS$DIRECT_DOMAINS$VPN_DOMAINS_URL$IGNORE_DOMAINS_URL" ] || [ -s "$DOMAINS_VPN_FILE" ] || [ -s "$DOMAINS_IGNORE_FILE" ]; } && _have_domains=true
+{ [ -n "$VPN_DOMAINS$DIRECT_DOMAINS$VPN_DOMAINS_URL$IGNORE_DOMAINS_URL" ] || [ -s "$DOMAINS_VPN_FILE" ] \
+  || [ -s "$DOMAINS_IGNORE_FILE" ] || [ "$GEOBLOCK_ENABLED" = 1 ]; } && _have_domains=true
 
 if [ "$DOMAIN_BACKEND" = "native" ]; then
     add OK splify-dns "native domain-routing backend active ($SPLIFY_DNS_BIN)"
     if [ "$_have_domains" = true ]; then
         pgrep -f "$SPLIFY_DNS_BIN" >/dev/null 2>&1 \
             || add FIXABLE splify-dns "domain tagging configured but splify-dnsd is not running" "/etc/init.d/splify-dns start"
-        [ -s "$SPLIFY_DNS_VPN_RULES" ] || [ -s "$SPLIFY_DNS_DIRECT_RULES" ] \
+        [ -s "$SPLIFY_DNS_VPN_RULES" ] || [ -s "$SPLIFY_DNS_DIRECT_RULES" ] || [ -s "$SPLIFY_DNS_GEO_RULES" ] \
             || add FIXABLE splify-dns "rule files missing/empty in $SPLIFY_DNS_DIR" "run splify-apply (regenerates them)"
         nft list chain inet fw4 splify_dns_redirect_prerouting >/dev/null 2>&1 \
             || add FIXABLE splify-dns "DNS redirect rule missing from the live ruleset" "run splify-apply (regenerates 30-splify.nft)"
@@ -704,6 +705,65 @@ elif [ "$_have_domains" = true ]; then
         [ -n "$_dir" ] || _dir="$(dirname "$DNSMASQ_NFTSET_FILE")"
         [ -s "$_dir/$(basename "$DNSMASQ_NFTSET_FILE")" ] \
             || add FIXABLE dnsmasq "domain tagging configured but the dnsmasq nftset drop-in is missing from $_dir" "run splify-apply (regenerates and reloads dnsmasq)"
+    fi
+fi
+
+# ---- geoblock: one list, its own interface ----------------------------------
+# This path has more moving parts than any single check covers — a list, a set, a
+# mark rule, an ip rule, a routing table and (on the native backend) a daemon —
+# and every one of them can be absent while the switch still reads "on" in the UI.
+# All three defects found when the feature first shipped were invisible from the
+# dashboard for exactly that reason, so each link gets named separately here.
+if [ "$GEOBLOCK_ENABLED" = 1 ]; then
+    _geo_n=0
+    [ -s "$DOMAINS_GEO_FILE" ] && _geo_n="$(grep -cE '^[a-z0-9]' "$DOMAINS_GEO_FILE" 2>/dev/null || echo 0)"
+
+    if [ -z "$GEOBLOCK_IFACE" ]; then
+        add FAIL geoblock "geoblock is on but no interface is selected — those domains follow the normal path" \
+            "pick an interface in Services -> splify"
+    elif [ ! -e "/sys/class/net/$GEOBLOCK_IFACE" ]; then
+        add FAIL geoblock "geoblock interface '$GEOBLOCK_IFACE' does not exist on this router" \
+            "pick an existing interface in Services -> splify"
+    else
+        [ "$(cat "/sys/class/net/$GEOBLOCK_IFACE/operstate" 2>/dev/null)" = down ] \
+            && add WARN geoblock "geoblock interface '$GEOBLOCK_IFACE' is down — those domains use the normal path until it returns" \
+                "bring the tunnel up, or pick another interface"
+
+        # The routing side, in the order a packet meets it. `ip route get` with the
+        # geoblock mark is the whole answer for the last two links: it reports the
+        # table the rule selected AND the device that table sends the packet to.
+        _geo_dev="$(ip -4 route get 1.1.1.1 mark "$GEO_MARK" 2>/dev/null \
+            | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
+        if [ -z "$_geo_dev" ]; then
+            add FIXABLE geoblock "no route for geoblock-marked traffic (ip rule/table $GEO_TABLE missing)" \
+                "run splify-apply, or wait for the next failover tick"
+        elif [ "$_geo_dev" != "$GEOBLOCK_IFACE" ]; then
+            add FAIL geoblock "geoblock-marked traffic egresses '$_geo_dev', not the selected '$GEOBLOCK_IFACE'" \
+                "run splify-apply (rebuilds the geoblock rule and table $GEO_TABLE)"
+        fi
+    fi
+
+    if [ "$_geo_n" = 0 ]; then
+        add FIXABLE geoblock "geoblock list is not downloaded yet ($DOMAINS_GEO_FILE)" "splify-update-domains"
+    else
+        _geo_age="$(file_age "$DOMAINS_GEO_FILE")"
+        [ "$_geo_age" -gt "$STALE_AGE" ] 2>/dev/null \
+            && add WARN geoblock "geoblock list is stale ($((_geo_age/86400))d old)" "splify-update-domains"
+
+        # A set that is absent from the kernel while the list is fine on disk is
+        # the signature of an fw4 include that failed to load — the failure mode
+        # nft_refs_declared now prevents, reported here for the ones already out
+        # in the field.
+        nft -t list set inet fw4 "$GEO_SET" >/dev/null 2>&1 \
+            || add FAIL geoblock "geoblock set ($GEO_SET) is missing from the live ruleset — nothing gets marked" \
+                "run splify-apply, then check the boot log for an nftables include error"
+        nft list chain inet fw4 splify_ipsum_mark_prerouting 2>/dev/null | grep -q "@$GEO_SET" \
+            || add FIXABLE geoblock "geoblock mark rule missing from the live ruleset" \
+                "run splify-apply (regenerates 30-splify.nft)"
+        [ "$DOMAIN_BACKEND" = native ] && { [ -s "$SPLIFY_DNS_GEO_RULES" ] \
+            || add FIXABLE geoblock "geoblock domains are not in the daemon's rule file ($SPLIFY_DNS_GEO_RULES)" \
+                "run splify-apply (regenerates it and reloads splify-dnsd)"; }
+        add OK geoblock "geoblock: $_geo_n domains routed via ${GEOBLOCK_IFACE:-—}"
     fi
 fi
 
