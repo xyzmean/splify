@@ -885,3 +885,35 @@ EOF
     run "$SPLIFY_DNSD_BIN" --fakeip "$state" c.com
     [ "$output" = "198.18.0.1" ]
 }
+
+# nft_refs_declared cannot see a plain syntax error, and one aborts the include
+# just as completely: `counter` written AFTER `redirect` ("statement after
+# terminal statement has no effect") took out the whole DNS-redirect chain, so LAN
+# queries silently stopped being proxied.
+@test "nft_syntax_ok: rejects a statement after a terminal one, accepts both redirect rules" {
+    command -v nft >/dev/null 2>&1 || skip "nft not available"
+    load_fn "$COMMON_SH" nft_syntax_ok
+
+    bad="$BATS_TEST_TMPDIR/bad.nft"
+    cat > "$bad" <<'EOF'
+chain splify_dns_redirect_prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+    ip saddr 192.168.1.0/24 udp dport 53 redirect to :5300 counter
+}
+EOF
+    run nft_syntax_ok "$bad"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"terminal statement"* ]]
+
+    # the shipped form: counter first, and the IPv6 rule matched by LAN device
+    good="$BATS_TEST_TMPDIR/good.nft"
+    cat > "$good" <<'EOF'
+chain splify_dns_redirect_prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+    ip saddr 192.168.1.0/24 udp dport 53 counter redirect to :5300
+    meta nfproto ipv6 iifname "br-lan" udp dport 53 counter redirect to :5300
+}
+EOF
+    run nft_syntax_ok "$good"
+    [ "$status" -eq 0 ]
+}

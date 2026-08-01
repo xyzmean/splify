@@ -248,7 +248,32 @@ DEV_LINES="$(config_foreach emit_devices device)"
        && { [ "$HAS_VPN" = 1 ] || [ "$HAS_DIRECT" = 1 ] || [ "$GEO_ACTIVE" = 1 ]; }; then
         echo "chain splify_dns_redirect_prerouting {"
         echo "    type nat hook prerouting priority dstnat; policy accept;"
-        echo "    ip saddr { $LAN_CIDR } udp dport 53 redirect to :$SPLIFY_DNS_PORT"
+        # counter BEFORE redirect: nft rejects "statement after terminal statement
+        # has no effect", and that error aborts the whole include.
+        echo "    ip saddr { $LAN_CIDR } udp dport 53 counter redirect to :$SPLIFY_DNS_PORT"
+        # IPv6 too, or the redirect catches almost nothing. OpenWrt advertises the
+        # router as an IPv6 resolver by default (odhcpd RA + DHCPv6) and
+        # Windows/Android/iOS prefer that server: measured on a real client, 15 of
+        # its DNS packets went over IPv6 against 20 over IPv4, and `nslookup
+        # claude.ai` returned the REAL address via fdd6:...::1 while the same query
+        # forced to 192.168.1.1 returned the fake 198.18.0.5. Both stacks get
+        # asked and the first answer wins, so the unproxied one wins in practice —
+        # domain routing looked like it did nothing.
+        #
+        # Matched by LAN DEVICE, not by prefix: a LAN IPv6 prefix is dynamic
+        # (ULA + a delegated global one that changes), so there is no stable
+        # `ip6 saddr` to write here. Skipped when lan_iface is unknown, since an
+        # empty iifname would be a syntax error and nft aborts the whole include.
+        #
+        # TCP/53 stays with dnsmasq on purpose: splify-dnsd is UDP-only, so
+        # redirecting TCP would break the truncated-answer retry path instead of
+        # routing it. A-record answers are small enough that it effectively never
+        # applies to the domains this feature cares about.
+        if [ -n "$LAN_IFACE" ]; then
+            echo "    meta nfproto ipv6 iifname \"$LAN_IFACE\" udp dport 53 counter redirect to :$SPLIFY_DNS_PORT"
+        else
+            warn "lan_iface not set — IPv6 DNS from the LAN is NOT redirected to splify-dnsd, so clients preferring the IPv6 resolver bypass domain routing"
+        fi
         echo "}"
 
         # Fake-IP DNAT: splify-dnsd hands matched domains a synthetic,
@@ -272,13 +297,17 @@ _APPLY_FAIL=0
 # Refuse to install a file nft would abort on: keeping the previous (working)
 # ruleset beats replacing it with one that silently drops every set after the bad
 # rule. See nft_refs_declared for what this catches and why it is not hypothetical.
-if _UNDECLARED="$(nft_refs_declared "${POLICY_NFT_FILE}.tmp")"; then
-    mv "${POLICY_NFT_FILE}.tmp" "$POLICY_NFT_FILE" \
-        || { warn "failed to install $POLICY_NFT_FILE — policy ruleset NOT updated"; _APPLY_FAIL=1; }
-else
+if ! _UNDECLARED="$(nft_refs_declared "${POLICY_NFT_FILE}.tmp")"; then
     warn "generated ruleset references undeclared set(s): $_UNDECLARED — this is a splify bug; keeping the previous ruleset"
     rm -f "${POLICY_NFT_FILE}.tmp"
     _APPLY_FAIL=1
+elif ! _SYNTAX="$(nft_syntax_ok "${POLICY_NFT_FILE}.tmp")"; then
+    warn "generated ruleset is not valid nftables: $_SYNTAX — this is a splify bug; keeping the previous ruleset"
+    rm -f "${POLICY_NFT_FILE}.tmp"
+    _APPLY_FAIL=1
+else
+    mv "${POLICY_NFT_FILE}.tmp" "$POLICY_NFT_FILE" \
+        || { warn "failed to install $POLICY_NFT_FILE — policy ruleset NOT updated"; _APPLY_FAIL=1; }
 fi
 
 # `fw4 reload` does NOT prune a nat-hooked chain (or a map) that's no longer

@@ -970,10 +970,12 @@ static void fakeip_entry_set_real(const char *domain, uint32_t real_host) {
 /* proxy state                                                           */
 /* ---------------------------------------------------------------------- */
 
+/* sockaddr_storage, not sockaddr_in: the listen socket is dual-stack, so a
+ * client can be IPv6. See run_proxy's socket setup for why that matters. */
 struct pending {
     int fd;
     int in_use;
-    struct sockaddr_in client;
+    struct sockaddr_storage client;
     socklen_t client_len;
     time_t expire;
 };
@@ -1025,7 +1027,9 @@ static struct pending *pending_alloc(void) {
 
 static void handle_client_query(int upstream_port) {
     uint8_t buf[MAX_PKT];
-    struct sockaddr_in from;
+    /* Dual-stack listener -> the client may be IPv6 (or v4-mapped). The reply is
+     * sent back to exactly these bytes, so the family never has to be inspected. */
+    struct sockaddr_storage from;
     socklen_t fromlen = sizeof(from);
     ssize_t n = recvfrom(g_listen_fd, buf, sizeof(buf), 0, (struct sockaddr *)&from, &fromlen);
     if (n <= 0) return;
@@ -1190,22 +1194,57 @@ static void handle_upstream_response(struct pending *p) {
 }
 
 static int run_proxy(int listen_port, int upstream_port) {
-    g_listen_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (g_listen_fd < 0) { perror("socket"); return 1; }
+    /* Dual-stack on ONE socket (AF_INET6 with IPV6_V6ONLY off), because an
+     * IPv4-only listener silently loses most of the LAN's DNS.
+     *
+     * OpenWrt advertises the router as an IPv6 resolver by default (odhcpd RA +
+     * DHCPv6), and Windows/Android/iOS then prefer the IPv6 server. Measured on a
+     * real client: 15 of its DNS packets went to the router over IPv6 against 20
+     * over IPv4, and `nslookup claude.ai` answered with the REAL address via
+     * fdd6:...::1 while the same query forced to 192.168.1.1 answered 198.18.0.5.
+     * Both stacks get asked and the first reply wins, so the unproxied one wins
+     * essentially always — domain routing appeared to do nothing at all.
+     *
+     * MUST bind the wildcard address, not loopback: nft's `redirect` DNATs the
+     * destination to the box's own address on the inbound (LAN) interface, not to
+     * 127.0.0.1 — only LAN-sourced traffic ever reaches this port because
+     * splify-apply scopes the redirect rule to the LAN.
+     *
+     * Falls back to AF_INET if the kernel has no IPv6 at all, so a build for a
+     * v4-only box keeps working exactly as before. */
     int reuse = 1;
-    setsockopt(g_listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-
-    struct sockaddr_in addr = {0};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)listen_port);
-    /* MUST bind the wildcard address, not loopback: nft's `redirect` DNATs
-     * the destination to the box's own address on the inbound (LAN)
-     * interface, not to 127.0.0.1 — only LAN-sourced traffic ever reaches
-     * this port because splify-apply scopes the redirect rule to LAN_CIDR. */
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    if (bind(g_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        perror("bind");
-        return 1;
+    g_listen_fd = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (g_listen_fd >= 0) {
+        int v6only = 0;
+        setsockopt(g_listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        if (setsockopt(g_listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) != 0) {
+            /* Can't serve IPv4 through it -> a v4 client would break. Drop back. */
+            close(g_listen_fd);
+            g_listen_fd = -1;
+        } else {
+            struct sockaddr_in6 a6 = {0};
+            a6.sin6_family = AF_INET6;
+            a6.sin6_port = htons((uint16_t)listen_port);
+            a6.sin6_addr = in6addr_any;
+            if (bind(g_listen_fd, (struct sockaddr *)&a6, sizeof(a6)) != 0) {
+                close(g_listen_fd);
+                g_listen_fd = -1;
+            }
+        }
+    }
+    if (g_listen_fd < 0) {
+        g_listen_fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (g_listen_fd < 0) { perror("socket"); return 1; }
+        setsockopt(g_listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        struct sockaddr_in addr = {0};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons((uint16_t)listen_port);
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        if (bind(g_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+            perror("bind");
+            return 1;
+        }
+        fprintf(stderr, "splify-dnsd: no IPv6 on this kernel — listening on IPv4 only\n");
     }
 
     g_epfd = epoll_create1(0);

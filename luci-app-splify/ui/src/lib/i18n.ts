@@ -340,6 +340,8 @@ const CHECK_PATTERNS: [RegExp, string][] = [
   [/^ru\/cn list is stale \((\d+)d old\)$/, 'Список RU/CN не обновлялся $1 дн.'],
   [/^ru\/cn list is on disk but the live nft set is empty or incomplete$/,
    'Список RU/CN есть на диске, но в ядро он не загружен'],
+  [/^IPv6 DNS from the LAN is not redirected to splify-dnsd — clients that prefer the IPv6 resolver bypass domain routing entirely$/,
+   'DNS-запросы из локальной сети по IPv6 не перенаправляются в splify-dnsd — устройства, предпочитающие IPv6-резолвер, обходят маршрутизацию по доменам'],
   // geoblock
   [/^geoblock is on but no interface is selected — those domains follow the normal path$/,
    'Geoblock включён, но интерфейс не выбран — эти домены идут обычным путём'],

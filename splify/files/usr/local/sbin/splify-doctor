@@ -687,6 +687,17 @@ if [ "$DOMAIN_BACKEND" = "native" ]; then
             || add FIXABLE splify-dns "rule files missing/empty in $SPLIFY_DNS_DIR" "run splify-apply (regenerates them)"
         nft list chain inet fw4 splify_dns_redirect_prerouting >/dev/null 2>&1 \
             || add FIXABLE splify-dns "DNS redirect rule missing from the live ruleset" "run splify-apply (regenerates 30-splify.nft)"
+        # An IPv4-only redirect catches almost nothing on a dual-stack LAN: the
+        # router advertises itself as an IPv6 resolver by default and clients
+        # prefer that server, so their queries reach dnsmasq directly and every
+        # matched domain keeps its real address. Only worth reporting when the LAN
+        # actually has IPv6 (a v4-only LAN is correctly served by the v4 rule).
+        if ip -6 addr show dev "$LAN_IFACE" scope global 2>/dev/null | grep -q inet6 \
+           || ip -6 addr show dev "$LAN_IFACE" 2>/dev/null | grep -q 'inet6 fd'; then
+            nft list chain inet fw4 splify_dns_redirect_prerouting 2>/dev/null | grep -q 'nfproto ipv6' \
+                || add FIXABLE splify-dns "IPv6 DNS from the LAN is not redirected to splify-dnsd — clients that prefer the IPv6 resolver bypass domain routing entirely" \
+                    "run splify-apply (regenerates 30-splify.nft)"
+        fi
         nft list chain inet fw4 splify_fakeip_dnat_prerouting >/dev/null 2>&1 \
             || add FIXABLE splify-dns "fake-IP DNAT rule missing from the live ruleset" "run splify-apply (regenerates 30-splify.nft)"
         nft list map inet fw4 "$SPLIFY_DNS_FAKEIP_MAP" >/dev/null 2>&1 \

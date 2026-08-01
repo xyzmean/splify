@@ -823,6 +823,25 @@ nft_refs_declared() {  # FILE
     return 1
 }
 
+# Would nft accept this fw4 include? Echoes nft's own complaint and returns 1.
+#
+# nft_refs_declared above only answers "is every set declared"; it cannot see a
+# plain syntax error, and one of those aborts the include just as completely —
+# `counter` written AFTER `redirect` ("statement after terminal statement has no
+# effect") took out the entire DNS-redirect chain, so LAN queries stopped being
+# proxied while everything else looked healthy.
+#
+# fw4 wraps these files in `table inet fw4 { ... }`, so the check wraps them the
+# same way; `nft -c` parses and validates without committing anything. Referenced
+# devices need not exist. If nft is missing, this passes rather than blocking an
+# apply (the guard is a safety net, not a dependency).
+nft_syntax_ok() {  # FILE
+    command -v nft >/dev/null 2>&1 || return 0
+    _nso_err="$( { printf 'table inet fw4 {\n'; cat "$1"; printf '}\n'; } | nft -c -f - 2>&1 )" && return 0
+    printf '%s' "$(printf '%s' "$_nso_err" | head -2 | tr '\n' ' ')"
+    return 1
+}
+
 # ---- source stamps: "has this list's URL changed since we fetched it?" -------
 #
 # Separate from the set stamps above, and persistent (not /var/run) on purpose:
