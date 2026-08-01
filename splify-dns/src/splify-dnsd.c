@@ -424,13 +424,26 @@ static struct nlattr *nlbuf_reserve(struct nlbuf *b, uint16_t type, size_t pay_l
     b->p += aligned;
     return a; /* caller writes payload into (a+1) immediately */
 }
-static void nlbuf_put_u32(struct nlbuf *b, uint16_t type, uint32_t v) {
+/* Scalar nf_tables attributes are BIG-ENDIAN on the wire: the kernel parses
+ * NFTA_SET_ELEM_TIMEOUT with nla_get_be64(). Writing host order on a
+ * little-endian box turned a 60000ms timeout into an astronomically large value,
+ * and nf_msecs_to_jiffies64() rejected it with -ERANGE — which is exactly why
+ * inserts into the timeout-flagged VPN/direct sets failed while the map (which
+ * carries no timeout) succeeded. Confirmed on the test router: ack error=-34 for
+ * the set, error=0 for the map, same code path otherwise. */
+static void nlbuf_put_be32(struct nlbuf *b, uint16_t type, uint32_t v) {
     struct nlattr *a = nlbuf_reserve(b, type, 4);
-    if (a) memcpy(a + 1, &v, 4);
+    if (!a) return;
+    uint32_t be = htonl(v);
+    memcpy(a + 1, &be, 4);
 }
-static void nlbuf_put_u64(struct nlbuf *b, uint16_t type, uint64_t v) {
+
+static void nlbuf_put_be64(struct nlbuf *b, uint16_t type, uint64_t v) {
     struct nlattr *a = nlbuf_reserve(b, type, 8);
-    if (a) memcpy(a + 1, &v, 8);
+    if (!a) return;
+    uint8_t be[8];
+    for (int i = 0; i < 8; i++) be[i] = (uint8_t)(v >> (56 - 8 * i));
+    memcpy(a + 1, be, 8);
 }
 static void nlbuf_put_str(struct nlbuf *b, uint16_t type, const char *s) {
     size_t n = strlen(s) + 1;
@@ -454,6 +467,38 @@ static void nlbuf_end_nested(struct nlbuf *b, struct nlattr *outer) {
 
 /* ---- netlink socket --------------------------------------------------- */
 static int g_nlk_fd = -1;
+/* Monotonic request sequence. Also used to match the kernel's ack to the request
+ * that caused it: a stale ack left in the socket buffer by a timed-out earlier
+ * transaction would otherwise be read as this one's result. */
+static uint32_t g_nlk_seq = 0;
+
+/* nf_tables mutations are TRANSACTIONAL: the kernel registers only batch
+ * handlers for this subsystem, so a standalone NFT_MSG_NEWSETELEM is rejected
+ * outright. Verified against a live 6.x kernel on the test router:
+ *
+ *   standalone NFT_MSG_NEWSETELEM        -> ack error=-22 (EINVAL), no element
+ *   same message inside BATCH_BEGIN/END  -> ack error=0, element present
+ *
+ * That is why this file's first netlink version silently added nothing: every
+ * insert failed and the daemon fell back to relaying the real answer, so the
+ * fake-IP map stayed empty and domain routing never took effect.
+ *
+ * Builds one NFNL_MSG_BATCH_BEGIN or _END message into `out`; res_id carries the
+ * subsystem the transaction belongs to. */
+static size_t nftlk_build_batch(uint8_t *out, uint32_t seq, int begin) {
+    struct nlmsghdr *nh = (struct nlmsghdr *)out;
+    struct nfgenmsg *ng = (struct nfgenmsg *)(out + NLMSG_ALIGN(sizeof(*nh)));
+    size_t len = NLMSG_ALIGN(sizeof(*nh)) + NLMSG_ALIGN(sizeof(*ng));
+    memset(out, 0, len);
+    nh->nlmsg_len   = (uint32_t)len;
+    nh->nlmsg_type  = begin ? NFNL_MSG_BATCH_BEGIN : NFNL_MSG_BATCH_END;
+    nh->nlmsg_flags = NLM_F_REQUEST;
+    nh->nlmsg_seq   = seq;
+    ng->nfgen_family = AF_UNSPEC;
+    ng->version      = NFNETLINK_V0;
+    ng->res_id       = htons(NFNL_SUBSYS_NFTABLES);
+    return len;
+}
 
 static int nftlk_open(void) {
     int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_NETFILTER);
@@ -471,11 +516,18 @@ static int nftlk_open(void) {
     return 0;
 }
 
-/* Build & send one NFT_MSG_NEWSETELEM, then synchronously drain the kernel's
- * NLM_F_ACK reply. Returns 0 on a successful ack (err==0), -1 on any failure
- * (send error, timeout, non-zero error ack). Idempotent for an identical
- * re-insert: the kernel returns 0 (not EEXIST) for an element that already
- * exists with the same value, so re-hydration after a restart is safe.
+/* Build & send one set-element message inside a transaction, then synchronously
+ * drain the kernel's NLM_F_ACK reply. Returns 0 on a successful ack, -1 on any
+ * failure (send error, timeout, error ack).
+ *
+ * A re-insert of an element that already exists returns -EEXIST — NOT 0, despite
+ * what an earlier version of this comment claimed. Measured on the test router:
+ * every repeat query for an already-mapped domain got `error=-17 (File exists)`
+ * for the fake-IP map, the caller treated that as failure and fell back to
+ * relaying the REAL address — so a domain was routed through the tunnel exactly
+ * once and silently went direct from the second query onward. Callers must map
+ * EEXIST onto "already in the desired state" (see nft_map_set_element), and an
+ * element whose DATA must change has to be deleted first.
  *
  *   table      : "inet fw4" (family+table combined, like g_nft_table)
  *   obj_name   : the set or map name ("splify_vpn_v4", "splify_fakeip_map")
@@ -483,9 +535,10 @@ static int nftlk_open(void) {
  *   data_host  : element DATA as 4 bytes, or NULL for a plain set (no mapping)
  *   timeout_ms : element timeout in ms (nft 'timeout'), or 0 for none
  */
-static int nftlk_add_elem(const char *table, const char *obj_name,
-                           const void *key_net, const void *data_net,
-                           uint64_t timeout_ms) {
+static int nftlk_elem_msg(uint16_t nft_msg_type, const char *table,
+                          const char *obj_name, const void *key_net,
+                          int interval, const void *data_net,
+                          uint64_t timeout_ms) {
     if (g_nlk_fd < 0) return -1;
     const char *fam_str, *tbl_str;
     nftlk_split_table(table, &fam_str, &tbl_str);
@@ -523,16 +576,66 @@ static int nftlk_add_elem(const char *table, const char *obj_name,
         nlbuf_put_data(&b, NFTA_DATA_VALUE, data_net, 4);
         nlbuf_end_nested(&b, d);
     }
-    if (timeout_ms) nlbuf_put_u64(&b, NFTA_SET_ELEM_TIMEOUT, timeout_ms);
+    if (timeout_ms) nlbuf_put_be64(&b, NFTA_SET_ELEM_TIMEOUT, timeout_ms);
 
     nlbuf_end_nested(&b, elem);
+
+    /* A set declared `flags interval` (which is how splify-apply declares the
+     * VPN/direct sets — see emit_set) stores RANGE BOUNDARIES, not addresses: a
+     * range is the start element plus an end marker carrying
+     * NFT_SET_ELEM_INTERVAL_END. Sending only the start leaves the range open,
+     * and the kernel then reports the element as
+     * 198.18.0.0-255.255.255.255 — with `ip daddr @splify_vpn_v4` marking
+     * traffic into the tunnel, ONE resolved domain diverted every address above
+     * the fake IP into the VPN. That is the "one request and the router is dead"
+     * symptom, reproduced in the lab.
+     *
+     * This is exactly what nft itself emits for `add element … { 1.2.3.4 }` on an
+     * interval set (verified with nft --debug=netlink on the same kernel):
+     *   element 1.2.3.4 flags=0   +   element 1.2.3.5 flags=INTERVAL_END
+     * i.e. the end boundary is key+1, exclusive. Both boundaries go in the same
+     * message so the pair is applied atomically.
+     *
+     * KEY_END (the newer single-element form) was tried first and the kernel
+     * rejected it with -EINVAL here, so this uses the representation nft uses. */
+    if (interval) {
+        uint32_t end_host = ntohl(*(const uint32_t *)key_net);
+        if (end_host != 0xFFFFFFFFu) {          /* no successor to 255.255.255.255 */
+            uint32_t end_net = htonl(end_host + 1);
+            struct nlattr *e2 = nlbuf_begin_nested(&b, NFTA_LIST_ELEM);
+            struct nlattr *k2 = nlbuf_begin_nested(&b, NFTA_SET_ELEM_KEY);
+            nlbuf_put_data(&b, NFTA_DATA_VALUE, &end_net, 4);
+            nlbuf_end_nested(&b, k2);
+            nlbuf_put_be32(&b, NFTA_SET_ELEM_FLAGS, NFT_SET_ELEM_INTERVAL_END);
+            /* NO timeout on the end marker. Probed against a live kernel with
+             * every plausible encoding (see the lab probe):
+             *   start only, no marker              -> accepted, but stores
+             *                                         198.18.9.0-255.255.255.255
+             *   start + marker, timeout on BOTH    -> -EINVAL
+             *   start + marker, timeout on start   -> accepted, stores 198.18.9.0
+             *   single element with KEY_END        -> -EINVAL
+             * The kernel drops the whole range when the start element expires, so
+             * the marker needs no timeout of its own. */
+            nlbuf_end_nested(&b, e2);
+        }
+    }
+
     nlbuf_end_nested(&b, elems);
 
-    /* Backfill the fixed headers now that total length is known. */
+    /* Backfill the fixed headers now that total length is known.
+     *
+     * NLM_F_CREATE matters: without it the kernel rejects an element that is not
+     * already present, which is every element we ever add.
+     *
+     * The sequence number must be unique per request, not a timestamp: two
+     * inserts within the same second would share a seq, and the ack matcher
+     * below could then credit one transaction with the other's result. */
     nh->nlmsg_len   = (uint32_t)(b.p - buf);
-    nh->nlmsg_type  = (NFNL_SUBSYS_NFTABLES << 8) | NFT_MSG_NEWSETELEM;
-    nh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
-    nh->nlmsg_seq   = (uint32_t)time(NULL);
+    nh->nlmsg_type  = (uint16_t)((NFNL_SUBSYS_NFTABLES << 8) | nft_msg_type);
+    /* NLM_F_CREATE only makes sense for an add; a delete must not carry it. */
+    nh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK
+                    | (nft_msg_type == NFT_MSG_NEWSETELEM ? NLM_F_CREATE : 0);
+    nh->nlmsg_seq   = (g_nlk_seq += 2);   /* leaves room for the batch-begin seq below */
     nh->nlmsg_pid   = 0;
     nfg->nfgen_family = nftlk_family(fam_str);
     nfg->version      = NFNETLINK_V0;
@@ -548,18 +651,31 @@ static int nftlk_add_elem(const char *table, const char *obj_name,
         fprintf(stderr, "\n");
     }
 
+    /* One transaction: BATCH_BEGIN + the element + BATCH_END, in a single
+     * sendmsg so the kernel can never see a half-open transaction if we are
+     * interrupted between writes. The begin/end messages carry no NLM_F_ACK, so
+     * the only ack that comes back is the element's own. */
+    uint8_t bbuf[64], ebuf[64];
+    size_t blen = nftlk_build_batch(bbuf, nh->nlmsg_seq - 1, 1);
+    size_t elen = nftlk_build_batch(ebuf, nh->nlmsg_seq + 1, 0);
+    g_nlk_seq = nh->nlmsg_seq + 1;   /* keep the counter past the end message */
+
     struct sockaddr_nl dst = { .nl_family = AF_NETLINK };
-    struct iovec iov = { .iov_base = buf, .iov_len = nh->nlmsg_len };
+    struct iovec iov[3] = { { bbuf, blen },
+                            { buf, nh->nlmsg_len },
+                            { ebuf, elen } };
     struct msghdr msg = { .msg_name = &dst, .msg_namelen = sizeof(dst),
-                          .msg_iov = &iov, .msg_iovlen = 1 };
+                          .msg_iov = iov, .msg_iovlen = 3 };
+    uint32_t want_seq = nh->nlmsg_seq;
     if (sendmsg(g_nlk_fd, &msg, 0) < 0) {
         if (getenv("SPLIFY_DNSD_DEBUG")) fprintf(stderr, "nftlk: sendmsg fail errno=%d\n", errno);
         return -1;
     }
 
-    /* Drain the ack. The kernel replies with an NLMSG_ERROR whose nlmsgerr::error
-     * is 0 on success, or a negative errno on failure. A request with NLM_F_ACK
-     * always yields exactly one ack message. */
+    /* Drain until we see the ack for OUR request. The kernel replies with an
+     * NLMSG_ERROR whose nlmsgerr::error is 0 on success or a negative errno on
+     * failure; acks for other sequence numbers are leftovers from a transaction
+     * that timed out earlier and must not be mistaken for this one's result. */
     uint8_t rbuf[256];
     for (;;) {
         ssize_t r = recv(g_nlk_fd, rbuf, sizeof(rbuf), 0);
@@ -570,10 +686,18 @@ static int nftlk_add_elem(const char *table, const char *obj_name,
         struct nlmsghdr *rh = (struct nlmsghdr *)rbuf;
         if (rh->nlmsg_type == NLMSG_ERROR) {
             struct nlmsgerr *e = NLMSG_DATA(rh);
+            if (rh->nlmsg_seq != want_seq) {
+                if (getenv("SPLIFY_DNSD_DEBUG"))
+                    fprintf(stderr, "nftlk: stale ack seq=%u (want %u), ignoring\n",
+                            rh->nlmsg_seq, want_seq);
+                continue;
+            }
             if (e->error != 0 && getenv("SPLIFY_DNSD_DEBUG"))
                 fprintf(stderr, "nftlk: kernel ack error=%d (%s) for %s/%s\n",
                         e->error, strerror(-e->error), tbl_str, obj_name);
-            return e->error == 0 ? 0 : -1;
+            /* The kernel's errno is returned as-is (negative): EEXIST and ENOENT
+             * are meaningful outcomes for the callers below, not plain failures. */
+            return e->error;
         }
         if (rh->nlmsg_type == NLMSG_DONE) return 0;
         /* multipart / unrelated: keep draining until we see the ack */
@@ -589,18 +713,53 @@ static int nft_add_element(const char *set_name, uint32_t key_host, uint32_t ttl
     if (ttl < 1) ttl = 1;
     if (ttl > 86400) ttl = 86400;
     uint32_t key_net = htonl(key_host);
-    return nftlk_add_elem(g_nft_table, set_name, &key_net, NULL, (uint64_t)ttl * 1000);
+    int rc = nftlk_elem_msg(NFT_MSG_NEWSETELEM, g_nft_table, set_name,
+                            &key_net, 1 /* interval set */, NULL,
+                            (uint64_t)ttl * 1000);
+    if (rc == -EINVAL)
+        fprintf(stderr, "splify-dnsd: %s rejected an interval element (-EINVAL) — "
+                        "is it declared without `flags interval`?\n", set_name);
+    /* Already there = already in the desired state. (A refreshed timeout would be
+     * nicer, but the element only has to outlive the client's cached answer, and
+     * a re-resolve after expiry re-adds it.) */
+    return (rc == 0 || rc == -EEXIST) ? 0 : -1;
 }
 
-/* Maps a fake IP (key) to its real backend (data) in the DNAT map splify-apply
+/* Points a fake IP (key) at its real backend (data) in the DNAT map splify-apply
  * installs (`ip daddr 198.18.0.0/15 dnat ip to ip daddr map @<map_name>`). No
- * timeout — the fake IP is a stable, exclusive, persistent allocation for this
- * domain (see fakeip_* below), so the map entry should live as long as the
- * mapping; it is simply overwritten with a fresh real IP on the next query if
- * the backend moves. Both addrs are HOST order here (converted inside). */
-static int nft_add_map_element(const char *map_name, uint32_t fake_host, uint32_t real_host) {
+ * timeout: the fake IP is a stable, exclusive allocation for this domain, so the
+ * mapping lives as long as the domain does.
+ *
+ * "Just add it again with the new value" does NOT work — nf_tables answers
+ * -EEXIST and keeps the old data, which for a CDN-fronted domain means the DNAT
+ * keeps pointing at a backend the domain has since moved off. So an existing key
+ * whose value must change is deleted and re-added inside ONE transaction (the
+ * pair is atomic: no packet can observe the fake IP without a mapping).
+ *
+ * `known_real` is what we believe is currently installed (0 = nothing), so the
+ * common case — same backend as last time — costs one add that the kernel
+ * answers EEXIST to, and the uncommon case costs a delete plus an add.
+ * Both addrs are HOST order here. */
+static int nft_map_set_element(const char *map_name, uint32_t fake_host,
+                               uint32_t real_host, uint32_t known_real) {
     uint32_t k = htonl(fake_host), d = htonl(real_host);
-    return nftlk_add_elem(g_nft_table, map_name, &k, &d, 0);
+    if (known_real != 0 && known_real != real_host) {
+        /* Value must change: drop the stale mapping first. ENOENT is fine — it
+         * means the kernel already lost it (e.g. an fw4 reload flushed the map),
+         * which is exactly the state the add below wants. */
+        int drc = nftlk_elem_msg(NFT_MSG_DELSETELEM, g_nft_table, map_name,
+                                 &k, 0, NULL, 0);
+        if (drc != 0 && drc != -ENOENT && getenv("SPLIFY_DNSD_DEBUG"))
+            fprintf(stderr, "nftlk: map delete for update failed rc=%d\n", drc);
+    }
+    int rc = nftlk_elem_msg(NFT_MSG_NEWSETELEM, g_nft_table, map_name,
+                            &k, 0 /* plain map, not interval */, &d, 0);
+    if (rc == -EEXIST) {
+        /* Present with the value we wanted (known_real told us so, or a restart
+         * lost our bookkeeping and the kernel kept the mapping) — desired state. */
+        return 0;
+    }
+    return rc == 0 ? 0 : -1;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -748,6 +907,14 @@ static int fakeip_lookup_or_alloc(const char *domain, uint32_t *out_addr) {
  * successful DNAT-map insert so the mapping can survive a restart via the
  * rehydrate pass (run_proxy's startup). Triggers a one-shot state rewrite so
  * the extended 3-field form persists. */
+/* The real backend we last installed for this domain, or 0 if we never did. */
+static uint32_t fakeip_entry_get_real(const char *domain) {
+    for (size_t i = 0; i < g_fakeip.n; i++)
+        if (strcmp(g_fakeip.entries[i].domain, domain) == 0)
+            return g_fakeip.entries[i].real_host;
+    return 0;
+}
+
 static void fakeip_entry_set_real(const char *domain, uint32_t real_host) {
     for (size_t i = 0; i < g_fakeip.n; i++) {
         if (strcmp(g_fakeip.entries[i].domain, domain) == 0) {
@@ -937,9 +1104,10 @@ static void handle_upstream_response(struct pending *p) {
              * fake IP whose DNAT entry never landed — a SYN into the tunnel to
              * nowhere, hanging on TCP retries for minutes. Now a failed/missing
              * ack makes us relay the REAL answer instead (fail-open). */
-            int maprc = nft_add_map_element(g_fakeip_map, fake_addr, real_host);
+            int maprc = nft_map_set_element(g_fakeip_map, fake_addr, real_host,
+                                            fakeip_entry_get_real(qname));
             if (getenv("SPLIFY_DNSD_DEBUG"))
-                fprintf(stderr, "nftlk-debug: nft_add_map_element -> %d\n", maprc);
+                fprintf(stderr, "nftlk-debug: nft_map_set_element -> %d\n", maprc);
             if (maprc == 0) {
                 /* Record the real backend so a post-restart rehydrate can rebuild
                  * the DNAT map from state without re-resolving every domain. */
@@ -1019,9 +1187,12 @@ static int run_proxy(int listen_port, int upstream_port) {
     size_t restored = 0;
     if (nk_open == 0) {
         for (size_t i = 0; i < g_fakeip.n; i++) {
+            /* known_real = 0: after a restart the kernel map is empty as far as we
+             * know, so this is a plain add (and an EEXIST just means the map
+             * survived, which is equally fine). */
             if (g_fakeip.entries[i].real_host &&
-                nft_add_map_element(g_fakeip_map, g_fakeip.entries[i].addr,
-                                     g_fakeip.entries[i].real_host) == 0)
+                nft_map_set_element(g_fakeip_map, g_fakeip.entries[i].addr,
+                                     g_fakeip.entries[i].real_host, 0) == 0)
                 restored++;
         }
     }
