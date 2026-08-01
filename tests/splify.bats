@@ -846,3 +846,42 @@ EOF
     run nft_refs_declared "$foreign"
     [ "$status" -eq 0 ]
 }
+
+# The daemon REWRITES its state in the 3-field form as soon as it learns a
+# domain's real backend, so a loader that only handles 2 fields loses the whole
+# table on every restart: fake IPs get handed out from the start of the pool
+# again, and an address a client still has cached then DNATs to a DIFFERENT
+# site's backend.
+@test "splify-dnsd --fakeip: reads back the 3-field state it writes" {
+    [ -n "${SPLIFY_DNSD_BIN:-}" ] || skip "splify-dnsd not built (set SPLIFY_DNSD_BIN)"
+    state="$BATS_TEST_TMPDIR/state"
+
+    printf 'example.com\t198.18.5.5\t1.2.3.4\n' > "$state"
+    run "$SPLIFY_DNSD_BIN" --fakeip "$state" example.com
+    [ "$status" -eq 0 ]
+    [ "$output" = "198.18.5.5" ]
+
+    # the legacy 2-field form must keep working
+    printf 'example.com\t198.18.5.5\n' > "$state"
+    run "$SPLIFY_DNSD_BIN" --fakeip "$state" example.com
+    [ "$output" = "198.18.5.5" ]
+}
+
+# Allocation must never hand out an address the state file already uses. It used
+# to derive the index from the entry COUNT, which is only correct while the file
+# is a dense 0..n-1 prefix — and it is not, because the CLI appends an entry it
+# just looked up and a malformed line leaves a hole.
+@test "splify-dnsd --fakeip: never reuses an address already in the state" {
+    [ -n "${SPLIFY_DNSD_BIN:-}" ] || skip "splify-dnsd not built (set SPLIFY_DNSD_BIN)"
+    state="$BATS_TEST_TMPDIR/state"
+
+    printf 'a.com\t198.18.0.3\n' > "$state"
+    run "$SPLIFY_DNSD_BIN" --fakeip "$state" b.com
+    [ "$status" -eq 0 ]
+    [ "$output" != "198.18.0.3" ]
+
+    # duplicate lines for one domain must not consume two pool slots
+    printf 'a.com\t198.18.0.0\na.com\t198.18.0.0\n' > "$state"
+    run "$SPLIFY_DNSD_BIN" --fakeip "$state" c.com
+    [ "$output" = "198.18.0.1" ]
+}

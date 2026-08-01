@@ -796,6 +796,17 @@ static const char *g_fakeip_state_path;
 
 static uint32_t fakeip_index_to_addr(size_t idx) { return FAKEIP_POOL_BASE + (uint32_t)idx; }
 
+/* Next pool index to hand out — a HIGH-WATER MARK, not the entry count.
+ *
+ * Deriving the index from t->n only works while the file is a dense 0..n-1
+ * prefix, and it is not: the --fakeip CLI appends an entry it just looked up, so
+ * a duplicate line is normal, and a skipped (malformed) line leaves a hole. With
+ * a count-based index, `a -> .3` alone in the file makes the fourth new domain
+ * allocate .3 as well — two domains on ONE fake IP, whose DNAT entry then points
+ * at whichever was inserted last, i.e. one of them silently reaches the other's
+ * site. */
+static size_t g_fakeip_next;
+
 static int fakeip_table_add(struct fakeip_table *t, const char *domain, uint32_t addr) {
     if (t->n == t->cap) {
         size_t newcap = t->cap ? t->cap * 2 : 64;
@@ -809,7 +820,18 @@ static int fakeip_table_add(struct fakeip_table *t, const char *domain, uint32_t
     t->entries[t->n].addr = addr;
     t->entries[t->n].real_host = 0;
     t->n++;
+    if (addr >= FAKEIP_POOL_BASE) {
+        size_t idx = (size_t)(addr - FAKEIP_POOL_BASE);
+        if (idx + 1 > g_fakeip_next) g_fakeip_next = idx + 1;
+    }
     return 0;
+}
+
+/* 0 iff DOMAIN already has an allocation. */
+static int fakeip_table_has(const struct fakeip_table *t, const char *domain) {
+    for (size_t i = 0; i < t->n; i++)
+        if (strcmp(t->entries[i].domain, domain) == 0) return 0;
+    return -1;
 }
 
 /* State file format: one entry per line.
@@ -828,11 +850,28 @@ static void fakeip_state_load(const char *path) {
         char *tab1 = strchr(line, '\t');
         if (!tab1) continue;
         *tab1 = '\0';
+        /* Terminate the fake-IP field BEFORE parsing it. inet_aton() rejects a
+         * string with anything after the address, so reading the 3-field form
+         * without cutting at the second tab fed it "198.18.0.0\t104.20.39.144"
+         * and skipped the line — and since the daemon REWRITES the file in the
+         * 3-field form as soon as a domain's real backend is known, that made
+         * every restart lose the whole table. Consequences, in order of how much
+         * they hurt: fake IPs are handed out again from the start of the pool, so
+         * an address a client still has cached now DNATs to a DIFFERENT site's
+         * backend; the rehydrate pass below never had anything to rehydrate; and
+         * the first query per domain after a restart relays the real answer. */
+        char *fake_s = tab1 + 1;
+        char *tab2 = strchr(fake_s, '\t');
+        if (tab2) *tab2 = '\0';
         struct in_addr a;
-        if (inet_aton(tab1 + 1, &a) == 0) continue;
+        if (inet_aton(fake_s, &a) == 0) continue;
+        /* Keep the FIRST allocation for a domain: a duplicate line is expected
+         * (the --fakeip CLI appends what it looked up), and adding it twice would
+         * both bloat the table and, before the high-water mark above, corrupt the
+         * next index. */
+        if (fakeip_table_has(&g_fakeip, line) == 0) continue;
         if (fakeip_table_add(&g_fakeip, line, ntohl(a.s_addr)) != 0) continue;
 
-        char *tab2 = strchr(tab1 + 1, '\t');
         if (tab2) { /* optional third field: last-seen real backend */
             struct in_addr r;
             if (inet_aton(tab2 + 1, &r) != 0)
@@ -895,8 +934,8 @@ static int fakeip_lookup_or_alloc(const char *domain, uint32_t *out_addr) {
             return 0;
         }
     }
-    if (g_fakeip.n >= FAKEIP_POOL_SIZE) return -1;
-    uint32_t addr = fakeip_index_to_addr(g_fakeip.n);
+    if (g_fakeip_next >= FAKEIP_POOL_SIZE) return -1;
+    uint32_t addr = fakeip_index_to_addr(g_fakeip_next);
     if (fakeip_table_add(&g_fakeip, domain, addr) != 0) return -1;
     if (g_fakeip_state_path) fakeip_state_append(g_fakeip_state_path, domain, addr);
     *out_addr = addr;
