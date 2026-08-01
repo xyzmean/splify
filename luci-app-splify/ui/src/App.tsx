@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { rpc, type Status, type EventRow } from '@/lib/rpc'
+import { useState } from 'react'
 import StatusDashboard from '@/components/StatusDashboard'
 import WgPanel from '@/components/WgPanel'
 import ApiPanel from '@/components/ApiPanel'
 // sing-box tab is hidden — the backend (SingboxPanel.tsx + singbox_* rpc methods)
 // stays in place so the feature can be re-enabled when it is finished.
 // import SingboxPanel from '@/components/SingboxPanel'
+import { useSplifyData } from '@/lib/useSplifyData'
 import { cn } from '@/lib/utils'
 import { t } from '@/lib/i18n'
-import { Activity, Radio, ShieldCheck } from 'lucide-react'
+import { Activity, Radio, ShieldCheck, RefreshCw } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 
 type Tab = 'status' | 'wg' | 'api'
 
@@ -22,55 +23,9 @@ const NAV: { id: Tab; label: string; icon: React.ComponentType<{ className?: str
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('status')
-  const [status, setStatus] = useState<Status | null>(null)
-  const [events, setEvents] = useState<EventRow[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState('')
-  // Monotonic request id: if a newer refresh() starts before an older one
-  // resolves, the older one's result is discarded. Prevents a late/slow reply
-  // from clobbering fresher state (e.g. Apply then Restart clicked in quick
-  // succession, or a stale network retry landing after a newer load).
-  const reqId = useRef(0)
-
-  // Data loads once on mount and on demand via the "Обновить" button (and after
-  // any action). There is deliberately NO background polling interval: a timer
-  // firing every few seconds for the lifetime of the tab was both an annoyance
-  // and a steady source of work that kept the long-lived view busy.
-  //
-  // Prefer the combined `snapshot` call (one doctor fork = one ubus round-trip
-  // for both status and events); fall back to separate status()+events() only
-  // if the backend is older than the `snapshot` method (or ACL rejects it).
-  const refresh = useCallback(async () => {
-    const id = ++reqId.current
-    try {
-      const snap = await rpc.snapshot().catch(async (snapErr: any) => {
-        // Old backend without `snapshot`, or the read ACL doesn't list it yet:
-        // degrade to the legacy two-call path so the page still works.
-        if (snapErr && /not found|No object|declared|UBUS_STATUS_NOT_FOUND|Method not found/i.test(String(snapErr?.message || snapErr))) {
-          const [st, ev] = await Promise.all([
-            rpc.status(),
-            rpc.events().catch(() => ({ events: [] as EventRow[] })),
-          ])
-          return { status: st, events: (ev && ev.events) || [] }
-        }
-        throw snapErr
-      })
-      if (id !== reqId.current) return  // superseded — leave state to the newer load
-      setStatus(snap.status)
-      setEvents(snap.events || [])
-      setError(null)
-    } catch (e: any) {
-      if (id !== reqId.current) return
-      setError(e?.message || String(e))
-    } finally {
-      if (id === reqId.current) setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    refresh()
-  }, [refresh])
+  // One data layer for the whole view: a cheap live poll plus cached
+  // diagnostics. See lib/useSplifyData.ts for why the read path is split.
+  const data = useSplifyData()
 
   return (
     <div className="splify-react-root p-1 antialiased text-foreground">
@@ -90,16 +45,27 @@ export default function App() {
 
         <div className="min-w-0 flex-1 space-y-4">
           {tab === 'status' && (
-            loading && !status ? (
-              <div className="p-8 text-center text-muted-foreground animate-pulse">{t('Loading splify…')}</div>
-            ) : error && !status ? (
-              <div className="p-8 text-center text-destructive">{t('Error:')} {error}</div>
-            ) : (
+            <>
+              {/* A failed poll must never blank a working page: the dashboard
+                  keeps rendering the last good data and the error rides above
+                  it with a retry, instead of replacing everything. */}
+              {data.error && (
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-destructive/50 px-3 py-2 text-sm text-destructive">
+                  <span className="min-w-0 truncate">{t('Error:')} {data.error}</span>
+                  <Button size="sm" variant="outline" onClick={data.refresh}>
+                    <RefreshCw className={cn('size-4', data.refreshing && 'animate-spin')} />{t('Retry')}
+                  </Button>
+                </div>
+              )}
               <StatusDashboard
-                status={status} events={events}
-                busy={busy} setBusy={setBusy} refresh={refresh}
+                live={data.live} status={data.status} events={data.events}
+                rates={data.rates} overall={data.overall}
+                diagError={data.diagError}
+                diagAge={data.diagAge} diagPending={data.diagPending}
+                refresh={data.refresh} refreshing={data.refreshing}
+                afterAction={data.afterAction}
               />
-            )
+            </>
           )}
           {tab === 'wg' && <WgPanel />}
           {tab === 'api' && <ApiPanel />}

@@ -320,5 +320,13 @@ else
 fi
 [ -x /usr/local/sbin/splify-failover ] && /usr/local/sbin/splify-failover >/dev/null 2>&1 || true
 
+# Everything the diagnostics report on (sets, firewall, routes, dnsmasq drop-in)
+# just changed, so the cached snapshot the dashboard reads is now wrong. Kick an
+# out-of-band refresh: the operator who pressed "Применить" is about to look at
+# the page, and this way the fresh sweep is already running (or done) by then
+# instead of being paid for on their click.
+[ -x /usr/local/sbin/splify-snapshot ] \
+    && /usr/local/sbin/splify-snapshot --refresh >/dev/null 2>&1 || true
+
 _STATUS="applied"; [ "$_APPLY_FAIL" = 1 ] && _STATUS="applied WITH WARNINGS (see above)"
 log "$_STATUS: mode=$MODE ipsum=$IPSUM_ENABLED zapret=$ZAPRET_ENABLED kill=$KILLSWITCH vpn_cidrs=$(echo "$VPN_CIDRS" | wc -w) direct_cidrs=$(echo "$DIRECT_CIDRS" | wc -w)"

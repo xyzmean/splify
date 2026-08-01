@@ -42,6 +42,29 @@ export interface Status {
   checks: Check[]
 }
 export interface EventRow { ts: number; kind: string; from: string; to: string; reason: string }
+
+// ── the pollable read path (splify-live) ─────────────────────────────────────
+// Everything that changes second-to-second — state, per-tunnel handshake and
+// cumulative rx/tx — with none of the diagnostic sweep's cost (~0.2s vs 4-24s
+// for a doctor run; see splify-live's header comment). `diagnostics` describes
+// the CACHED snapshot: how old it is and whether a refresh is in flight, which
+// is how the dashboard knows when to pull fresh diagnostics without polling
+// them.
+export interface LiveEndpoint {
+  iface: string; type: string; priority: string; present: boolean
+  handshake_age: number; rx: number; tx: number; health: string
+}
+export interface Live {
+  ts: number
+  summary: {
+    mode: string; state: string; active_iface: string; killswitch: number
+    fail_count: number; lan_iface: string; lan_cidr: string
+    zapret_version: string; zapret_running: boolean
+    update_available: boolean; update_version: string
+  }
+  endpoints: LiveEndpoint[]
+  diagnostics: { age: number; pending: boolean; overall: Sev | '' }
+}
 export interface SingboxIface {
   iface: string; protocol: 'vless' | 'hysteria2'; server: string; port: string
   security: string; network: string; name: string
@@ -89,8 +112,12 @@ export class SplifyClient {
   // ── read path ────────────────────────────────────────────────────────────
   status(): Promise<Status> { return this.declare('status')() }
   events(): Promise<{ events: EventRow[] }> { return this.declare('events')() }
-  /** One doctor process instead of two. Prefer this on the dashboard. */
+  /** Cheap and pollable: live state + traffic counters only (see Live). */
+  live(): Promise<Live> { return this.declare('live')() }
+  /** Diagnostics, served from the backend's TTL cache — never blocks. */
   snapshot(): Promise<Snapshot> { return this.declare('snapshot')() }
+  /** Queue a fresh diagnostic sweep; returns at once, watch Live.diagnostics. */
+  snapshotRefresh(): Promise<{ queued: boolean }> { return this.declare('snapshot_refresh')() }
 
   // ── config / wg / singbox ────────────────────────────────────────────────
   // reveal=1 returns private keys → write-gated method (kept out of the read ACL).

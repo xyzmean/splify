@@ -105,13 +105,25 @@ rebuild_nozapret() {
 }
 
 # ---- ipsum set self-heal (live set drained by a fw4 reload) -----------------
+# This runs on EVERY tick, which is why it must not count the set. It used to:
+# `nft list set` on the ipsum set (24k prefixes) expands every interval into text
+# for ~50MB of RSS — every 180s, forever, on a router with ~96MB free. Instead
+# probe two members from the source list (see set_healthy): a drained set fails
+# the first probe, a load interrupted part-way fails the last one, and a healthy
+# set costs two O(1) kernel lookups.
 ensure_ipsum() {
     [ "$IPSUM_ENABLED" = "1" ] || return 0
-    [ -s "$IPSUM_NFT_FILE" ] || { warn "ipsum nft file missing: $IPSUM_NFT_FILE"; return 1; }
-    _cnt=$(set_count "$IPSUM_TABLE" "$IPSUM_SET")
-    [ "${_cnt:-0}" -ge "$IPSUM_MIN_COUNT" ] && return 0
-    log "ipsum set has $_cnt (<$IPSUM_MIN_COUNT), reloading"
-    nft -f "$IPSUM_NFT_FILE" 2>/dev/null && return 0
+    [ -s "$IPSUM_FILE" ] || { warn "ipsum list missing: $IPSUM_FILE"; return 1; }
+    set_healthy "$IPSUM_TABLE" "$IPSUM_SET" "$IPSUM_FILE" && return 0
+    log "ipsum set drained or incomplete, reloading from $IPSUM_FILE"
+    nft_load_set "$IPSUM_TABLE" "$IPSUM_SET" "$IPSUM_FILE"
+    _ei_rc=$?
+    [ "$_ei_rc" = 0 ] && return 0
+    # rc=2 — the list does not fit in this router's memory. nft_load_set has
+    # already said so (throttled) and splify-doctor reports it as an actionable
+    # finding. Retrying every tick is what turned this into an OOM reboot LOOP on
+    # a 58MB box, so treat it as a settled condition, not a transient failure.
+    [ "$_ei_rc" = 2 ] && return 0
     warn "ipsum reload failed"; return 1
 }
 
@@ -119,11 +131,12 @@ ensure_ipsum() {
 # carries the direct exception; replay it if a fw4 reload drained the live set.
 ensure_ru() {
     [ "$MODE" = "full" ] && [ "$RU_ENABLED" = "1" ] || return 0
-    [ -s "$RU_NFT_FILE" ] || return 0
-    nft list set "$RU_TABLE" "$RU_SET" >/dev/null 2>&1 || return 0
-    _cnt=$(set_count "$RU_TABLE" "$RU_SET")
-    [ "${_cnt:-0}" -ge "$RU_MIN_COUNT" ] && return 0
-    nft -f "$RU_NFT_FILE" 2>/dev/null || true
+    [ -s "$RU_FILE" ] || return 0
+    # Terse list: does the set exist at all, without dumping 40k+ elements.
+    nft -t list set "$RU_TABLE" "$RU_SET" >/dev/null 2>&1 || return 0
+    set_healthy "$RU_TABLE" "$RU_SET" "$RU_FILE" && return 0
+    log "ru set drained or incomplete, reloading from $RU_FILE"
+    nft_load_set "$RU_TABLE" "$RU_SET" "$RU_FILE" || true
 }
 
 # ---- routing ----------------------------------------------------------------
@@ -266,7 +279,7 @@ tick() {
 LIST_HEAL_STAMP="/var/run/splify-list-heal.stamp"
 LIST_HEAL_EVERY=600
 lists_missing() {
-    [ "$IPSUM_ENABLED" = "1" ] && [ -n "$IPSUM_URL" ] && [ ! -s "$IPSUM_NFT_FILE" ] && return 0
+    [ "$IPSUM_ENABLED" = "1" ] && [ -n "$IPSUM_URL" ] && [ ! -s "$IPSUM_FILE" ] && return 0
     [ "$RU_ENABLED" = "1" ] && [ -n "$RU_URL" ] && [ ! -s "$RU_FILE" ] && return 0
     [ -n "$VPN_DOMAINS_URL" ] && [ ! -s "$DOMAINS_VPN_FILE" ] && return 0
     [ -n "$IGNORE_DOMAINS_URL" ] && [ ! -s "$DOMAINS_IGNORE_FILE" ] && return 0
@@ -280,7 +293,7 @@ heal_lists() {
     echo "$_now" > "$LIST_HEAL_STAMP" 2>/dev/null || true
     log "self-heal: fetching missing list(s) in background"
     ( export SPLIFY_WAIT_LOCK=1
-      [ "$IPSUM_ENABLED" = "1" ] && [ -n "$IPSUM_URL" ] && [ ! -s "$IPSUM_NFT_FILE" ] \
+      [ "$IPSUM_ENABLED" = "1" ] && [ -n "$IPSUM_URL" ] && [ ! -s "$IPSUM_FILE" ] \
           && /usr/local/sbin/splify-update-ipsum
       [ "$RU_ENABLED" = "1" ] && [ -n "$RU_URL" ] && [ ! -s "$RU_FILE" ] \
           && /usr/local/sbin/splify-update-ru

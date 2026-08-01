@@ -11,10 +11,17 @@
 # Methods taking a JSON document take it as a STRING param `data` (or `conf`),
 # which the plugin pipes straight into splify-ctl — no re-serialisation, no jq.
 #
+#   live          -> splify-live              (CHEAP: state + counters only, no
+#                  set counting / firewall walk / list greps. This is the one
+#                  method the dashboard may poll — doctor costs 4-24s on real
+#                  hardware, which is both unpollable and above rpcd's own -t 30
+#                  timeout under load)
 #   status        -> splify-doctor --json      (diagnostics object)
-#   snapshot      -> splify-doctor --snapshot  (status + events in ONE process:
-#                  saves a second doctor fork the dashboard used to pay when it
-#                  polled status and events as two separate ubus calls)
+#   snapshot      -> splify-snapshot           (diagnostics from a TTL cache,
+#                  serve-stale-while-revalidate — see that script for why the
+#                  read path must never block on a full doctor sweep)
+#   snapshot_refresh -> splify-snapshot --refresh (queue an out-of-band sweep;
+#                  returns immediately, the UI notices via live.diagnostics)
 #   events        -> { "events": [ … ] }       (failover timeline)
 #   action        -> run one allow-listed maintenance op
 #   config_export -> full node snapshot (keys masked unless reveal=1)
@@ -31,12 +38,16 @@
 
 DOCTOR=/usr/local/sbin/splify-doctor
 CTL=/usr/local/sbin/splify-ctl
+LIVE=/usr/local/sbin/splify-live
+SNAPSHOT=/usr/local/sbin/splify-snapshot
 
 case "$1" in
     list)
         json_init
+        json_add_object "live";    json_close_object
         json_add_object "status";  json_close_object
         json_add_object "snapshot"; json_close_object
+        json_add_object "snapshot_refresh"; json_close_object
         json_add_object "events";  json_close_object
         json_add_object "action"
             json_add_string "name" ""
@@ -89,10 +100,23 @@ case "$1" in
                 # render (severity is carried in the JSON itself).
                 "$DOCTOR" --json || true
                 ;;
+            live)
+                # The pollable read path. Must stay fast — see splify-live.
+                "$LIVE" || true
+                ;;
             snapshot)
-                # Combined {"status":{...},"events":[...]} from a single doctor
-                # process. Same exit-code normalisation as `status` (see above).
-                "$DOCTOR" --snapshot || true
+                # Combined {"status":{...},"events":[...]}, served from the TTL
+                # cache (splify-snapshot) so a dashboard load never blocks on a
+                # full doctor sweep and can never hit rpcd's -t 30 timeout.
+                # Falls back to a direct doctor run on an older install where the
+                # cache script isn't present yet.
+                if [ -x "$SNAPSHOT" ]; then "$SNAPSHOT" || true
+                else "$DOCTOR" --snapshot || true; fi
+                ;;
+            snapshot_refresh)
+                # "Обновить": queue a fresh sweep, answer immediately.
+                if [ -x "$SNAPSHOT" ]; then "$SNAPSHOT" --refresh || true
+                else json_init; json_add_boolean queued 0; json_dump; fi
                 ;;
             events)
                 printf '{"events":%s}\n' "$("$DOCTOR" --events)"

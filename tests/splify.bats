@@ -28,6 +28,165 @@ setup_clean() { load_fn "$COMMON_SH" clean_ip_list; }
     [ -z "$out" ]
 }
 
+# ---- emit_nft_set_chunks: bounded `add element` commands --------------------
+# The whole point of chunking is that no single nft command carries the entire
+# list (one 44k-element command allocated 54-65MB and got OOM-killed on a 240MB
+# router, leaving the set half-loaded). These tests pin the chunk boundaries and
+# the exact command syntax nft has to accept.
+setup_chunks() {
+    load_fn "$COMMON_SH" emit_nft_set_chunks
+    NFT_CHUNK_ELEMS=2
+}
+
+@test "emit_nft_set_chunks splits into commands of at most NFT_CHUNK_ELEMS" {
+    setup_chunks
+    out="$(printf '%s\n' 1.0.0.0/8 2.0.0.0/8 3.0.0.0/8 4.0.0.0/8 5.0.0.0/8 \
+        | emit_nft_set_chunks 'inet fw4' myset)"
+    [ "$(printf '%s\n' "$out" | wc -l)" -eq 3 ]
+    [ "$(printf '%s\n' "$out" | sed -n 1p)" = 'add element inet fw4 myset { 1.0.0.0/8,2.0.0.0/8 }' ]
+    [ "$(printf '%s\n' "$out" | sed -n 2p)" = 'add element inet fw4 myset { 3.0.0.0/8,4.0.0.0/8 }' ]
+    # trailing partial chunk must still be emitted, or the tail of every list
+    # silently never reaches the kernel
+    [ "$(printf '%s\n' "$out" | sed -n 3p)" = 'add element inet fw4 myset { 5.0.0.0/8 }' ]
+}
+
+@test "emit_nft_set_chunks emits exactly one command when the list fits" {
+    setup_chunks
+    out="$(printf '%s\n' 10.0.0.0/8 | emit_nft_set_chunks 'inet zapret' nozapret)"
+    [ "$out" = 'add element inet zapret nozapret { 10.0.0.0/8 }' ]
+}
+
+@test "emit_nft_set_chunks emits nothing for an empty list" {
+    setup_chunks
+    out="$(printf '' | emit_nft_set_chunks 'inet fw4' myset)"
+    [ -z "$out" ]
+}
+
+@test "emit_nft_set_chunks covers every element exactly once across chunks" {
+    setup_chunks
+    NFT_CHUNK_ELEMS=3
+    in="$(for i in $(seq 1 10); do echo "10.0.$i.0/24"; done)"
+    out="$(printf '%s\n' "$in" | emit_nft_set_chunks 'inet fw4' myset)"
+    # strip syntax, keep the elements, and compare with the input
+    got="$(printf '%s\n' "$out" | sed 's/^add element inet fw4 myset { //; s/ }$//' | tr ',' '\n')"
+    [ "$got" = "$in" ]
+}
+
+# ---- nft_set_fits: refuse a set this router cannot hold ---------------------
+# Loading a 24k-prefix set into the kernel's rbtree took a 58MB Mi Router 4C into
+# an OOM REBOOT, and the failover tick then replayed the same load — a boot loop.
+# So the size check has to be a hard gate, and its arithmetic is worth pinning.
+setup_fits() {
+    load_fn "$COMMON_SH" nft_set_fits
+    # Per-element cost of working with a set: the kernel node plus libnftables'
+    # whole-table cache (~1.1KB/element, measured — see common.sh).
+    NFT_ELEM_BYTES=800
+    NFT_MEM_RESERVE_KB=10240
+}
+
+@test "nft_set_fits accepts a list a normal router can hold" {
+    setup_fits
+    mem_available_kb() { echo 102400; }   # 100MB free (filogic-class box)
+    run nft_set_fits 24000                # ~19MB
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# Regression: this exact load was MEASURED to succeed (74 648 prefixes, 71MB peak,
+# 85MB free). An estimate that refuses it silently drops the zapret bypass on a
+# perfectly healthy router, which is why the check does not add the reserve on top.
+@test "nft_set_fits allows the measured 74k load on a box with 85MB free" {
+    setup_fits
+    mem_available_kb() { echo 87040; }    # 85MB
+    run nft_set_fits 74648                # ~58MB
+    [ "$status" -eq 0 ]
+}
+
+@test "nft_set_fits refuses everything once memory is under the floor" {
+    setup_fits
+    mem_available_kb() { echo 8192; }     # 8MB, below the 10MB floor
+    run nft_set_fits 100
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"floor"* ]]
+}
+
+@test "nft_set_fits refuses the list that OOM-rebooted the 4C" {
+    setup_fits
+    mem_available_kb() { echo 13312; }    # 13MB free, as measured on the Mi 4C
+    run nft_set_fits 30726                # ~24MB: the exact list that took it down
+    [ "$status" -ne 0 ]
+    # The refusal must explain itself: it goes verbatim into the log and into the
+    # dashboard's diagnostics, where it is the operator's only clue.
+    [[ "$output" == *"30726 elements"* ]]
+    [[ "$output" == *"available"* ]]
+}
+
+@test "nft_set_fits does not block when MemAvailable is unreadable" {
+    setup_fits
+    mem_available_kb() { echo ""; }
+    run nft_set_fits 44000
+    [ "$status" -eq 0 ]
+}
+
+@test "nft_set_fits scales with element count on the same box" {
+    setup_fits
+    mem_available_kb() { echo 40960; }    # 40MB free
+    run nft_set_fits 4000                 # ~3MB -> fits
+    [ "$status" -eq 0 ]
+    run nft_set_fits 120000               # ~94MB -> does not
+    [ "$status" -ne 0 ]
+}
+
+# ---- set_healthy: "does the kernel still hold what we loaded?" ---------------
+# Answered from a stamp, never by reading the set: a single `nft get element`
+# against a 14k-element set measured 15MB on a box with 13MB free, because
+# libnftables caches the whole table first. The stamp pairs the nft handles
+# (which change when fw4 replaces the table) with the source list identity.
+setup_healthy() {
+    load_fn "$COMMON_SH" set_healthy
+    _set_stamp_file() { echo "$BATS_TEST_TMPDIR/stamp.$1"; }
+    _set_ident() { echo "$FAKE_IDENT"; }
+    _src_ident() { echo "$FAKE_SRC"; }
+    FAKE_IDENT="1:43"; FAKE_SRC="500:1000"
+    LIST="$BATS_TEST_TMPDIR/list.lst"; echo "10.0.0.0/8" > "$LIST"
+}
+
+@test "set_healthy is false with no stamp (fresh boot: tmpfs lost it)" {
+    setup_healthy
+    run set_healthy 'inet fw4' myset "$LIST"
+    [ "$status" -ne 0 ]
+}
+
+@test "set_healthy is true when the stamp matches handles and source" {
+    setup_healthy
+    echo "1:43 500:1000" > "$(_set_stamp_file myset)"
+    run set_healthy 'inet fw4' myset "$LIST"
+    [ "$status" -eq 0 ]
+}
+
+@test "set_healthy is false after an fw4 reload changed the handles" {
+    setup_healthy
+    echo "1:43 500:1000" > "$(_set_stamp_file myset)"
+    FAKE_IDENT="2:97"     # fw4 replaced the table -> the set was drained
+    run set_healthy 'inet fw4' myset "$LIST"
+    [ "$status" -ne 0 ]
+}
+
+@test "set_healthy is false after the source list was refreshed" {
+    setup_healthy
+    echo "1:43 500:1000" > "$(_set_stamp_file myset)"
+    FAKE_SRC="700:2000"   # new download -> the live set is stale
+    run set_healthy 'inet fw4' myset "$LIST"
+    [ "$status" -ne 0 ]
+}
+
+@test "set_healthy is false when the source list is missing entirely" {
+    setup_healthy
+    echo "1:43 500:1000" > "$(_set_stamp_file myset)"
+    run set_healthy 'inet fw4' myset "$BATS_TEST_TMPDIR/nope.lst"
+    [ "$status" -ne 0 ]
+}
+
 # ---- fw_bool: mirror fw4's parse_bool --------------------------------------
 @test "fw_bool true values" {
     load_fn "$COMMON_SH" fw_bool

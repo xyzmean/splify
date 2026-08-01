@@ -1,42 +1,77 @@
-import { useMemo, useRef } from 'react'
-import type { Status, EventRow, Check, Sev } from '@/lib/rpc'
+import { useMemo, useState } from 'react'
+import type { Status, EventRow, Check, Sev, Live, LiveEndpoint } from '@/lib/rpc'
 import { rpc } from '@/lib/rpc'
+import type { Rate } from '@/lib/useSplifyData'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { SkeletonRows } from '@/components/ui/skeleton'
+import { useConfirm } from '@/components/ui/confirm'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
 import { notify } from '@/lib/notify'
-import { t } from '@/lib/i18n'
+import { t, tCheck, tFix } from '@/lib/i18n'
 import {
   ShieldCheck, AlertTriangle, Ban, Globe, RefreshCw, Play, RotateCw, Power,
   Download, Wrench, ArrowRight, Check as CheckIcon, X as XIcon, Minus, Rocket,
-  Activity, ListChecks, Network, History, Stethoscope, ExternalLink,
+  Activity, Stethoscope, ExternalLink, ArrowDown, ArrowUp, HelpCircle,
+  Network, ListChecks, History,
 } from 'lucide-react'
-import {
-  fmtAge, fmtRate, fmtWhen, pathLabel, EVENT_META, ratesFor, type RateSample,
-} from '@/lib/format'
+import { fmtAge, fmtRate, fmtWhen, EVENT_META } from '@/lib/format'
 
-// Severity → semantic styling. One source of truth so the hero, badges and
-// diagnostics all read identically.
-const SEV: Record<Sev, { text: string; ring: string; badge: string }> = {
-  OK:      { text: 'text-success',     ring: 'border-l-success',     badge: 'bg-success text-white border-transparent' },
-  WARN:    { text: 'text-warning',     ring: 'border-l-warning',     badge: 'bg-warning text-white border-transparent' },
-  FIXABLE: { text: 'text-warning',     ring: 'border-l-warning',     badge: 'bg-warning/80 text-white border-transparent' },
-  FAIL:    { text: 'text-destructive', ring: 'border-l-destructive', badge: 'bg-destructive text-white border-transparent' },
+// Severity → styling AND a human label. The raw enum (OK/WARN/FIXABLE/FAIL) used
+// to be printed verbatim on the page; "FIXABLE" tells a router owner nothing
+// about whether they have to do something.
+const SEV: Record<Sev, { text: string; ring: string; badge: string; label: string }> = {
+  OK:      { text: 'text-success',     ring: 'border-l-success',     badge: 'bg-success text-white border-transparent',     label: t('sev.OK') },
+  WARN:    { text: 'text-warning',     ring: 'border-l-warning',     badge: 'bg-warning text-white border-transparent',     label: t('sev.WARN') },
+  FIXABLE: { text: 'text-warning',     ring: 'border-l-warning',     badge: 'bg-warning/80 text-white border-transparent',  label: t('sev.FIXABLE') },
+  FAIL:    { text: 'text-destructive', ring: 'border-l-destructive', badge: 'bg-destructive text-white border-transparent', label: t('sev.FAIL') },
 }
 
-function stateIcon(state: string) {
-  if (/^vpn:/.test(state)) return ShieldCheck
-  if (state === 'zapret') return AlertTriangle
-  if (state === 'killswitch') return Ban
-  return Globe
+// ── the one answer this page exists to give ──────────────────────────────────
+// Plain language first, jargon second. `state` is vpn:<iface> | zapret |
+// killswitch | wan (written by the failover daemon — see common.sh write_state).
+function heroFor(state: string, mode: string, zapret: string) {
+  if (/^vpn:/.test(state)) {
+    const via = state.replace(/^vpn:/, '')
+    return {
+      icon: ShieldCheck,
+      tone: 'text-success',
+      title: t('Protected'),
+      detail: mode === 'full'
+        ? t('All traffic goes through the tunnel %s; the exceptions from your lists go direct.').replace('%s', via)
+        : t('Blocked sites go through the tunnel %s. Everything else goes direct, at full speed.').replace('%s', via),
+    }
+  }
+  if (state === 'zapret') {
+    return {
+      icon: AlertTriangle,
+      tone: 'text-warning',
+      title: t('No tunnel — DPI bypass is carrying it'),
+      detail: t('Every tunnel is unreachable, so blocked sites are being opened by %s instead. That works, but it is slower and less reliable than a tunnel.').replace('%s', zapret || 'zapret'),
+    }
+  }
+  if (state === 'killswitch') {
+    return {
+      icon: Ban,
+      tone: 'text-destructive',
+      title: t('Traffic blocked (kill switch)'),
+      detail: t('No tunnel is available, and because the kill switch is on, traffic that should be protected is dropped instead of leaking to the open internet.'),
+    }
+  }
+  return {
+    icon: Globe,
+    tone: 'text-muted-foreground',
+    title: t('Protection is off'),
+    detail: t('Everything goes straight to the internet through your provider — nothing is routed through a tunnel.'),
+  }
 }
 
 function SevBadge({ sev }: { sev: Sev }) {
-  return <Badge className={SEV[sev].badge}>{sev}</Badge>
+  return <Badge className={SEV[sev].badge}>{SEV[sev].label}</Badge>
 }
 
 function YesNo({ v }: { v: boolean }) {
@@ -45,7 +80,6 @@ function YesNo({ v }: { v: boolean }) {
     : <XIcon className="size-4 text-destructive" />
 }
 
-// Mirrors YesNo: an icon carries the meaning, not colour alone.
 function HealthState({ health }: { health: string }) {
   if (health === 'ok' || health === 'OK') return <span className="flex items-center gap-1 text-success"><CheckIcon className="size-4" />{t('ок')}</span>
   if (health === 'idle') return <span className="flex items-center gap-1 text-muted-foreground"><Minus className="size-4" />{t('простой')}</span>
@@ -53,72 +87,127 @@ function HealthState({ health }: { health: string }) {
   return <span className="text-muted-foreground">—</span>
 }
 
+// A term the page cannot avoid, with its explanation one hover away.
+function Term({ children, hint }: { children: React.ReactNode; hint: string }) {
+  return (
+    <span className="inline-flex items-center gap-1" title={hint}>
+      {children}
+      <HelpCircle className="size-3 shrink-0 text-muted-foreground/60" />
+    </span>
+  )
+}
+
+// One content block. Every section on this page is one of these, so the corner
+// radius, padding and header weight are identical everywhere — which is exactly
+// what collapsible panels broke: their header kept the card radius while the body
+// below it was square.
+function Section({ title, icon: Icon, right, children }: {
+  title: string
+  icon: React.ComponentType<{ className?: string }>
+  right?: React.ReactNode
+  children: React.ReactNode
+}) {
+  return (
+    <Card>
+      <CardHeader className="flex-row items-center justify-between gap-3 space-y-0 px-5 pb-2 pt-3.5">
+        <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal">
+          <Icon className="size-4 text-muted-foreground" />{title}
+        </CardTitle>
+        {right && <span className="text-xs text-muted-foreground">{right}</span>}
+      </CardHeader>
+      <CardContent className="px-5 pb-4 pt-2">{children}</CardContent>
+    </Card>
+  )
+}
+
+// A tunnel row as displayed: live numbers merged with the firewall facts only the
+// diagnostic sweep knows.
+interface Row extends LiveEndpoint {
+  zone?: string
+  masq?: boolean
+  forwarding?: boolean
+  fwKnown: boolean
+}
+
 interface Props {
+  live: Live | null
   status: Status | null
   events: EventRow[]
-  busy: string
-  setBusy: (s: string) => void
+  rates: Record<string, Rate>
+  overall: Sev
+  diagError: string | null
+  diagAge: number
+  diagPending: boolean
   refresh: () => void
+  refreshing: boolean
+  afterAction: () => void
+}
+
+// Skeleton while the diagnostics half is in flight; an explicit message with a
+// retry once it has actually failed. Never a skeleton that spins forever.
+function Pending({ error, rows, onRetry }: { error: string | null; rows: number; onRetry: () => void }) {
+  if (!error) return <SkeletonRows rows={rows} />
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+      <span className="text-destructive">{t('Diagnostics unavailable:')} {error}</span>
+      <Button size="sm" variant="outline" onClick={onRetry}><RefreshCw className="size-4" />{t('Retry')}</Button>
+    </div>
+  )
 }
 
 export default function StatusDashboard(p: Props) {
-  const { status, events } = p
-  const ratesRef = useRef<RateSample>({})
+  const { live, status, events, rates, overall } = p
+  const [busy, setBusy] = useState('')
+  const [ask, confirmDialog] = useConfirm()
 
-  // ⚡ Bolt: Memoize derived state and rate calculations.
-  // This prevents expensive array operations (filtering/reducing) on every re-render
-  // (e.g. when 'busy' state changes) and fixes a bug where ratesFor would artificially
-  // drop to 0 if re-evaluated between status polls.
-  const derived = useMemo(() => {
-    if (!status || !status.summary) return null
-    const s = status.summary
-    const now = Date.now()
-    const eps = status.endpoints || []
-    const rates: Record<string, { rx: number; tx: number }> = {}
-    eps.forEach((e) => { rates[e.iface] = ratesFor(e, now, ratesRef.current) })
-
-    const overall = status.overall || 'FAIL'
-    const path = pathLabel(s.state || '')
-    const HeroIcon = stateIcon(s.state || '')
-    const isOn = /^vpn:/.test(s.state) || s.state === 'zapret' || s.state === 'killswitch'
-
-    // ── KPI aggregates for the stat blocks ──────────────────────
-    const activeEp = eps.find((e) => s.state === 'vpn:' + e.iface)
-    const totRx = eps.reduce((a, e) => a + (rates[e.iface]?.rx || 0), 0)
-    const totTx = eps.reduce((a, e) => a + (rates[e.iface]?.tx || 0), 0)
-    const onlineTun = eps.filter((e) => e.present).length
-    const lists = status.lists || []
+  const d = useMemo(() => {
+    const s = live?.summary
+    const eps: LiveEndpoint[] = live?.endpoints || []
+    const snapEps = status?.endpoints || []
+    const rows: Row[] = eps.map((e) => {
+      const se = snapEps.find((x) => x.iface === e.iface)
+      return { ...e, zone: se?.zone, masq: se?.masq, forwarding: se?.forwarding, fwKnown: !!se }
+    })
+    const state = s?.state || ''
+    const activeEp = rows.find((e) => state === 'vpn:' + e.iface)
+    const lists = status?.lists || []
     const enabledLists = lists.filter((l) => l.enabled)
-    const okLists = enabledLists.filter((l) => l.ok).length
+    return {
+      s, rows, state, activeEp, lists, enabledLists,
+      totRx: rows.reduce((a, e) => a + (rates[e.iface]?.rx || 0), 0),
+      totTx: rows.reduce((a, e) => a + (rates[e.iface]?.tx || 0), 0),
+      onlineTun: rows.filter((e) => e.present).length,
+      okLists: enabledLists.filter((l) => l.ok).length,
+      hero: heroFor(state, s?.mode || '', s?.zapret_version || ''),
+      isOn: /^vpn:/.test(state) || state === 'zapret' || state === 'killswitch',
+    }
+  }, [live, status, rates])
 
-    return { s, eps, rates, overall, path, HeroIcon, isOn, activeEp, totRx, totTx, onlineTun, lists, enabledLists, okLists }
-  }, [status])
-
-  const derivedProps = derived
-
-  if (!derivedProps) {
+  if (!d.s) {
     return (
-      <Card>
-        <CardContent className="p-8 text-center text-destructive">
-          Диагностика недоступна — служба splify установлена и запущена?
-        </CardContent>
-      </Card>
+      <div className="space-y-4">
+        <Card className="border-l-4 border-l-muted"><CardContent className="p-5"><SkeletonRows rows={2} /></CardContent></Card>
+        <Card><CardContent className="p-5"><SkeletonRows rows={3} /></CardContent></Card>
+      </div>
     )
   }
 
-  const { s, eps, rates, overall, path, HeroIcon, isOn, activeEp, totRx, totTx, onlineTun, lists, enabledLists, okLists } = derivedProps
+  const { s, rows, hero, isOn, activeEp, totRx, totTx, lists, enabledLists, okLists, onlineTun } = d
+  const HeroIcon = hero.icon
+  const checks = (status?.checks || []).filter((c) => c.severity !== 'OK')
+  const haveDiag = !!status
+  const firstRun = rows.length === 0
 
-  async function run(action: string, confirmMsg?: string, toast?: string) {
-    if (confirmMsg && !window.confirm(confirmMsg)) return
-    p.setBusy(action)
+  async function run(action: string, toast?: string) {
+    setBusy(action)
     try {
       const res = await rpc.action(action)
       notify((toast || action) + (res?.code !== 0 && res?.stdout ? ': ' + res.stdout : ''), res?.code === 0 ? 'info' : 'warning')
-      p.refresh()
+      p.afterAction()
     } catch (e: any) {
       notify(action + ': ' + (e?.message || e), 'error')
     } finally {
-      p.setBusy('')
+      setBusy('')
     }
   }
 
@@ -126,215 +215,199 @@ export default function StatusDashboard(p: Props) {
     const m = /^([A-Za-z0-9_.-]+):/.exec(c.message || '')
     if (!m) return
     const iface = m[1]
-    if (!window.confirm(t('Create/repair the firewall zone for “%s” (accept-all + masquerading + lan↔tunnel↔wan forwarding) and reload the firewall?').replace('%s', iface))) return
-    p.setBusy('fw_fix')
+    if (!await ask({
+      title: t('Fix the firewall for %s?').replace('%s', iface),
+      body: t('Create/repair the firewall zone for “%s” (accept-all + masquerading + lan↔tunnel↔wan forwarding) and reload the firewall?').replace('%s', iface),
+      confirmLabel: t('Fix'), tone: 'default',
+    })) return
+    setBusy('fw_fix')
     try {
       const res = await rpc.action('fw_fix', iface)
-      const okMsg = t('Firewall fixed for %s').replace('%s', iface)
-      const errMsg = t('Could not fix firewall for %s').replace('%s', iface)
-      notify((res?.code === 0 ? okMsg : errMsg) + (res?.stdout ? ': ' + res.stdout : ''), res?.code === 0 ? 'info' : 'warning')
-      p.refresh()
+      notify((res?.code === 0 ? t('Firewall fixed for %s') : t('Could not fix firewall for %s')).replace('%s', iface)
+        + (res?.stdout ? ': ' + res.stdout : ''), res?.code === 0 ? 'info' : 'warning')
+      p.afterAction()
     } catch (e: any) {
       notify(t('Firewall fix error:') + ' ' + (e?.message || e), 'error')
     } finally {
-      p.setBusy('')
+      setBusy('')
     }
   }
 
-  // A toolbar action button that shows a spinner while its action is running.
-  function ActBtn({ a, label, icon: Icon, variant = 'outline', confirm, toast, className }: {
-    a: string; label: string; icon: React.ComponentType<{ className?: string }>
-    variant?: 'default' | 'outline' | 'secondary' | 'destructive' | 'ghost'
-    confirm?: string; toast?: string; className?: string
+  function MaintBtn({ a, label, icon: Icon, toast }: {
+    a: string; label: string; icon: React.ComponentType<{ className?: string }>; toast?: string
   }) {
     return (
-      <Button size="sm" variant={variant} className={className} disabled={!!p.busy}
-        onClick={() => run(a, confirm, toast)}>
-        {p.busy === a ? <RefreshCw className="size-4 animate-spin" /> : <Icon className="size-4" />}
-        {label}
+      <Button size="sm" variant="outline" disabled={!!busy} onClick={() => run(a, toast)}>
+        {busy === a ? <RefreshCw className="size-4 animate-spin" /> : <Icon className="size-4" />}{label}
       </Button>
     )
   }
 
-  const checks = (status!.checks || []).filter((c) => c.severity !== 'OK')
-  const firstRun = eps.length === 0
-
   return (
     <div className="space-y-4">
-      {/* ── Hero + KPI (compact single-row header) ─────────────── */}
+      {confirmDialog}
+
+      {/* ── 1. WHAT IS HAPPENING, in one sentence ─────────────────────── */}
       <Card className={cn('border-l-4', SEV[overall].ring)}>
-        <CardContent className="flex flex-wrap items-center gap-4 p-4">
-          <div className="flex min-w-[240px] flex-1 items-center gap-3">
-            <div className={cn('flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted', SEV[overall].text)}>
-              <HeroIcon className="size-5" />
-            </div>
-            <div className="min-w-0">
-              <div className="truncate text-sm font-semibold tracking-tight">{path.title}</div>
-              <div className="mt-0.5 text-xs text-muted-foreground">
-                {t('Mode')} <b className="text-foreground">{s.mode || '?'}</b> · {t('Kill switch')} <b className="text-foreground">{String(s.killswitch) === '1' ? t('on') : t('off')}</b>
-                {' · DPI: '}{s.zapret_version
-                  ? <b className="text-foreground">{s.zapret_version}</b>
-                  : <b className="text-muted-foreground/70">{t('none')}</b>}
+        <CardContent className="p-5">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="flex min-w-[260px] flex-1 items-start gap-3">
+              <div className={cn('flex size-11 shrink-0 items-center justify-center rounded-lg bg-muted', hero.tone)}>
+                <HeroIcon className="size-6" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-base font-semibold tracking-tight">{hero.title}</h2>
+                  {haveDiag && overall !== 'OK' && <SevBadge sev={overall} />}
+                </div>
+                <p className="mt-1 max-w-xl text-sm text-muted-foreground">{hero.detail}</p>
               </div>
             </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
-            <MiniStat label={t('Tunnel')} value={activeEp ? activeEp.iface : '—'}
-              sub={activeEp ? t('handshake') + ' ' + fmtAge(activeEp.handshake_age) : undefined} />
-            <MiniStat label={t('RX')} value={fmtRate(totRx)} />
-            <MiniStat label={t('TX')} value={fmtRate(totTx)} />
-            <MiniStat label={t('Failures')} value={String(s.fail_count ?? '?')} tone={(s.fail_count ?? 0) > 0 ? SEV.WARN.text : undefined} />
-            <MiniStat label={t('Lists OK')} value={`${okLists}/${enabledLists.length}`} tone={okLists < enabledLists.length ? SEV.WARN.text : undefined} />
-          </div>
-
-          <div className="flex items-center gap-2">
-            <SevBadge sev={overall} />
-            <Button size="sm" disabled={!!p.busy}
+            <Button size="sm" disabled={!!busy}
               variant={isOn ? 'outline' : 'default'}
               className={isOn
                 ? 'border-destructive text-destructive hover:bg-destructive/10'
                 : 'bg-success text-white hover:bg-success/90'}
-              onClick={() => run(isOn ? 'off' : 'on',
-                isOn ? t('Turn off split routing? All LAN traffic will go via WAN until the service re-enables it.') : undefined,
-                isOn ? t('Split routing disabled') : t('Split routing enabled'))}>
-              <Power className="size-4" />{isOn ? t('Disable') : t('Enable')}
+              onClick={async () => {
+                if (isOn && !await ask({
+                  title: t('Turn off protection?'),
+                  body: t('Turn off split routing? All LAN traffic will go via WAN until the service re-enables it.'),
+                  confirmLabel: t('Disable'),
+                })) return
+                run(isOn ? 'off' : 'on', isOn ? t('Split routing disabled') : t('Split routing enabled'))
+              }}>
+              {busy === 'on' || busy === 'off'
+                ? <RefreshCw className="size-4 animate-spin" />
+                : <Power className="size-4" />}
+              {isOn ? t('Turn off protection') : t('Turn on protection')}
             </Button>
+          </div>
+
+          {/* Signs of life, on one line: speed now, which tunnel, how it routes. */}
+          <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 border-t pt-3 text-sm">
+            <span className="flex items-center gap-1.5" title={t('Live speed through the tunnels')}>
+              <ArrowDown className="size-4 text-success" /><b className="font-semibold">{fmtRate(totRx)}</b>
+              <ArrowUp className="ml-2 size-4 text-info" /><b className="font-semibold">{fmtRate(totTx)}</b>
+            </span>
+            <span className="text-muted-foreground">
+              {t('Tunnel')}: {activeEp ? <b className="text-foreground">{activeEp.iface}</b> : t('none')}
+              {activeEp && <> · <Term hint={t('Handshake hint')}>{t('handshake')}</Term> {fmtAge(activeEp.handshake_age)}</>}
+            </span>
+            <span className="text-muted-foreground">
+              {t('Mode')}: <b className="text-foreground">{t('mode.' + (s.mode || ''))}</b>
+            </span>
+            <span className="text-muted-foreground">
+              <Term hint={t('Kill switch hint')}>{t('Kill switch')}</Term>{' '}
+              <b className="text-foreground">{String(s.killswitch) === '1' ? t('on') : t('off')}</b>
+            </span>
+            <span className="text-muted-foreground">
+              <Term hint={t('DPI bypass hint')}>{t('DPI bypass')}</Term>{' '}
+              {s.zapret_version
+                ? <b className={s.zapret_running ? 'text-foreground' : 'text-warning'}>{s.zapret_version}{s.zapret_running ? '' : ' (' + t('stopped') + ')'}</b>
+                : <b className="text-muted-foreground/70">{t('not installed')}</b>}
+            </span>
+            {(s.fail_count ?? 0) > 0 && (
+              <span className={SEV.WARN.text}>{t('Failures')}: <b>{s.fail_count}</b></span>
+            )}
           </div>
         </CardContent>
       </Card>
 
-      {/* ── Toolbar (carded, so it reads as one control block) ── */}
+      {/* ── 2. CONTROLS, immediately under the status they act on ──────── */}
       <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card/50 p-2 shadow-sm">
-        <Button size="sm" variant="outline" className="border-dashed bg-transparent hover:bg-muted" disabled={!!p.busy} onClick={p.refresh}>
-          <RefreshCw className="size-4" />{t('Refresh')}
+        <Button size="sm" disabled={!!busy} className="shadow-sm"
+          title={t('Apply the splify configuration now')}
+          onClick={() => run('apply', t('Configuration applied'))}>
+          {busy === 'apply' ? <RefreshCw className="size-4 animate-spin" /> : <Play className="size-4" />}
+          {t('Apply settings')}
         </Button>
-        <ActBtn a="apply" label={t('Apply')} icon={Play} variant="default" className="shadow-sm" toast={t('Configuration applied')} />
-        <ActBtn a="restart" label={t('Restart')} icon={RotateCw} variant="secondary" className="shadow-sm" toast={t('Service restarted')} />
-
-        <div className="ml-2 flex items-center gap-1 rounded-lg bg-muted/50 p-1">
-          <span className="px-2 text-xs font-medium text-muted-foreground">{t('Lists')}</span>
-          <ActBtn a="update_ipsum" label="ipsum" icon={Download} variant="ghost" className="h-7 px-2 text-xs" toast={t('ipsum updated')} />
-          <ActBtn a="update_ru" label="ru/cn" icon={Download} variant="ghost" className="h-7 px-2 text-xs" toast={t('ru/cn updated')} />
-          <ActBtn a="update_domains" label="домены" icon={Download} variant="ghost" className="h-7 px-2 text-xs" toast={t('domains updated')} />
-        </div>
-
+        <Button size="sm" variant="outline" className="border-dashed bg-transparent hover:bg-muted"
+          disabled={!!busy} onClick={p.refresh} title={t('Re-run diagnostics')}>
+          <RefreshCw className={cn('size-4', p.refreshing && 'animate-spin')} />{t('Refresh')}
+        </Button>
         <div className="flex-1" />
-
-        <ActBtn a="disable" label={t('Emergency disable')} icon={Power} variant="destructive"
-          className="shadow-sm"
-          confirm={t('Disable split routing now? All LAN traffic will exit via WAN until the service re-enables it (or you stop it).')}
-          toast={t('Split routing disabled')} />
+        <span className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+          <span className={cn('size-1.5 rounded-full', p.refreshing || p.diagPending ? 'bg-warning' : 'bg-success')} />
+          {p.diagPending
+            ? t('Diagnostics: refreshing…')
+            : p.diagAge >= 0
+              ? t('Diagnostics: %s old').replace('%s', fmtAge(p.diagAge))
+              : t('Diagnostics: loading…')}
+        </span>
       </div>
 
-      {/* ── Update notification ──────────────────────────────── */}
+      {/* ── notices ────────────────────────────────────────────────────── */}
       {s.update_available && (
-        <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-1.5 text-sm text-primary">
-          <div className="flex items-center gap-2">
-            <Download className="size-4" />
-            <span>{t('Update available:')} <b className="font-medium">{s.update_version}</b></span>
-          </div>
-          <Button size="sm" variant="ghost" className="h-7 hover:bg-primary/10 px-2" onClick={() => run('update', t('Install update now? This will download and install the latest version in the background. The router might momentarily disconnect.'), t('Update started in the background'))} disabled={!!p.busy}>
-            {p.busy === 'update' ? <RefreshCw className="size-3 animate-spin mr-1.5" /> : null}
-            {t('Install')}
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-primary/20 bg-primary/5 px-4 py-2 text-sm text-primary">
+          <span className="flex items-center gap-2">
+            <Download className="size-4" />{t('Update available:')} <b className="font-medium">{s.update_version}</b>
+          </span>
+          <Button size="sm" variant="ghost" className="h-7 px-2 hover:bg-primary/10" disabled={!!busy}
+            onClick={async () => {
+              if (!await ask({
+                title: t('Install update now?'),
+                body: t('Install update now? This will download and install the latest version in the background. The router might momentarily disconnect.'),
+                confirmLabel: t('Install'), tone: 'default',
+              })) return
+              run('update', t('Update started in the background'))
+            }}>
+            {busy === 'update' ? <RefreshCw className="mr-1.5 size-3 animate-spin" /> : null}{t('Install')}
           </Button>
         </div>
       )}
 
-      {/* ── First-run helper ─────────────────────────────────── */}
       {firstRun && (
         <Card className="border border-dashed border-warning bg-warning/5">
           <CardContent className="p-5">
-            <h4 className="mb-2 flex items-center gap-2 font-semibold"><Rocket className="size-4 text-warning" />{t("Let's connect the first tunnel")}</h4>
-            <p className="mb-2 text-sm text-muted-foreground">{t('No tunnels yet, so all LAN traffic currently goes through plain WAN.')}</p>
-            <ol className="ml-5 list-decimal space-y-1 text-sm">
-              <li>Создайте интерфейс WireGuard/AmneziaWG в <a className="text-primary underline-offset-4 hover:underline" href={window.L?.url('admin/network/network')}>Сеть → Интерфейсы</a> (splify не управляет ключами).</li>
-              <li>Добавьте его на вкладке <a className="text-primary underline-offset-4 hover:underline" href={window.L?.url('admin/services/splify/settings')}>Дополнительно</a> в «Туннели» с приоритетом, затем «Сохранить и применить».</li>
-              <li>Поместите туннель в firewall-зону (masq вкл) и разрешите форвардинг lan → зона — или нажмите «Исправить» на находке firewall ниже.</li>
+            <h3 className="mb-2 flex items-center gap-2 font-semibold"><Rocket className="size-4 text-warning" />{t("Let's connect the first tunnel")}</h3>
+            <p className="mb-3 text-sm text-muted-foreground">{t('No tunnels yet, so all LAN traffic currently goes through plain WAN.')}</p>
+            <ol className="ml-5 list-decimal space-y-1.5 text-sm">
+              <li>Создайте интерфейс WireGuard/AmneziaWG в <a className="text-primary underline-offset-4 hover:underline" href={window.L?.url('admin/network/network')}>Сеть → Интерфейсы</a> — splify не хранит ключи и не создаёт туннели сам.</li>
+              <li>Добавьте его в <a className="text-primary underline-offset-4 hover:underline" href={window.L?.url('admin/services/splify/settings')}>Дополнительно → Туннели</a> с приоритетом и нажмите «Сохранить и применить».</li>
+              <li>Если появится замечание про firewall — нажмите «Исправить» в блоке «Что требует внимания».</li>
             </ol>
           </CardContent>
         </Card>
       )}
 
-      {/* ── Routing chain (full width) ───────────────────────── */}
-      <Section title={t('Traffic path')} icon={Activity}>
-        <Chain status={status!} rates={rates} />
-      </Section>
+      {/* ── 3. WHERE TRAFFIC GOES ──────────────────────────────────────── */}
+      <Card>
+        <CardHeader className="px-5 pb-2 pt-3.5">
+          <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal">
+            <Activity className="size-4 text-muted-foreground" />{t('Where your traffic goes')}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="px-5 pb-4 pt-2">
+          <Chain live={live!} rates={rates} />
+        </CardContent>
+      </Card>
 
-      {/* ── Tunnels + Lists side by side ─────────────────────── */}
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <Section title={`${t('Tunnels (failover)')} · ${onlineTun}/${eps.length} ${t('online')}`} icon={Network}>
-          <Hint className="mb-2">{t('Failover hint')}.</Hint>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>{t('Tunnel')}</TableHead><TableHead>{t('Prio')}</TableHead><TableHead>{t('Handshake')}</TableHead>
-                <TableHead>{t('Traffic')}</TableHead><TableHead>{t('Health')}</TableHead><TableHead>{t('Zone')}</TableHead>
-                <TableHead title={t('Masquerade (masq) hides LAN behind the tunnel IP')}>{t('Masq')}</TableHead>
-                <TableHead title={t('Forwarding lan → tunnel is required for traffic to reach the tunnel')}>{t('LAN fwd')}</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {eps.map((e) => {
-                const r = rates[e.iface] || { rx: 0, tx: 0 }
-                return (
-                  <TableRow key={e.iface}>
-                    <TableCell className="font-medium">{e.present ? e.iface : <span className="text-destructive">{e.iface} (нет)</span>}</TableCell>
-                    <TableCell>{e.priority || '—'}</TableCell>
-                    <TableCell>{e.present ? fmtAge(e.handshake_age) : '—'}</TableCell>
-                    <TableCell className="whitespace-nowrap">{e.present ? <><span className="text-success">↓{fmtRate(r.rx)}</span> <span className="text-info">↑{fmtRate(r.tx)}</span></> : '—'}</TableCell>
-                    <TableCell><HealthState health={e.health} /></TableCell>
-                    <TableCell>{e.zone || <span className="text-destructive">нет</span>}</TableCell>
-                    <TableCell><YesNo v={e.masq} /></TableCell>
-                    <TableCell><YesNo v={e.forwarding} /></TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        </Section>
-
-        <Section title="Списки" icon={ListChecks}>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Список</TableHead><TableHead>Записей</TableHead><TableHead>Мин</TableHead><TableHead>Возраст</TableHead><TableHead>Состояние</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {lists.map((l) => (
-                <TableRow key={l.name}>
-                  <TableCell>{l.name}</TableCell>
-                  <TableCell>{l.enabled ? l.count : <span className="text-muted-foreground">(выкл)</span>}</TableCell>
-                  <TableCell>{l.min}</TableCell>
-                  <TableCell>{fmtAge(l.age)}</TableCell>
-                  <TableCell>{l.enabled ? <YesNo v={l.ok} /> : '—'}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Section>
-      </div>
-
-      {/* ── Diagnostics + Events side by side ────────────────── */}
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <Section title={checks.length ? `${t('Diagnostics')} · ${checks.length}` : t('Diagnostics')} icon={Stethoscope}>
-          {checks.length === 0 ? (
-            <p className="flex items-center gap-2 font-medium text-success">
-              <CheckIcon className="size-4" />{t('No problems detected.')}
+      {/* ── 4. WHAT NEEDS ATTENTION ────────────────────────────────────── */}
+      <Card className={checks.length ? cn('border-l-4', SEV[overall].ring) : undefined}>
+        <CardHeader className="px-5 pb-2 pt-3.5">
+          <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal">
+            <Stethoscope className="size-4 text-muted-foreground" />{t('What needs attention')}
+            {haveDiag && checks.length > 0 && <span className="text-sm text-muted-foreground">· {checks.length}</span>}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="px-5 pb-4 pt-2">
+          {!haveDiag ? <Pending error={p.diagPending ? null : p.diagError} rows={2} onRetry={p.refresh} /> : checks.length === 0 ? (
+            <p className="flex items-center gap-2 text-sm font-medium text-success">
+              <CheckIcon className="size-4" />{t('Everything is in order.')}
             </p>
           ) : (
             <div className="space-y-2">
               {checks.map((c) => (
-                <div key={c.category + ':' + c.message} className={cn('flex flex-wrap items-center gap-2 rounded-md border-l-4 bg-muted/40 p-2.5', SEV[c.severity].ring)}>
+                <div key={c.category + ':' + c.message}
+                  className={cn('flex flex-wrap items-center gap-2 rounded-md border-l-4 bg-muted/40 p-2.5 text-sm', SEV[c.severity].ring)}>
                   <SevBadge sev={c.severity} />
                   <div className="min-w-[200px] flex-1">
-                    <div>{c.message}</div>
-                    {c.fix && <div className="mt-0.5 text-sm text-muted-foreground">→ {c.fix}</div>}
+                    <div>{tCheck(c.message)}</div>
+                    {c.fix && <div className="mt-0.5 text-muted-foreground">→ {tFix(c.fix)}</div>}
                   </div>
                   {c.category === 'firewall' && !/in the shared |device wildcard|non-tunnel networks/.test(c.message) && /^([A-Za-z0-9_.-]+):/.test(c.message) && (
-                    <Button size="sm" variant="outline" className="border-primary text-primary" disabled={!!p.busy} onClick={() => fixFirewall(c)}>
-                      <Wrench className="size-4" />{t('Fix')}
+                    <Button size="sm" variant="outline" className="border-primary text-primary" disabled={!!busy} onClick={() => fixFirewall(c)}>
+                      {busy === 'fw_fix' ? <RefreshCw className="size-4 animate-spin" /> : <Wrench className="size-4" />}{t('Fix')}
                     </Button>
                   )}
                   {c.category === 'firewall' && (
@@ -346,183 +419,203 @@ export default function StatusDashboard(p: Props) {
               ))}
             </div>
           )}
-        </Section>
+        </CardContent>
+      </Card>
 
-        <Section title={t('Event history')} icon={History}>
-          {events.length === 0 ? (
-            <p className="text-sm text-muted-foreground">{t('No failover events recorded yet.')}</p>
-          ) : (
+      <Section title={t('Maintenance')} icon={Wrench}
+        right={t('lists refresh themselves daily')}>
+        <div className="flex flex-wrap items-center gap-2">
+          <MaintBtn a="restart" label={t('Restart service')} icon={RotateCw} toast={t('Service restarted')} />
+          <MaintBtn a="update_ipsum" label={t('Refresh blocked-IP list')} icon={Download} toast={t('ipsum updated')} />
+          <MaintBtn a="update_ru" label={t('Refresh RU list')} icon={Download} toast={t('ru/cn updated')} />
+          <MaintBtn a="update_domains" label={t('Refresh domain list')} icon={Download} toast={t('domains updated')} />
+          <div className="flex-1" />
+          <Button size="sm" variant="destructive" disabled={!!busy}
+            onClick={async () => {
+              if (!await ask({
+                title: t('Emergency disable'),
+                body: t('Disable split routing now? All LAN traffic will exit via WAN until the service re-enables it (or you stop it).'),
+                confirmLabel: t('Emergency disable'),
+              })) return
+              run('disable', t('Split routing disabled'))
+            }}>
+            {busy === 'disable' ? <RefreshCw className="size-4 animate-spin" /> : <Power className="size-4" />}
+            {t('Emergency disable')}
+          </Button>
+        </div>
+        <p className="mt-2 text-xs text-muted-foreground">{t('Lists refresh themselves daily; these buttons are for when you do not want to wait.')}</p>
+      </Section>
+
+      {/* ── 5. DETAILS, for whoever is debugging ───────────────────────── */}
+      <Section title={t('Tunnels')} icon={Network}
+        right={`${onlineTun}/${rows.length} ${t('online')}`}>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>{t('Tunnel')}</TableHead>
+              <TableHead title={t('Priority hint')}>{t('Prio')}</TableHead>
+              <TableHead title={t('Handshake hint')}>{t('Handshake')}</TableHead>
+              <TableHead>{t('Traffic')}</TableHead>
+              <TableHead>{t('Health')}</TableHead>
+              <TableHead className="hidden lg:table-cell" title={t('Zone hint')}>{t('Zone')}</TableHead>
+              <TableHead className="hidden lg:table-cell" title={t('Masquerade (masq) hides LAN behind the tunnel IP')}>{t('Masq')}</TableHead>
+              <TableHead className="hidden lg:table-cell" title={t('Forwarding lan → tunnel is required for traffic to reach the tunnel')}>{t('LAN fwd')}</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((e) => {
+              const r = rates[e.iface] || { rx: 0, tx: 0 }
+              return (
+                <TableRow key={e.iface}>
+                  <TableCell className="font-medium">{e.present ? e.iface : <span className="text-destructive">{e.iface} ({t('absent')})</span>}</TableCell>
+                  <TableCell>{e.priority || '—'}</TableCell>
+                  <TableCell>{e.present ? fmtAge(e.handshake_age) : '—'}</TableCell>
+                  <TableCell className="whitespace-nowrap">{e.present ? <><span className="text-success">↓{fmtRate(r.rx)}</span> <span className="text-info">↑{fmtRate(r.tx)}</span></> : '—'}</TableCell>
+                  <TableCell><HealthState health={e.health} /></TableCell>
+                  <TableCell className="hidden lg:table-cell">{!e.fwKnown ? <span className="text-muted-foreground">…</span> : e.zone || <span className="text-destructive">{t('none')}</span>}</TableCell>
+                  <TableCell className="hidden lg:table-cell">{!e.fwKnown ? <span className="text-muted-foreground">…</span> : <YesNo v={!!e.masq} />}</TableCell>
+                  <TableCell className="hidden lg:table-cell">{!e.fwKnown ? <span className="text-muted-foreground">…</span> : <YesNo v={!!e.forwarding} />}</TableCell>
+                </TableRow>
+              )
+            })}
+          </TableBody>
+        </Table>
+        <p className="mt-2 text-xs text-muted-foreground">{t('Failover hint')}.</p>
+      </Section>
+
+      <Section title={t('Lists')} icon={ListChecks}
+        right={haveDiag ? `${okLists}/${enabledLists.length} ${t('in order')}` : undefined}>
+        {!haveDiag ? <Pending error={p.diagPending ? null : p.diagError} rows={3} onRetry={p.refresh} /> : (
+          <>
             <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{t('List')}</TableHead><TableHead>{t('Entries')}</TableHead>
+                  <TableHead>{t('Min')}</TableHead><TableHead>{t('Age')}</TableHead><TableHead>{t('State')}</TableHead>
+                </TableRow>
+              </TableHeader>
               <TableBody>
-                {events.slice(0, 50).map((ev) => {
-                  const m = EVENT_META[ev.kind] || { i: '•', cls: 'text-muted-foreground', ru: ev.kind }
-                  const pathStr = ev.from && ev.to ? `${ev.from} → ${ev.to}` : ev.to || ev.from || ''
-                  return (
-                    <TableRow key={ev.ts + ':' + ev.kind}>
-                      <TableCell className={cn('whitespace-nowrap font-semibold', m.cls)}>{m.i} {m.ru}</TableCell>
-                      <TableCell className="whitespace-nowrap">{pathStr}</TableCell>
-                      <TableCell className="text-muted-foreground">{ev.reason || ''}</TableCell>
-                      <TableCell className="whitespace-nowrap text-right text-muted-foreground">{fmtWhen(ev.ts)}</TableCell>
-                    </TableRow>
-                  )
-                })}
+                {lists.map((l) => (
+                  <TableRow key={l.name}>
+                    <TableCell className="whitespace-nowrap"><span title={t('list.hint.' + l.name)}>{t('list.' + l.name)}</span></TableCell>
+                    <TableCell>{l.enabled ? l.count : <span className="text-muted-foreground">({t('off')})</span>}</TableCell>
+                    <TableCell>{l.min}</TableCell>
+                    <TableCell>{fmtAge(l.age)}</TableCell>
+                    <TableCell>{l.enabled ? <YesNo v={l.ok} /> : '—'}</TableCell>
+                  </TableRow>
+                ))}
               </TableBody>
             </Table>
-          )}
-        </Section>
-      </div>
+            <p className="mt-2 text-xs text-muted-foreground">{t('Lists explainer')}</p>
+          </>
+        )}
+      </Section>
+
+      <Section title={t('Event history')} icon={History}
+        right={events.length ? t('last: %s').replace('%s', fmtWhen(events[0].ts)) : undefined}>
+        {!haveDiag ? <Pending error={p.diagPending ? null : p.diagError} rows={2} onRetry={p.refresh} /> : events.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t('No failover events recorded yet.')}</p>
+        ) : (
+          <Table>
+            <TableBody>
+              {events.slice(0, 50).map((ev) => {
+                const m = EVENT_META[ev.kind] || { i: '•', cls: 'text-muted-foreground', ru: ev.kind }
+                const pathStr = ev.from && ev.to ? `${ev.from} → ${ev.to}` : ev.to || ev.from || ''
+                return (
+                  <TableRow key={ev.ts + ':' + ev.kind}>
+                    <TableCell className={cn('whitespace-nowrap font-semibold', m.cls)}>{m.i} {m.ru}</TableCell>
+                    <TableCell className="whitespace-nowrap">{pathStr}</TableCell>
+                    <TableCell className="text-muted-foreground">{ev.reason || ''}</TableCell>
+                    <TableCell className="whitespace-nowrap text-right text-muted-foreground">{fmtWhen(ev.ts)}</TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+        )}
+      </Section>
     </div>
   )
 }
 
-function MiniStat({ label, value, sub, tone }: { label: string; value: React.ReactNode; sub?: React.ReactNode; tone?: string }) {
-  return (
-    <div className="flex flex-col items-start">
-      <div className="text-[11px] text-muted-foreground">{label}</div>
-      <div className={cn('text-sm font-semibold leading-tight', tone)}>{value}</div>
-      {sub != null && sub !== '' && <div className="text-[11px] text-muted-foreground">{sub}</div>}
-    </div>
-  )
-}
-
-function Section({ title, icon: Icon, children }: { title: string; icon: React.ComponentType<{ className?: string }>; children: React.ReactNode }) {
-  return (
-    <Card>
-      {/* Argon section header: 1.1rem, normal weight, .875rem/1.25rem padding */}
-      <CardHeader className="px-5 pb-2 pt-3.5">
-        <CardTitle className="flex items-center gap-2 text-[1.1rem] font-normal">
-          <Icon className="size-4 text-muted-foreground" />{title}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="px-5 pb-4 pt-2">{children}</CardContent>
-    </Card>
-  )
-}
-
-// Маленькая подсказка под/рядом с термином — для рядового пользователя.
-// Текст мелким «глухим» цветом, чтобы не отвлекать опытных, но объяснять
-// суть (DPI, kill switch, masq и т.п.).
-function Hint({ children, className }: { children: React.ReactNode; className?: string }) {
-  return <p className={cn('text-xs text-muted-foreground', className)}>{children}</p>
-}
-
-// Путь трафика показан как три класса трафика, идущие параллельно прямо
-// сейчас (а не «одна активная линия + резервы»). В каждой карточке — куда
-// фактически уходит свой класс: заблокированные сайты (список ipsum),
-// российский/нейтральный трафик (всегда напрямую, он в nozapret-исключении) и
-// всё прочее (зависит от режима и наличия туннеля/zapret). Это честнее старой
-// линейной цепочки, которая скрывала, что при активном VPN часть трафика
-// параллельно идёт напрямую, а zapret реально работает, а не «спит в резерве».
+// ── traffic classes ──────────────────────────────────────────────────────────
+// Three classes side by side, because that is what actually happens at once:
+// while the tunnel carries blocked sites, RU traffic goes direct AND zapret works
+// on the rest. Each card now states WHY its traffic goes where it goes — the bare
+// destination ("wan", "zapret") meant nothing to anyone who did not build this.
 type Tone = 'success' | 'warning' | 'destructive' | 'neutral'
 
-const TONE: Record<Tone, { box: string; label: string }> = {
-  success:    { box: 'bg-success/10 border-success/30 text-success',                    label: 'text-success' },
-  warning:    { box: 'bg-warning/10 border-warning/30 text-warning',                    label: 'text-warning' },
-  destructive:{ box: 'bg-destructive/10 border-destructive/30 text-destructive',        label: 'text-destructive' },
-  neutral:    { box: 'bg-muted border-border text-muted-foreground',                    label: 'text-muted-foreground' },
+const TONE: Record<Tone, string> = {
+  success: 'bg-success/10 border-success/30 text-success',
+  warning: 'bg-warning/10 border-warning/30 text-warning',
+  destructive: 'bg-destructive/10 border-destructive/30 text-destructive',
+  neutral: 'bg-muted border-border text-muted-foreground',
 }
 
-function DestPill({ label, sub, tone }: { label: React.ReactNode; sub?: React.ReactNode; tone: Tone }) {
-  const tn = TONE[tone]
-  return (
-    <div className={cn('flex flex-col items-center justify-center rounded-lg border px-4 py-2.5 text-center transition-colors', tn.box)}>
-      <div className="text-sm font-semibold">{label}</div>
-      {sub != null && sub !== '' && <div className="mt-1 text-[11px] opacity-80">{sub}</div>}
-    </div>
-  )
-}
-
-function PathCard({ title, dest, sub, tone }: {
-  title: string; dest: React.ReactNode; sub?: React.ReactNode; tone: Tone
+function PathCard({ title, what, dest, sub, tone }: {
+  title: string; what: string; dest: React.ReactNode; sub?: React.ReactNode; tone: Tone
 }) {
   return (
-    <div className="flex flex-col justify-between gap-3 rounded-xl border bg-card p-4 shadow-sm">
-      <div className="flex items-center justify-between text-xs font-medium text-muted-foreground">
-        <span>{title}</span>
-        <ArrowRight className="size-4 text-muted-foreground/50" />
+    <div className="flex flex-col gap-2 rounded-xl border bg-card p-4 shadow-sm">
+      <div>
+        <div className="text-sm font-medium">{title}</div>
+        <div className="mt-0.5 text-xs text-muted-foreground">{what}</div>
       </div>
-      <DestPill label={dest} sub={sub} tone={tone} />
+      <div className="mt-auto flex items-center gap-2">
+        <ArrowRight className="size-4 shrink-0 text-muted-foreground/50" />
+        <div className={cn('flex-1 rounded-lg border px-3 py-2 text-center', TONE[tone])}>
+          <div className="text-sm font-semibold">{dest}</div>
+          {sub != null && sub !== '' && <div className="mt-0.5 text-[11px] opacity-80">{sub}</div>}
+        </div>
+      </div>
     </div>
   )
 }
 
-function Chain({ status, rates }: { status: Status; rates: Record<string, { rx: number; tx: number }> }) {
-  const s = status.summary
+function Chain({ live, rates }: { live: Live; rates: Record<string, Rate> }) {
+  const s = live.summary
   const state = s.state || ''
   const mode = s.mode || ''
-  const eps = status.endpoints || []
-
-  const activeEp = eps.find((e) => state === 'vpn:' + e.iface)
-  // zapret «работает», если в lists есть запись nozapret с enabled (его presence
-  // в статусе выражается именно так) ИЛИ мы прямо в состоянии zapret.
-  const zapretInstalled = (status.lists || []).some((l) => l.name === 'nozapret' && l.enabled)
+  const activeEp = (live.endpoints || []).find((e) => state === 'vpn:' + e.iface)
+  const zapretInstalled = !!s.zapret_version
   const zapretLabel = s.zapret_version || 'zapret'
-
-  const isVpn = !!activeEp
-  const isZapretState = state === 'zapret'
   const killed = state === 'killswitch'
+  const isVpn = !!activeEp
+  const r = activeEp ? (rates[activeEp.iface] || { rx: 0, tx: 0 }) : { rx: 0, tx: 0 }
+  const viaTunnel = (iface: string) => t('through %s').replace('%s', iface)
+  const vpnSub = activeEp
+    ? <span className="whitespace-nowrap"><span className="text-success">↓{fmtRate(r.rx)}</span> <span className="text-info">↑{fmtRate(r.tx)}</span></span>
+    : undefined
 
-  const rateOf = (iface: string) => rates[iface] || { rx: 0, tx: 0 }
-  const vpnSub = activeEp ? (
-    <span className="whitespace-nowrap">
-      <span className="text-success">↓{fmtRate(rateOf(activeEp.iface).rx)}</span>{' '}
-      <span className="text-info">↑{fmtRate(rateOf(activeEp.iface).tx)}</span>
-    </span>
-  ) : undefined
+  // ① blocked sites (the ipsum list)
+  let c1: { dest: React.ReactNode; sub?: React.ReactNode; tone: Tone }
+  if (killed) c1 = { dest: t('Blocked — kill switch'), tone: 'destructive' }
+  else if (isVpn) c1 = { dest: viaTunnel(activeEp!.iface), sub: vpnSub, tone: 'success' }
+  else if (zapretInstalled) c1 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'warning' }
+  else c1 = { dest: t('Direct (WAN)'), sub: t('may be unreachable'), tone: 'destructive' }
 
-  // ── Карточка ① «Заблокированные сайты» (список ipsum) ──
-  // При живом VPN — через туннель; при падении VPN — zapret; без zapret — открытый WAN.
-  let card1: { dest: React.ReactNode; sub?: React.ReactNode; tone: Tone }
-  if (killed) {
-    card1 = { dest: t('Blocked — kill switch'), tone: 'destructive' }
-  } else if (isVpn) {
-    card1 = { dest: `#${activeEp!.priority || '?'} ${activeEp!.iface}`, sub: vpnSub, tone: 'success' }
-  } else if (isZapretState) {
-    card1 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'success' }
-  } else if (zapretInstalled) {
-    card1 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'success' }
-  } else {
-    card1 = { dest: t('Open (WAN)'), sub: t('Direct (WAN)'), tone: 'neutral' }
-  }
-
-  // ── Карточка ② «Российский / нейтральный трафик» ──
-  // RU/приватные сети всегда в nozapret (или direct-исключении в full) → всегда
-  // идут напрямую через WAN. kill switch глушит и их.
-  const card2: { dest: React.ReactNode; sub?: React.ReactNode; tone: Tone } = killed
+  // ② RU / neutral — always direct: that is exactly what the ru/cn list is for
+  const c2: { dest: React.ReactNode; sub?: React.ReactNode; tone: Tone } = killed
     ? { dest: t('Blocked — kill switch'), tone: 'destructive' }
-    : { dest: t('Direct (WAN)'), sub: t('via WAN'), tone: 'success' }
+    : { dest: t('Direct (WAN)'), sub: t('full provider speed'), tone: 'success' }
 
-  // ── Карточка ③ «Прочий трафик» ──
-  // full + VPN → через туннель. Иначе трафик выходит через WAN, но, в отличие
-  // от RU/нейтрального (карточка ②, который лежит в nozapret), «прочий» НЕ в
-  // nozapret — поэтому zapret обрабатывает его (DPI-обход). Без zapret —
-  // действительно напрямую.
-  let card3: { dest: React.ReactNode; sub?: React.ReactNode; tone: Tone }
-  if (killed) {
-    card3 = { dest: t('Blocked — kill switch'), tone: 'destructive' }
-  } else if (mode === 'full' && isVpn) {
-    card3 = { dest: `#${activeEp!.priority || '?'} ${activeEp!.iface}`, sub: t('via VPN'), tone: 'success' }
-  } else if (zapretInstalled || isZapretState) {
-    card3 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'success' }
-  } else {
-    card3 = { dest: t('Direct (WAN)'), sub: t('via WAN'), tone: 'neutral' }
-  }
-
-  const cards = [
-    { title: t('Blocked sites'),   ...card1 },
-    { title: t('RU / neutral'),    ...card2 },
-    { title: t('Other traffic'),   ...card3 },
-  ]
+  // ③ everything else
+  let c3: { dest: React.ReactNode; sub?: React.ReactNode; tone: Tone }
+  if (killed) c3 = { dest: t('Blocked — kill switch'), tone: 'destructive' }
+  else if (mode === 'full' && isVpn) c3 = { dest: viaTunnel(activeEp!.iface), sub: t('via VPN'), tone: 'success' }
+  else if (zapretInstalled) c3 = { dest: zapretLabel, sub: t('DPI bypass (zapret)'), tone: 'success' }
+  else c3 = { dest: t('Direct (WAN)'), sub: t('full provider speed'), tone: 'neutral' }
 
   return (
     <div className="space-y-2">
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-        {cards.map((c) => (
-          <PathCard key={c.title} title={c.title} dest={c.dest} sub={c.sub} tone={c.tone} />
-        ))}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <PathCard title={t('Blocked sites')} what={t('addresses from the blocked-IP list')} {...c1} />
+        <PathCard title={t('Russian sites')} what={t('from the RU/CN list — banks, government, local services')} {...c2} />
+        <PathCard title={t('Everything else')}
+          what={mode === 'full' ? t('in full mode this rides the tunnel too') : t('ordinary sites and apps')} {...c3} />
       </div>
       <p className="text-center text-xs text-muted-foreground">
-        LAN:{' '}{s.lan_iface || '—'}{' → '}{t('Internet')}
+        {t('Your devices')} → {s.lan_iface || 'LAN'} → {t('Internet')}
       </p>
     </div>
   )
