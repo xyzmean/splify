@@ -15,6 +15,10 @@ run_low_priority "$0" "$@"   # nightly work: never at the expense of the live ro
 
 [ "$IPSUM_ENABLED" = "1" ] || { log "ipsum disabled (IPSUM_ENABLED=0)"; exit 0; }
 [ -n "$IPSUM_URL" ] || die "no ipsum_url configured"
+# The identity includes the ru/cn list, not just the URL: that list is the
+# exclusion the aggregation below respects, so a changed ru list means the
+# fitted output would differ even from the same download.
+skip_if_unchanged ipsum "$IPSUM_URL ru:$(_src_ident "$RU_FILE")" "$IPSUM_FILE" && exit 0
 single_run update-ipsum   # bail if a concurrent run (cron vs self-heal) holds the lock
 
 TMP="/tmp/splify-update-ipsum.$$"
@@ -66,6 +70,8 @@ fi
 # Stale pre-rendered block from an older version — a replay source nothing reads
 # any more (see the header). Dropping it frees ~0.5MB of overlay flash.
 rm -f "$IPSUM_NFT_FILE" 2>/dev/null || true
+
+src_stamp_write ipsum "$IPSUM_URL ru:$(_src_ident "$RU_FILE")"
 
 _loaded="$(grep -cE '^[0-9]' "$IPSUM_FILE" 2>/dev/null || echo 0)"
 nft_load_set "$IPSUM_TABLE" "$IPSUM_SET" "$IPSUM_FILE"

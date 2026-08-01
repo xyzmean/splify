@@ -803,3 +803,46 @@ EOF
     run "$SPLIFY_DNSD_BIN" --fakeip "$state" example.com
     [ "$output" = "$ip1" ]
 }
+
+# The defect this guards: a rule referencing a set the same include never declares
+# makes nft abort the include, discarding EVERY set and chain after it. The router
+# then has no splify sets at all and only the boot log says why.
+@test "nft_refs_declared: catches a rule referencing an undeclared splify set" {
+    load_fn "$COMMON_SH" nft_refs_declared
+
+    good="$BATS_TEST_TMPDIR/good.nft"
+    cat > "$good" <<'EOF'
+set splify_geo_v4 {
+    type ipv4_addr; flags interval,timeout; auto-merge; size 4096;
+}
+map splify_fakeip_map { type ipv4_addr : ipv4_addr; }
+chain splify_ipsum_mark_prerouting {
+    ip saddr { 192.168.1.0/24 } ip daddr @splify_geo_v4 meta mark set meta mark or 0x80000
+    ip daddr 198.18.0.0/15 dnat ip to ip daddr map @splify_fakeip_map
+}
+EOF
+    run nft_refs_declared "$good"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+
+    # the real regression: geo set declared, vpn set NOT, but a vpn rule emitted
+    bad="$BATS_TEST_TMPDIR/bad.nft"
+    cat > "$bad" <<'EOF'
+set splify_geo_v4 {
+    type ipv4_addr; flags interval,timeout; auto-merge; size 4096;
+}
+chain splify_ipsum_mark_prerouting {
+    ip saddr { 192.168.1.0/24 } ip daddr @splify_geo_v4 meta mark set meta mark or 0x80000
+    ip saddr { 192.168.1.0/24 } ip daddr @splify_vpn_v4 meta mark set meta mark or 0x40000
+}
+EOF
+    run nft_refs_declared "$bad"
+    [ "$status" -eq 1 ]
+    [ "$output" = "splify_vpn_v4" ]
+
+    # a foreign include's set is somebody else's to declare — not flagged
+    foreign="$BATS_TEST_TMPDIR/foreign.nft"
+    printf 'chain c {\n    ip daddr @nozapret_v4 accept\n}\n' > "$foreign"
+    run nft_refs_declared "$foreign"
+    [ "$status" -eq 0 ]
+}
