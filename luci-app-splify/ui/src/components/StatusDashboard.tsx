@@ -619,4 +619,4 @@ function Chain({ live, rates }: { live: Live; rates: Record<string, Rate> }) {
       </p>
     </div>
   )
-})
+}
