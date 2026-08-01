@@ -299,10 +299,12 @@ cp -r luci-app-splify/ui/dist/* "$BUILD_DIR/luci_src/www/luci-static/resources/s
 # Cache-busting for the React bundles. Two things carry the release identity:
 #   1. build-id.txt — fetched by the loader shims (main.js/advanced.js) with
 #      cache:'no-store' and appended as ?v= to every bundle URL.
-#   2. the ?v= query the entry bundles (splify-index.js/splify-settings.js) use
-#      to import their shared chunk (splify-x.js) — npm build bakes a placeholder
-#      "?v=0.0.0"; stamping the real VERSION keeps the entry+chunk pair pinned to
-#      one release so a stale HTTP cache can't mix a new entry with an old chunk.
+#   2. the ?v= query the entry bundles (splify-index.js/splify-settings.js) put on
+#      EVERY chunk they import — the shared one plus the lazily loaded tabs — for
+#      which npm build bakes a placeholder "?v=0.0.0". Stamping the real VERSION
+#      keeps entry and chunks pinned to one release so a stale HTTP cache can't
+#      mix a new entry with an old chunk. scripts/check-dist.mjs fails the build if
+#      any chunk reference is missing that placeholder.
 printf '%s\n' "$VERSION" > "$BUILD_DIR/luci_src/www/luci-static/resources/splify/build-id.txt"
 sed -i -E "s/\?v=[0-9]+\.[0-9]+\.[0-9]+/?v=$VERSION/g" \
     "$BUILD_DIR/luci_src/www/luci-static/resources/splify/splify-index.js" \

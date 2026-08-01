@@ -12,7 +12,13 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
-const EXPECTED_JS = ['splify-index.js', 'splify-settings.js', 'splify-x.js']
+// Entries + the shared chunk + the lazily-loaded tabs. Every name here is
+// load-bearing: build.sh stamps the release version into each internal reference,
+// so an unexpected chunk means something is being served without cache-busting.
+const EXPECTED_JS = [
+  'splify-index.js', 'splify-settings.js', 'splify-x.js',
+  'splify-WgPanel.js', 'splify-ApiPanel.js',
+]
 
 const js = readdirSync(DIST).filter((f) => f.endsWith('.js')).sort()
 const missing = EXPECTED_JS.filter((f) => !js.includes(f))
@@ -22,12 +28,17 @@ const problems = []
 if (missing.length) problems.push(`missing: ${missing.join(', ')}`)
 if (extra.length) problems.push(`unexpected chunk(s): ${extra.join(', ')}`)
 
-// Both entries must reference the shared chunk through the pinnable placeholder.
+// Every internal chunk reference inside the entries must carry the ?v= placeholder,
+// or build.sh has nothing to stamp and a stale cache can pair a new entry with an
+// old chunk. This is checked per reference rather than for splify-x.js alone,
+// because lazily-loaded tabs are referenced the same way.
 for (const entry of ['splify-index.js', 'splify-settings.js']) {
   if (!js.includes(entry)) continue
   const text = readFileSync(join(DIST, entry), 'utf8')
-  if (!text.includes('./splify-x.js?v=')) {
-    problems.push(`${entry} does not import ./splify-x.js?v= — build.sh cannot pin the chunk version`)
+  const refs = [...text.matchAll(/["'`](\.\/splify-[A-Za-z0-9_-]+\.js)(\?v=[^"'`]*)?["'`]/g)]
+  if (!refs.length) problems.push(`${entry} references no chunk at all — did the build change?`)
+  for (const [, name, ver] of refs) {
+    if (!ver) problems.push(`${entry} imports ${name} without ?v= — build.sh cannot pin its version`)
   }
 }
 

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "npm run check:cn && tsc -b && vite build && sed -i 's|\\./splify-x\\.js|./splify-x.js?v=0.0.0|g' dist/splify-index.js dist/splify-settings.js && node scripts/check-dist.mjs",
+    "build": "npm run check:cn && tsc -b && vite build && node scripts/pin-chunks.mjs && node scripts/check-dist.mjs",
     "check:cn": "node scripts/cn-equivalence.mjs",
     "lint": "oxlint",
     "preview": "vite preview"

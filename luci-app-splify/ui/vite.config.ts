@@ -28,10 +28,12 @@ export default defineConfig({
   },
   build: {
     // No <link rel=modulepreload> is ever emitted into a LuCI page — the loader
-    // shim injects one <script type=module> by hand — so Vite's preload polyfill
-    // is dead code that also lands in its own tiny chunk (breaking the fixed
-    // dist layout check below).
-    modulePreload: { polyfill: false },
+    // shim injects one <script type=module> by hand — so Vite's preload machinery
+    // is dead weight here. Disabled outright rather than just skipping the
+    // polyfill: it also emits a dependency table of BARE chunk names next to each
+    // dynamic import, and those names carry no ?v=, so a stale cache could be
+    // asked for the wrong copy of a lazily loaded tab.
+    modulePreload: false,
     rollupOptions: {
       // Two independent SPA bundles, one per LuCI view: "Главная" (status
       // dashboard) and "Дополнительно" (settings, formerly a form.Map page).
