@@ -1,0 +1,203 @@
+#!/bin/sh
+# splify rpcd plugin — the canonical, least-privilege bridge between the LuCI
+# dashboard and the shell core (design §4.3). Exposes ONE ubus object `splify`;
+# the LuCI ACL grants narrow ubus access instead of broad `file:exec`.
+#
+# Diagnostics/actions are thin wrappers over the same CLI scripts an SSH user
+# runs; the remote-management surface (wg/awg params, full snapshot export/import,
+# api config) all funnels through `splify-ctl`, so the LuCI UI, the inbound REST
+# CGI and the outbound agent are guaranteed identical in behaviour.
+#
+# Methods taking a JSON document take it as a STRING param `data` (or `conf`),
+# which the plugin pipes straight into splify-ctl — no re-serialisation, no jq.
+#
+#   live          -> splify-live              (CHEAP: state + counters only, no
+#                  set counting / firewall walk / list greps. This is the one
+#                  method the dashboard may poll — doctor costs 4-24s on real
+#                  hardware, which is both unpollable and above rpcd's own -t 30
+#                  timeout under load)
+#   status        -> splify-doctor --json      (diagnostics object)
+#   snapshot      -> splify-snapshot           (diagnostics from a TTL cache,
+#                  serve-stale-while-revalidate — see that script for why the
+#                  read path must never block on a full doctor sweep)
+#   snapshot_refresh -> splify-snapshot --refresh (queue an out-of-band sweep;
+#                  returns immediately, the UI notices via live.diagnostics)
+#   events        -> { "events": [ … ] }       (failover timeline)
+#   action        -> run one allow-listed maintenance op
+#   config_export -> full node snapshot (keys masked unless reveal=1)
+#   config_import -> apply a desired snapshot (data = JSON string)
+#   wg_get        -> one wg/awg interface
+#   wg_set        -> set one interface (data = JSON string)
+#   wg_import     -> import a wg/awg .conf (conf = text)
+#   singbox_get   -> one sing-box interface
+#   singbox_import -> import a vless/hysteria2 URI (conf = text)
+#   api_get       -> api/agent config + runtime
+#   api_set       -> set api/agent config (data = JSON string)
+#   token_regen   -> rotate the API token
+. /usr/share/libubox/jshn.sh
+
+DOCTOR=/usr/local/sbin/splify-doctor
+CTL=/usr/local/sbin/splify-ctl
+LIVE=/usr/local/sbin/splify-live
+SNAPSHOT=/usr/local/sbin/splify-snapshot
+
+case "$1" in
+    list)
+        json_init
+        json_add_object "live";    json_close_object
+        json_add_object "status";  json_close_object
+        json_add_object "snapshot"; json_close_object
+        json_add_object "snapshot_refresh"; json_close_object
+        json_add_object "events";  json_close_object
+        json_add_object "action"
+            json_add_string "name" ""
+            json_add_string "iface" ""
+        json_close_object
+        json_add_object "config_export"; json_close_object
+        json_add_object "config_reveal"; json_close_object
+        json_add_object "config_import"
+            json_add_string "data" ""
+        json_close_object
+        json_add_object "wg_get"
+            json_add_string "iface" ""
+        json_close_object
+        json_add_object "wg_reveal"
+            json_add_string "iface" ""
+        json_close_object
+        json_add_object "wg_set"
+            json_add_string "iface" ""
+            json_add_string "data" ""
+        json_close_object
+        json_add_object "wg_import"
+            json_add_string "iface" ""
+            json_add_string "conf" ""
+        json_close_object
+        json_add_object "singbox_get"
+            json_add_string "iface" ""
+        json_close_object
+        json_add_object "singbox_import"
+            json_add_string "iface" ""
+            json_add_string "conf" ""
+        json_close_object
+        json_add_object "api_get";  json_close_object
+        json_add_object "api_token"; json_close_object
+        json_add_object "api_set"
+            json_add_string "data" ""
+        json_close_object
+        json_add_object "token_regen"; json_close_object
+        json_add_object "connect"
+            json_add_string "data" ""
+        json_close_object
+        json_add_object "enroll"; json_close_object
+        json_dump
+        ;;
+    call)
+        case "$2" in
+            status)
+                # already JSON — emit verbatim. doctor exits non-zero on any
+                # WARN/FAIL BY DESIGN for CLI; normalise to 0 so LuCI's
+                # callStatus() doesn't reject exactly when there's a problem to
+                # render (severity is carried in the JSON itself).
+                "$DOCTOR" --json || true
+                ;;
+            live)
+                # The pollable read path. Must stay fast — see splify-live.
+                "$LIVE" || true
+                ;;
+            snapshot)
+                # Combined {"status":{...},"events":[...]}, served from the TTL
+                # cache (splify-snapshot) so a dashboard load never blocks on a
+                # full doctor sweep and can never hit rpcd's -t 30 timeout.
+                # Falls back to a direct doctor run on an older install where the
+                # cache script isn't present yet.
+                if [ -x "$SNAPSHOT" ]; then "$SNAPSHOT" || true
+                else "$DOCTOR" --snapshot || true; fi
+                ;;
+            snapshot_refresh)
+                # "Обновить": queue a fresh sweep, answer immediately.
+                if [ -x "$SNAPSHOT" ]; then "$SNAPSHOT" --refresh || true
+                else json_init; json_add_boolean queued 0; json_dump; fi
+                ;;
+            events)
+                printf '{"events":%s}\n' "$("$DOCTOR" --events)"
+                ;;
+            action)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var name name; json_get_var iface iface
+                case "$name" in
+                    fw_fix|fw_remove|apply|restart|disable|on|off|bounce|update_ipsum|update_ru|update_domains|update)
+                        "$CTL" action "$name" "$iface"
+                        ;;
+                    *)
+                        json_init; json_add_int code 2; json_add_string stdout "Access denied by rpcd filter"; json_dump
+                        ;;
+                esac
+                ;;
+            config_export)
+                # read-ACL: ALWAYS masked. Secrets only via config_reveal (write).
+                "$CTL" export
+                ;;
+            config_reveal)
+                "$CTL" export --reveal
+                ;;
+            config_import)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var data data
+                printf '%s' "$data" | "$CTL" import
+                ;;
+            wg_get)
+                # read-ACL: ALWAYS masked. Private key only via wg_reveal (write).
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var iface iface
+                "$CTL" wg-get "$iface"
+                ;;
+            wg_reveal)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var iface iface
+                "$CTL" wg-get "$iface" --reveal
+                ;;
+            wg_set)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var iface iface; json_get_var data data
+                printf '%s' "$data" | "$CTL" wg-set "$iface"
+                ;;
+            wg_import)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var iface iface; json_get_var conf conf
+                printf '%s' "$conf" | "$CTL" wg-import "$iface"
+                ;;
+            singbox_get)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var iface iface
+                "$CTL" singbox-get "$iface"
+                ;;
+            singbox_import)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var iface iface; json_get_var conf conf
+                printf '%s' "$conf" | "$CTL" singbox-import "$iface"
+                ;;
+            api_get)
+                "$CTL" api-get
+                ;;
+            api_token)
+                "$CTL" api-token
+                ;;
+            api_set)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var data data
+                printf '%s' "$data" | "$CTL" api-set
+                ;;
+            token_regen)
+                "$CTL" token-regen
+                ;;
+            connect)
+                input="$(cat)"; json_load "$input" 2>/dev/null
+                json_get_var data data
+                printf '%s' "$data" | "$CTL" connect
+                ;;
+            enroll)
+                "$CTL" enroll
+                ;;
+        esac
+        ;;
+esac

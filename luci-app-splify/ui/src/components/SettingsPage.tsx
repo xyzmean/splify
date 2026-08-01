@@ -39,6 +39,8 @@ interface ListsForm {
   ru_enabled: boolean; ru_url: string
   vpn_domains_url: string; ignore_domains_url: string
   zapret_enabled: boolean
+  /** curated list of geo-blocking domains, routed through geoblock_iface */
+  geoblock_enabled: boolean; geoblock_iface: string
 }
 interface ManualForm {
   vpn_cidr: string[]; direct_cidr: string[]; vpn_domain: string[]; direct_domain: string[]
@@ -169,6 +171,7 @@ export default function SettingsPage() {
   })
   const [lists, setLists] = useState<ListsForm>({
     ipsum_enabled: true, ipsum_url: '', ru_enabled: true, ru_url: '', vpn_domains_url: '', ignore_domains_url: '', zapret_enabled: true,
+    geoblock_enabled: false, geoblock_iface: '',
   })
   const [manual, setManual] = useState<ManualForm>({ vpn_cidr: [], direct_cidr: [], vpn_domain: [], direct_domain: [] })
   const [endpoints, setEndpoints] = useState<EndpointRow[]>([])
@@ -198,6 +201,7 @@ export default function SettingsPage() {
         telemetry: g('telemetry') === '1',
       })
       setLists({
+        geoblock_enabled: g('geoblock_enabled') === '1', geoblock_iface: g('geoblock_iface'),
         ipsum_enabled: g('ipsum_enabled', '1') === '1', ipsum_url: g('ipsum_url'),
         ru_enabled: g('ru_enabled', '1') === '1', ru_url: g('ru_url'),
         vpn_domains_url: g('vpn_domains_url'), ignore_domains_url: g('ignore_domains_url'),
@@ -250,6 +254,7 @@ export default function SettingsPage() {
     g('ru_enabled', lists.ru_enabled); g('ru_url', lists.ru_url)
     g('vpn_domains_url', lists.vpn_domains_url); g('ignore_domains_url', lists.ignore_domains_url)
     g('zapret_enabled', lists.zapret_enabled)
+    g('geoblock_enabled', lists.geoblock_enabled); g('geoblock_iface', lists.geoblock_iface)
     g('vpn_cidr', manual.vpn_cidr); g('direct_cidr', manual.direct_cidr)
     g('vpn_domain', manual.vpn_domain); g('direct_domain', manual.direct_domain)
 
@@ -291,6 +296,8 @@ export default function SettingsPage() {
     if (general.lan_iface.trim() !== '' && !isIfaceName(general.lan_iface)) out.push('LAN-интерфейс — имя устройства (например br-lan)')
     if (general.lan_cidr.trim() !== '' && !isSubnet(general.lan_cidr)) out.push('Подсеть LAN — CIDR, например 192.168.1.0/24')
     bad('Адреса для проверки', general.health_target, isPingTarget)
+    if (lists.geoblock_enabled && !lists.geoblock_iface)
+      out.push('Для списка «Сайты, блокирующие по стране» не выбран туннель')
     if (!isHttpUrl(lists.ipsum_url)) out.push('URL списка ipsum — http(s)://…')
     if (!isHttpUrl(lists.ru_url)) out.push('URL списка ru/cn — http(s)://…')
     if (!isHttpUrl(lists.vpn_domains_url)) out.push('URL доменов для VPN — http(s)://…')
@@ -484,6 +491,34 @@ export default function SettingsPage() {
 
           {tab === 'lists' && (
             <>
+              {/* First in the list, because it is the one setting a normal user
+                  actually wants: tick it, pick a tunnel, done. Everything below is
+                  for someone who wants to change the lists themselves. */}
+              <Section title="Сайты, блокирующие по стране" icon={Globe}
+                desc="Готовый список доменов, которые отказывают российским адресам. Пойдут через выбранный ниже туннель — независимо от того, какой туннель splify использует для остального трафика."
+                right={<Switch on={lists.geoblock_enabled}
+                  onClick={() => mark(setLists)({ ...lists, geoblock_enabled: !lists.geoblock_enabled,
+                    // picking the switch with a single tunnel available should not
+                    // then demand a second click in the select
+                    geoblock_iface: lists.geoblock_iface || ifaces[0] || '' })}
+                  aria-label="Сайты, блокирующие по стране" />}>
+                <Field label="Через какой туннель"
+                  helpText="Только для этого списка. Если туннель недоступен, эти домены пойдут обычным путём (или будут заблокированы, если включён kill switch).">
+                  <select className={cn(field, 'w-auto', lists.geoblock_enabled && !lists.geoblock_iface && 'border-destructive')}
+                    disabled={!lists.geoblock_enabled} value={lists.geoblock_iface}
+                    onChange={(e) => mark(setLists)({ ...lists, geoblock_iface: e.target.value })}>
+                    <option value="">(не выбран)</option>
+                    {ifaces.map((n) => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                </Field>
+                {lists.geoblock_enabled && ifaces.length === 0 && (
+                  <p className="text-xs text-destructive">Туннелей не найдено — сначала создайте интерфейс WireGuard/AmneziaWG в Сеть → Интерфейсы.</p>
+                )}
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Требует нативного DNS-бэкенда (пакет <code>splify-dns</code>): маршрутизация по доменам без него работает только с dnsmasq-full.
+                </p>
+              </Section>
+
               <Section title="ipsum — список IP для VPN" icon={ListChecks}
                 desc="Заблокированные подсети. Обновляется по расписанию (04:30) и подгружается в набор nft."
                 right={<Switch on={lists.ipsum_enabled} onClick={() => mark(setLists)({ ...lists, ipsum_enabled: !lists.ipsum_enabled })} aria-label={t('ipsum — список IP для VPN')} />}>

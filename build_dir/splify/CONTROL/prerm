@@ -1,0 +1,6 @@
+#!/bin/sh
+[ -n "${IPKG_INSTROOT}" ] && exit 0
+/etc/init.d/splify-agent stop
+/etc/init.d/splify-agent disable
+/usr/local/sbin/splify-uninstall || true
+exit 0

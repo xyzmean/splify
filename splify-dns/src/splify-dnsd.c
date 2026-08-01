@@ -944,10 +944,17 @@ static int g_epfd = -1;
 static int g_listen_fd = -1;
 static struct ruleset g_vpn_rules;
 static struct ruleset g_direct_rules;
+/* A third list whose domains route through a SPECIFIC interface rather than the
+ * failover-chosen tunnel: its fake IPs land in their own set, which splify-apply
+ * marks for a dedicated routing table (see GEO_MARK/GEO_TABLE). Optional — with no
+ * --geo-rules the daemon behaves exactly as before. */
+static struct ruleset g_geo_rules;
 static const char *g_vpn_set = "splify_vpn_v4";
 static const char *g_direct_set = "splify_direct_v4";
+static const char *g_geo_set = "splify_geo_v4";
 static const char *g_vpn_rules_path;
 static const char *g_direct_rules_path;
+static const char *g_geo_rules_path;
 static const char *g_fakeip_map = "splify_fakeip_map";
 static volatile int g_reload_pending = 0;
 static volatile int g_running = 1;
@@ -958,8 +965,9 @@ static void on_sigterm(int sig) { (void)sig; g_running = 0; }
 static void reload_rules(void) {
     if (g_vpn_rules_path) load_rules(g_vpn_rules_path, &g_vpn_rules);
     if (g_direct_rules_path) load_rules(g_direct_rules_path, &g_direct_rules);
-    fprintf(stderr, "splify-dnsd: reloaded rules (vpn=%zu direct=%zu)\n",
-            g_vpn_rules.n, g_direct_rules.n);
+    if (g_geo_rules_path) load_rules(g_geo_rules_path, &g_geo_rules);
+    fprintf(stderr, "splify-dnsd: reloaded rules (vpn=%zu direct=%zu geo=%zu)\n",
+            g_vpn_rules.n, g_direct_rules.n, g_geo_rules.n);
 }
 
 static struct pending *pending_alloc(void) {
@@ -1065,12 +1073,13 @@ static void handle_upstream_response(struct pending *p) {
 
     /* Unparseable (malformed, or the rare qdcount != 1) or no rule match:
      * relay the real answer unchanged, exactly as before this feature. */
-    int is_vpn = 0, is_direct = 0;
+    int is_vpn = 0, is_direct = 0, is_geo = 0;
     if (nips >= 0) {
         is_vpn = ruleset_match(&g_vpn_rules, qname);
         is_direct = ruleset_match(&g_direct_rules, qname);
+        is_geo = ruleset_match(&g_geo_rules, qname);
     }
-    if (nips < 0 || (!is_vpn && !is_direct)) {
+    if (nips < 0 || (!is_vpn && !is_direct && !is_geo)) {
         sendto(g_listen_fd, buf, (size_t)n, 0, (struct sockaddr *)&p->client, p->client_len);
         return;
     }
@@ -1116,8 +1125,13 @@ static void handle_upstream_response(struct pending *p) {
                 /* Routing set is best-effort and not correctness-critical: a
                  * missing entry just means default policy applies (fine). Fire
                  * after the reply — the netlink send itself is sub-ms. */
-                if (is_vpn)    nft_add_element(g_vpn_set,    fake_addr, ips[0].ttl);
-                if (is_direct) nft_add_element(g_direct_set, fake_addr, ips[0].ttl);
+                /* A domain in the geo list goes ONLY into the geo set: it names a
+                 * specific interface, and adding the same fake IP to the VPN set
+                 * as well would leave which mark wins to chain order. */
+                if (is_geo)         nft_add_element(g_geo_set,    fake_addr, ips[0].ttl);
+                else if (is_vpn)    nft_add_element(g_vpn_set,    fake_addr, ips[0].ttl);
+                if (is_direct && !is_geo)
+                                    nft_add_element(g_direct_set, fake_addr, ips[0].ttl);
 
                 uint8_t out[512];
                 size_t len = build_rewritten_response(buf, qend, out, sizeof(out), 1, fake_addr);
@@ -1222,6 +1236,7 @@ static int run_proxy(int listen_port, int upstream_port) {
     close(g_epfd);
     ruleset_free(&g_vpn_rules);
     ruleset_free(&g_direct_rules);
+    ruleset_free(&g_geo_rules);
     return 0;
 }
 
@@ -1347,6 +1362,7 @@ static void usage(const char *argv0) {
         "usage: %s --listen-port P --upstream-port P --vpn-set NAME\n"
         "          --direct-set NAME --vpn-rules PATH --direct-rules PATH\n"
         "          --fakeip-state PATH [--fakeip-map NAME]\n"
+        "          [--geo-set NAME --geo-rules PATH]   (route via a named iface)\n"
         "          [--table \"inet fw4\"] [--nft /usr/sbin/nft]\n"
         "       %s --selftest\n"
         "       %s --match RULES_PATH HOSTNAME\n"
@@ -1377,6 +1393,10 @@ int main(int argc, char **argv) {
             g_vpn_rules_path = argv[++i];
         } else if (strcmp(argv[i], "--direct-rules") == 0 && i + 1 < argc) {
             g_direct_rules_path = argv[++i];
+        } else if (strcmp(argv[i], "--geo-set") == 0 && i + 1 < argc) {
+            g_geo_set = argv[++i];
+        } else if (strcmp(argv[i], "--geo-rules") == 0 && i + 1 < argc) {
+            g_geo_rules_path = argv[++i];
         } else if (strcmp(argv[i], "--fakeip-state") == 0 && i + 1 < argc) {
             g_fakeip_state_path = argv[++i];
         } else if (strcmp(argv[i], "--fakeip-map") == 0 && i + 1 < argc) {

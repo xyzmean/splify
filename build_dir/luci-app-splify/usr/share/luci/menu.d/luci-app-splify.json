@@ -1,0 +1,20 @@
+{
+	"admin/services/splify": {
+		"title": "splify",
+		"order": 60,
+		"action": { "type": "firstchild" },
+		"depends": { "acl": [ "luci-app-splify" ] }
+	},
+	"admin/services/splify/home": {
+		"title": "Главная",
+		"order": 1,
+		"action": { "type": "view", "path": "splify/main" },
+		"depends": { "acl": [ "luci-app-splify" ] }
+	},
+	"admin/services/splify/settings": {
+		"title": "Дополнительно",
+		"order": 2,
+		"action": { "type": "view", "path": "splify/advanced" },
+		"depends": { "acl": [ "luci-app-splify" ] }
+	}
+}

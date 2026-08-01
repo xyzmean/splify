@@ -1,0 +1,157 @@
+#!/bin/sh
+# splify-live — the CHEAP read path: everything the dashboard needs to keep its
+# header, tunnel table and traffic counters live, and nothing else.
+#
+# WHY THIS EXISTS (measured on a filogic box, 240MB RAM, real lists installed):
+# the dashboard used to have exactly one read call — `snapshot` — which forks
+# splify-doctor. Doctor is a full diagnostic sweep: it counts every element of
+# the live nft sets (ipsum ~24k, nozapret ~73k: ~1s EACH, because nft expands
+# interval sets), walks the whole firewall config, greps the list files and
+# probes routing. Measured 4-5s idle and 19-24s while the failover tick or the
+# agent runs. Two consequences, both user-visible:
+#
+#   1. NOTHING rendered until that finished — the page looked broken for
+#      seconds, and rpcd's own 30s script timeout (`rpcd -t 30`) turns the slow
+#      case into a hard "Ошибка" instead of a slow load.
+#   2. Traffic speed could never work at all. Rates are a delta between two
+#      samples of the cumulative rx/tx counters, so they need a SECOND sample a
+#      few seconds later — nobody is going to pay 5-24s per sample, so the
+#      dashboard never polled and RX/TX showed 0 forever.
+#
+# So the read path is split in two: this script (state + counters, no set
+# counting, no firewall walk, no list greps — target well under 300ms, safe to
+# poll every few seconds) and the cached diagnostic snapshot from
+# splify-snapshot (heavy, TTL'd, refreshed out of band).
+#
+# Output: one JSON object on stdout. Field names match splify-doctor's --json
+# where they overlap, so the UI reuses the same types.
+#
+#   splify-live           JSON for the dashboard poll
+#   splify-live --human   same data, human-readable (SSH debugging)
+#
+# No `set -u`: OpenWrt's config_* helpers aren't nounset-safe (see common.sh).
+
+HUMAN=0
+[ "${1:-}" = "--human" ] && HUMAN=1
+
+# shellcheck disable=SC1091
+. /usr/local/lib/splify/common.sh
+
+# Cached snapshot metadata: the dashboard shows the diagnostics block with its
+# real age and needs to know when a refresh is in flight, so it can spin the
+# button and re-fetch the moment fresh data lands (see splify-snapshot).
+SNAP_CACHE="/var/run/splify-snapshot.json"
+SNAP_LOCK="/var/run/splify-snapshot.lock"
+
+NOW="$(date +%s)"
+json_esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# ---- one `wg show all dump` for EVERY interface -----------------------------
+# The per-iface path (wg_handshake_age + ep_transfer per endpoint) costs two
+# wgshow forks per tunnel; `all dump` costs one for the whole box. Peer lines
+# carry latest-handshake/rx/tx; we want the freshest handshake (a stale extra
+# peer must not read as "tunnel down") and the summed transfer.
+#
+# Line shapes (`wg show all dump`, same for awg):
+#   interface: <iface> <privkey> <pubkey> <listen-port> <fwmark> [awg junk…]
+#   peer:      <iface> <pubkey> <psk> <endpoint> <allowed-ips> <hs> <rx> <tx> <ka>
+# Peer lines are exactly 9 fields AND field 5 is an allowed-ips list ("…/…" or
+# "(none)"), which no interface line can match — the discriminator stays valid
+# for awg's much longer interface line.
+WG_DUMP="$(wgshow all dump)"
+# iface<TAB>handshake_ts<TAB>rx<TAB>tx, one line per tunnel that has peers.
+WG_AGG="$(printf '%s\n' "$WG_DUMP" | awk -F'\t' '
+    NF == 9 && ($5 ~ /\// || $5 == "(none)") {
+        if ($6 + 0 > hs[$1]) hs[$1] = $6 + 0
+        rx[$1] += $7; tx[$1] += $8
+        seen[$1] = 1
+    }
+    END { for (i in seen) printf "%s\t%d\t%d\t%d\n", i, hs[i], rx[i], tx[i] }
+')"
+_wg_field() {  # iface column(2=hs 3=rx 4=tx) -> value or 0
+    printf '%s\n' "$WG_AGG" | awk -F'\t' -v i="$1" -v c="$2" '$1 == i { print $c + 0; f = 1; exit } END { if (!f) print 0 }'
+}
+
+# ---- one `ip -o link` for presence ------------------------------------------
+# iface_present() is a fork per tunnel; the whole device list is one fork.
+LINKS=" $(ip -o link show 2>/dev/null | awk -F': ' '{ sub(/@.*/, "", $2); printf "%s ", $2 }')"
+link_present() { case "$LINKS" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+STATE="$(read_state)"
+ACTIVE="$(active_iface)"
+FAILS="$(fail_get)"
+
+# ---- zapret: installed flavour + actually running --------------------------
+_zv="$ZAPRET_VERSION"
+zapret_available || _zv=""
+ZRUN=false
+[ -n "$_zv" ] && zapret_running && ZRUN=true
+
+# ---- pending update (written by splify-doctor's updater / telemetry) --------
+UPD_AVAIL=false; UPD_VER=""
+if [ -s /var/run/splify-update.json ]; then
+    UPD_AVAIL="$(jsonfilter -q -i /var/run/splify-update.json -e '@.update.available' 2>/dev/null || echo false)"
+    UPD_VER="$(jsonfilter -q -i /var/run/splify-update.json -e '@.update.version' 2>/dev/null || echo '')"
+    [ "$UPD_AVAIL" = true ] || UPD_AVAIL=false
+fi
+
+# ---- diagnostics-cache freshness -------------------------------------------
+SNAP_AGE=-1
+if [ -f "$SNAP_CACHE" ]; then
+    _m="$(stat -c %Y "$SNAP_CACHE" 2>/dev/null || date -r "$SNAP_CACHE" +%s 2>/dev/null)"
+    [ -n "$_m" ] && SNAP_AGE=$(( NOW - _m ))
+fi
+SNAP_PENDING=false
+[ -d "$SNAP_LOCK" ] && SNAP_PENDING=true
+# `overall` severity belongs to the diagnostic sweep, but the hero must not lose
+# its colour between snapshot fetches — carry the cached verdict along so a poll
+# response is self-sufficient. Read only the head of the file: the key is first.
+SNAP_OVERALL=""
+[ -s "$SNAP_CACHE" ] && SNAP_OVERALL="$(sed -n 's/.*"overall":"\([A-Z]*\)".*/\1/p' "$SNAP_CACHE" | head -1)"
+
+# ---- endpoints (ordered by priority, same shape doctor emits) --------------
+PRIO_MAP="$(config_foreach _collect_endpoint endpoint)"
+EP_JSON=""
+for _if in $(endpoints_by_priority); do
+    _prio="$(printf '%s\n' "$PRIO_MAP" | awk -v i="$_if" '$2 == i { print $1; exit }')"
+    _present=false; _hs=-1; _rx=0; _tx=0; _health=skip
+    _type="$(ep_type "$_if")"
+    if [ "$_type" = singbox ]; then
+        # sing-box has no handshake/counters without its Clash API (see
+        # common.sh ep_liveness/ep_transfer) — presence of the TUN is all we get.
+        if link_present "$(singbox_l3dev "$_if")"; then
+            _present=true; _hs=0; _health=ok
+        fi
+    elif link_present "$_if"; then
+        _present=true
+        _ts="$(_wg_field "$_if" 2)"
+        _rx="$(_wg_field "$_if" 3)"
+        _tx="$(_wg_field "$_if" 4)"
+        if [ "${_ts:-0}" -gt 0 ] 2>/dev/null; then _hs=$(( NOW - _ts )); else _hs=999999; fi
+        # Same passive rule doctor uses: fresh handshake = ok, stale = idle. This
+        # path NEVER probes (that mutates routing — failover owns probing).
+        if [ "$_hs" -lt 180 ] 2>/dev/null; then _health=ok; else _health=idle; fi
+    fi
+    EP_JSON="$EP_JSON{\"iface\":\"$(json_esc "$_if")\",\"type\":\"$(json_esc "$_type")\",\"priority\":\"$(json_esc "$_prio")\",\"present\":$_present,\"handshake_age\":$_hs,\"rx\":$_rx,\"tx\":$_tx,\"health\":\"$_health\"},"
+done
+
+if [ "$HUMAN" = 1 ]; then
+    echo "state      : ${STATE:-(none)}   active: ${ACTIVE:-(none)}   mode: $MODE"
+    echo "killswitch : ${KILLSWITCH:-0}   fail_count: $FAILS"
+    echo "zapret     : ${_zv:-(not installed)} running=$ZRUN"
+    echo "snapshot   : age=${SNAP_AGE}s pending=$SNAP_PENDING overall=${SNAP_OVERALL:-?}"
+    echo "endpoints  :"
+    printf '%s\n' "$WG_AGG" | while IFS="$(printf '\t')" read -r _i _h _r _t; do
+        [ -n "$_i" ] || continue
+        printf '  %-10s hs=%ss rx=%s tx=%s\n' "$_i" "$(( NOW - _h ))" "$_r" "$_t"
+    done
+    exit 0
+fi
+
+printf '{"ts":%s,' "$NOW"
+printf '"summary":{"mode":"%s","state":"%s","active_iface":"%s","killswitch":%s,"fail_count":%s,"lan_iface":"%s","lan_cidr":"%s","zapret_version":"%s","zapret_running":%s,"update_available":%s,"update_version":"%s"},' \
+    "$(json_esc "$MODE")" "$(json_esc "$STATE")" "$(json_esc "$ACTIVE")" "${KILLSWITCH:-0}" "${FAILS:-0}" \
+    "$(json_esc "$LAN_IFACE")" "$(json_esc "$LAN_CIDR")" "$(json_esc "$_zv")" "$ZRUN" "$UPD_AVAIL" "$(json_esc "$UPD_VER")"
+printf '"endpoints":[%s],' "${EP_JSON%,}"
+printf '"diagnostics":{"age":%s,"pending":%s,"overall":"%s"}}\n' \
+    "$SNAP_AGE" "$SNAP_PENDING" "$(json_esc "$SNAP_OVERALL")"

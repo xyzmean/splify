@@ -1,0 +1,121 @@
+config splify 'global'
+	# routing mode: blocklist (only listed/ipsum IPs ride VPN) | full (default via
+	# VPN, direct list = exceptions) | split (only explicit vpn lists ride VPN)
+	option mode 'blocklist'
+	# failover loop cadence, seconds (the procd service sleeps this between ticks)
+	option interval '180'
+	# 1 = drop policy-VPN traffic when every tunnel is down instead of leaking to WAN
+	option killswitch '0'
+	option lan_iface 'br-lan'
+	option lan_cidr '192.168.1.0/24'
+
+	# health probing: ping these THROUGH a candidate iface; curl this URL for WAN/zapret
+	list health_target '1.1.1.1'
+	list health_target '8.8.8.8'
+	option health_url 'https://1.1.1.1/cdn-cgi/trace'
+
+	# zapret DPI-bypass on WAN egress (auto-skipped if zapret is not installed)
+	option zapret_enabled '1'
+
+	# ipsum: blocked/foreign IP list -> VPN (downloaded by URL, refreshed daily)
+	option ipsum_enabled '1'
+	option ipsum_url 'https://github.com/1andrevich/Re-filter-lists/releases/latest/download/ipsum.lst'
+	# ru/cn subnets kept direct; feed the zapret bypass set
+	option ru_enabled '1'
+	option ru_url 'https://github.com/xyzmean/radb-tools/releases/download/latest/ru_cn_final.lst'
+
+	# optional downloadable DOMAIN lists -> tagged at dnsmasq resolve time
+	option vpn_domains_url ''
+	option ignore_domains_url ''
+
+	# manual additions (edit in LuCI). CIDRs go straight into nft sets; domains
+	# into dnsmasq nftset directives.
+	list vpn_cidr ''
+	list direct_cidr ''
+	list vpn_domain ''
+	list direct_domain ''
+
+# one section per failover tunnel. iface = an existing amneziawg/wireguard
+# interface you created normally in LuCI. Lowest priority number wins.
+#
+# EXAMPLE (kept commented so a fresh install ships NO phantom endpoint whose
+# iface doesn't exist in /etc/config/network — easyinstall registers the real
+# warp0 it creates; uncomment and create the iface in Network → Interfaces to
+# add a manual one).
+#config endpoint
+#	option iface 'wg0'
+#	option priority '1'
+	# type: транспорт туннеля. wg = WireGuard/AmneziaWG (работает).
+	#       singbox = sing-box (VLESS/Hysteria) — пока заглушка, в планах.
+#	option type 'wg'
+
+# per-device override (optional): pin a LAN host to vpn or direct
+#config device
+#	option ip '192.168.1.50'
+#	option mode 'vpn'
+
+# sing-box endpoint (optional): import a vless:// or hysteria2:// share link as
+# a failover endpoint alongside wg/awg ones. iface is a SYNTHETIC name (there is
+# no pre-existing netifd interface to point at — unlike wg/awg), so add a
+# matching `config endpoint` section (type 'singbox') referencing the same
+# iface to make it a failover candidate. `uri` is the SOURCE OF TRUTH — it is
+# re-parsed at every render/apply and is never hand-edited by the UI; re-import
+# (paste a new link) to change anything. The rest are cached display-only
+# fields written by `splify-ctl singbox-import`, purely for a read-only summary
+# — never authoritative, and a stale one can never produce a wrong running
+# config (only a stale-looking summary until the next import).
+#config singbox 'sb0'
+#	option iface 'sb0'
+#	option uri 'vless://uuid@host:443?...'
+#	# cached display fields (vless | hysteria2)
+#	option protocol 'vless'
+#	option server ''
+#	option port ''
+#	# vless: none|tls|reality; hysteria2: always tls-like, left empty
+#	option security ''
+#	# vless transport: tcp|ws|grpc|http|httpupgrade|xhttp; empty for hysteria2
+#	option network ''
+#	# uri #fragment, human remark
+#	option name ''
+#	# TUN device actually used, <=15 chars (IFNAMSIZ); defaults to iface
+#	option l3dev 'sb0'
+
+# Remote management API (design §5). Two channels share one backend (splify-ctl):
+#   - inbound token REST (/cgi-bin/splify-api): direct mgmt when the router is
+#     reachable (LAN / live tunnel). Keep it OFF the public internet.
+#   - outbound agent (splify-agent): the router polls the dashboard, so it keeps
+#     working behind CGNAT and when every tunnel is down.
+#
+# ENROLLMENT (the dashboard is an EXTERNAL tool — see splify-control/PROTOCOL.md):
+# the dashboard hands you a "connection JSON" { internal, external, access_key }.
+# You paste it once (LuCI → API, or: splify-ctl connect < blob.json). The router
+# then generates its OWN per-node key (`token`, seeded on first boot below) and
+# registers it with the dashboard using the one-time access_key; afterwards every
+# poll authenticates with that self-owned token and the access_key is cleared.
+#
+# node_id + token are auto-generated on first boot (see uci-defaults). Both
+# channels stay closed (enabled=0 / agent_enabled=0) until you opt in.
+config api 'api'
+	# inbound REST CGI on/off
+	option enabled '0'
+	# outbound poll agent on/off
+	option agent_enabled '0'
+	# this node's OWN communication key (auto-seeded on first boot; registered
+	# with the dashboard at enrollment). Also the bearer for the inbound CGI.
+	option token ''
+	# stable per-node id (auto-seeded on first boot; the dashboard may suggest one)
+	option node_id ''
+	# one-time enrollment key from the dashboard's connection JSON (cleared after
+	# a successful enroll)
+	option access_key ''
+	# dashboard URL reachable over the tunnel / WG side (tried first, kept private)
+	option control_internal ''
+	# dashboard URL reachable over the public internet / WAN (CGNAT + tunnel-down
+	# fallback)
+	option control_external ''
+	# 1 once the node has registered its token with the dashboard
+	option enrolled '0'
+	# agent poll cadence, seconds
+	option interval '60'
+	# optional source-prefix allow-list for the inbound CGI, e.g. '10.8.0.'
+	option allow_subnet ''

@@ -1,0 +1,5 @@
+#!/bin/sh
+[ -n "${IPKG_INSTROOT}" ] && exit 0
+/etc/init.d/splify-dns stop    >/dev/null 2>&1 || true
+/etc/init.d/splify-dns disable >/dev/null 2>&1 || true
+exit 0

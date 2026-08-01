@@ -1,0 +1,12 @@
+In file included from /opt/zig-linux-x86_64-0.13.0/lib/libc/musl/crt/rcrt1.c:3:
+In file included from /opt/zig-linux-x86_64-0.13.0/lib/libc/musl/crt/../ldso/dlstart.c:2:
+In file included from /opt/zig-linux-x86_64-0.13.0/lib/libc/musl/src/internal/dynlink.h:62:
+In file included from /opt/zig-linux-x86_64-0.13.0/lib/libc/musl/arch/mips64/reloc.h:30:
+/opt/zig-linux-x86_64-0.13.0/lib/libc/musl/include/endian.h:31:23: warning: operator '<<' has lower precedence than '+'; '+' will be evaluated first [-Wshift-op-parentheses]
+   31 |         return __bswap32(__x)+0ULL<<32 | __bswap32(__x>>32);
+      |                ~~~~~~~~~~~~~~^~~~~~~
+/opt/zig-linux-x86_64-0.13.0/lib/libc/musl/include/endian.h:31:23: note: place parentheses around the '+' expression to silence this warning
+   31 |         return __bswap32(__x)+0ULL<<32 | __bswap32(__x>>32);
+      |                              ^    
+      |                (                  )
+1 warning generated.

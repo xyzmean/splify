@@ -1,0 +1,783 @@
+#!/bin/sh
+# splify-doctor — structured self-diagnosis: "what is broken and what to fix?"
+#
+#   splify-doctor          human-readable report (for SSH)
+#   splify-doctor --json   machine-readable (consumed by the LuCI panel)
+#
+# Every check carries a severity:
+#   OK       working as intended
+#   WARN     suboptimal / stale, not breaking routing right now
+#   FIXABLE  broken but self-heals on the next tick or via one named command
+#   FAIL     broken, needs an operator decision (firewall/config)
+# Exit code = worst severity (0 OK, 1 WARN, 2 FIXABLE, 3 FAIL) so scripts/CI gate.
+#
+# Almost every probe reuses a common.sh helper — this file is orchestration, not
+# new diagnostic logic. No `set -u`: OpenWrt's config_* helpers aren't nounset-safe.
+
+# Output modes:
+#   (none)     human-readable report (for SSH)
+#   --json     machine-readable diagnostics object (consumed by the LuCI panel)
+#   --events   failover timeline only (RAM ring buffer -> JSON array)
+#   --snapshot combined {"status":{...},"events":[...]} in ONE process — saves a
+#              second fork of doctor when the dashboard wants both (the read path
+#              used to issue two separate ubus calls: status + events). events is
+#              cheap on its own (it short-circuits before diagnostics), but
+#              snapshot still removes the rpcd round-trip and the re-source of
+#              common.sh. Internally sets JSON=1 and folds the events array in.
+JSON=0; EVENTS=0; SNAPSHOT=0
+case "${1:-}" in
+    --json)     JSON=1 ;;
+    --events)   EVENTS=1 ;;
+    --snapshot) JSON=1; SNAPSHOT=1 ;;
+esac
+
+# ---- result accumulators ---------------------------------------------------
+# checks: one record per line, tab-separated SEV<TAB>CATEGORY<TAB>MSG<TAB>FIX.
+CHECKS=""; EP_JSON=""; LIST_JSON=""; WORST=0
+_rank() { case "$1" in OK) echo 0;; WARN) echo 1;; FIXABLE) echo 2;; FAIL) echo 3;; *) echo 0;; esac; }
+add() {  # SEV CATEGORY MSG [FIX]
+    CHECKS="$CHECKS$1	$2	$3	${4:-}
+"
+    _r=$(_rank "$1"); [ "$_r" -gt "$WORST" ] && WORST="$_r"
+}
+json_esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }   # ponytail: fields are ASCII control text
+file_age() { _m="$(stat -c %Y "$1" 2>/dev/null || date -r "$1" +%s 2>/dev/null)"; [ -n "$_m" ] && echo $(( $(date +%s) - _m )) || echo -1; }
+STALE_AGE=172800   # 2 days — lists refresh daily at 04:xx, so older = a missed run
+
+# ---- self-test (pure logic, no router): the one runnable check. Runs BEFORE
+# sourcing common.sh so it works off-box (`SPLIFY_SELFTEST=1 splify-doctor`).
+if [ "${SPLIFY_SELFTEST:-0}" = "1" ]; then
+    [ "$(json_esc 'a"b\c')" = 'a\"b\\c' ] || { echo "json_esc FAIL"; exit 1; }
+    [ "$(_rank FAIL)" -gt "$(_rank FIXABLE)" ] && [ "$(_rank FIXABLE)" -gt "$(_rank WARN)" ] \
+        && [ "$(_rank WARN)" -gt "$(_rank OK)" ] || { echo "_rank order FAIL"; exit 1; }
+    echo "selftest OK"; exit 0
+fi
+
+. /usr/local/lib/splify/common.sh
+
+# ---- failover event timeline (design §4.3) ---------------------------------
+# emit_events: JSON array of the RAM ring buffer journal() writes, newest first.
+# Consumed by `splify-doctor --events` directly and folded into `--snapshot`.
+# Drawn out of the --events branch so snapshot reuses the identical formatting.
+emit_events() {
+    printf '['
+    { [ -s "$EVENTS_FILE" ] && sed '1!G;h;$!d' "$EVENTS_FILE"; } \
+    | { _first=1
+        while IFS="$(printf '\t')" read -r _ts _kind _from _to _reason; do
+            [ -n "$_ts" ] || continue
+            [ "$_first" = 1 ] && _first=0 || printf ','
+            printf '{"ts":%s,"kind":"%s","from":"%s","to":"%s","reason":"%s"}' \
+                "$_ts" "$(json_esc "$_kind")" "$(json_esc "$_from")" "$(json_esc "$_to")" "$(json_esc "$_reason")"
+        done; }
+    printf ']'
+}
+
+# `splify-doctor --events` -> JSON array only. Still its own process (kept for
+# the ubus `events` method, splify-status and SSH users); exits before any
+# diagnostics run so it stays cheap (~0.07s on a 3.5s box).
+if [ "$EVENTS" = 1 ]; then
+    emit_events; printf '\n'
+    exit 0
+fi
+
+# ---- performance: pre-load firewall config into in-process lookup tables -----
+# The firewall-zone sanity probes (fw_zone_of_net, fw_zone_has_masq,
+# fw_has_forwarding, …) historically issued one `uci -q get firewall.@zone[i].x`
+# PER field PER zone — on a typical box that compiled to ~70 uci fork-execs and
+# dominated the ~3.5s doctor runtime (profiled: 94 uci calls, ~70 of them in the
+# firewall loops). We snapshot the whole firewall config ONCE here and rebuild
+# the same fw_* helpers to read from flat shell variables (zero-fork lookups),
+# leaving their observable behaviour identical. This is local to doctor so the
+# other 12 scripts that source common.sh keep their exact original helpers.
+#
+# Variable layout (set by _fw_load once):
+#   _FW_NZONES              — highest @zone index + 1
+#   _FW_ZONE_<i>_NAME       — zone name (e.g. "lan"), or empty
+#   _FW_ZONE_<i>_<KEY>      — any option (lowercased key): network, device,
+#                             masq, mtu_fix, input, output, forward, enabled,
+#                             family. `network`/`device` keep their list values
+#                             space-joined so callers can `for` over them.
+#   _FW_NFWDS               — highest @forwarding index + 1
+#   _FW_FORWARDING_<i>_<KEY> — src / dest / enabled / family
+# All multi-valued network/device options are space-joined in place of their
+# list form, mirroring what `uci -q get` returns for a list option.
+_fw_load() {
+    # one `uci show` + one awk pass over its output -> shell VAR='\''val'\'' lines.
+    # index()/substr parsing (no bracket-regex) — verified against busybox awk.
+    eval "$(uci show firewall 2>/dev/null | awk '
+        function store(sec, i, key, val) {
+            if (sec == "zone" && (key == "network" || key == "device")) {
+                prev = zonelist[i "_" key]
+                zonelist[i "_" key] = (prev == "" ? val : prev " " val)
+            } else {
+                print "_FW_" toupper(sec) "_" i "_" toupper(key) "=\047" val "\047"
+            }
+        }
+        {
+            if (index($0, "firewall.@zone[") != 1 && index($0, "firewall.@forwarding[") != 1) next
+            sec = (index($0, "firewall.@zone[") == 1) ? "zone" : "forwarding"
+            s = $0; sub(/^firewall\.@[a-z]+\[/, "", s)
+            bi = index(s, "]"); if (bi == 0) next
+            idx = substr(s, 1, bi-1) + 0
+            after = substr(s, bi+1)
+            if (substr(after, 1, 1) == "=") {
+                if (sec == "zone")           { if (idx > maxz) maxz = idx }
+                else if (sec == "forwarding") { if (idx > maxf) maxf = idx }
+                next
+            }
+            sub(/^\./, "", after)
+            eq = index(after, "=")
+            key = tolower(substr(after, 1, eq-1))
+            val = substr(after, eq+1)
+            # NOTE: no apostrophes in comments inside this awk program — it is
+            # single-quoted shell, so one would end the string mid-program.
+            #
+            # uci show renders a LIST option as one line with each value quoted
+            # separately (network=QwanQ QwanQ6, with Q meaning a single quote).
+            # Stripping only the OUTER quotes left the inner ones behind, so the
+            # eval below saw two words: the variable got just the first network
+            # (a zone with several networks matched only one of them) and the
+            # shell tried to RUN the second as a command — the source of doctor
+            # printing "eval: wan6: not found". Values here are uci identifiers
+            # and device names, which never contain spaces or quotes of their own,
+            # so dropping every quote and keeping the space separation yields
+            # exactly the space-joined list form the rest of this file expects.
+            gsub(/\047/, "", val)
+            store(sec, idx, key, val)
+        }
+        END {
+            for (k in zonelist) {
+                split(k, a, "_"); i = a[1]; key = a[2]
+                print "_FW_ZONE_" i "_" toupper(key) "=\047" zonelist[k] "\047"
+            }
+            print "_FW_NZONES=" (maxz+1)
+            print "_FW_NFWDS=" (maxf+1)
+        }
+    ')"
+}
+_fw_load
+
+# zone option lookup (zero-fork): sets the caller's $_fw_val. Empty = unset,
+# matching `uci -q get` semantics. Callers use it inline (no command sub).
+# Variable-name prefix matches what _fw_load's awk emits ("_FW_<SECTION>_<i>_<KEY>").
+_fw_zget() { eval "_fw_val=\"\${_FW_ZONE_${1}_${2}}\""; }
+# forwarding option lookup. NOTE: section prefix is FORWARDING (the section
+# name), not the shorthand FWD — it must match _fw_load's awk store() exactly.
+_fw_fget() { eval "_fw_val=\"\${_FW_FORWARDING_${1}_${2}}\""; }
+
+# ---- nft set sizes ---------------------------------------------------------
+# Doctor NEVER counts a live nft set. Profiling on real hardware (24k-entry
+# ipsum, 44k nozapret): the cost of `nft list set` is nft expanding every
+# interval into text, ~1s and 54-65MB of RSS per set, and batching does not help
+# because the expansion is the cost. On a 240MB router that allocation is what
+# the OOM-killer kept shooting (see the nft section of common.sh). So the numbers
+# in the report come from the source list files and the health of each set comes
+# from set_healthy()'s O(1) membership probes — see the lists section below.
+
+# Local, zero-fork re-implementations of the common.sh fw_* helpers used in the
+# endpoint firewall loop. Each mirrors its original's contract exactly (return
+# value, echoed value, "unset = default" semantics) so doctor's diagnostics are
+# byte-identical — only the uci access is replaced.
+fw_sec_active() {  # $1 = "@zone[i]" | "@forwarding[i]"
+    case "$1" in
+        @zone\[*\]) _idx="${1#@zone[}"; _idx="${_idx%]}" ;;
+        @forwarding\[*\]) _idx="${1#@forwarding[}"; _idx="${_idx%]}" ;;
+        *) return 1 ;;
+    esac
+    [ -n "$_idx" ] || return 1
+    case "$1" in
+        @zone\[*\])
+            _fw_zget "$_idx" ENABLED
+            [ -n "$_fw_val" ] && ! fw_bool "$_fw_val" && return 1
+            _fw_zget "$_idx" FAMILY
+            # family is matched case-insensitively (the original used `tr A-Z a-z`);
+            # we accept both cases here to avoid the extra fork.
+            case "$_fw_val" in
+                ''|ANY|any|BOTH|both|IPV4|ipv4|4) return 0 ;;
+                *) return 1 ;;
+            esac ;;
+        @forwarding\[*\])
+            _fw_fget "$_idx" ENABLED
+            [ -n "$_fw_val" ] && ! fw_bool "$_fw_val" && return 1
+            _fw_fget "$_idx" FAMILY
+            case "$_fw_val" in
+                ''|ANY|any|BOTH|both|IPV4|ipv4|4) return 0 ;;
+                *) return 1 ;;
+            esac ;;
+    esac
+    return 1
+}
+
+# Echo the firewall zone name covering logical iface $1; non-zero return if none.
+# Mirrors fw4: a zone matches via its `network` OR `device` list (also resolving
+# the network's own L3 device); disabled / ipv6-only zones are ignored.
+fw_zone_of_net() {
+    _want="$1"
+    _wantdev="$(uci -q get "network.$1.device" 2>/dev/null)"   # network's L3 device, if any
+    _i=0
+    while [ "$_i" -lt "$_FW_NZONES" ]; do
+        if fw_sec_active "@zone[$_i]"; then
+            # space-joined list values → iterate words directly
+            eval "_net=\"\${_FW_ZONE_${_i}_NETWORK}\"; _dev=\"\${_FW_ZONE_${_i}_DEVICE}\""
+            for _m in $_net $_dev; do
+                [ -n "$_m" ] || continue
+                if [ "$_m" = "$_want" ] || { [ -n "$_wantdev" ] && [ "$_m" = "$_wantdev" ]; }; then
+                    eval "printf '%s' \"\${_FW_ZONE_${_i}_NAME}\""
+                    return 0
+                fi
+            done
+        fi
+        _i=$((_i + 1))
+    done
+    return 1
+}
+
+# zone-name -> its index in the @zone[] array, or empty if absent / inactive.
+_fw_zone_idx_by_name() {
+    _i=0
+    while [ "$_i" -lt "$_FW_NZONES" ]; do
+        eval "_n=\"\${_FW_ZONE_${_i}_NAME}\""
+        [ "$_n" = "$1" ] && { echo "$_i"; return 0; }
+        _i=$((_i + 1))
+    done
+    return 1
+}
+
+# Is masquerading enabled on the (active) zone named $1?
+fw_zone_has_masq() {
+    _idx="$(_fw_zone_idx_by_name "$1")" || return 1
+    fw_sec_active "@zone[$_idx]" || return 1
+    eval "fw_bool \"\${_FW_ZONE_${_idx}_MASQ}\""
+}
+
+# Is MSS clamping (mtu_fix) enabled on the (active) zone named $1?
+fw_zone_has_mtu_fix() {
+    _idx="$(_fw_zone_idx_by_name "$1")" || return 1
+    fw_sec_active "@zone[$_idx]" || return 1
+    eval "fw_bool \"\${_FW_ZONE_${_idx}_MTU_FIX}\""
+}
+
+# Are zone $1's input/output/forward policies all ACCEPT?
+fw_zone_policies_open() {
+    _idx="$(_fw_zone_idx_by_name "$1")" || return 1
+    eval "_fwp_in=\"\${_FW_ZONE_${_idx}_INPUT}\"; _fwp_out=\"\${_FW_ZONE_${_idx}_OUTPUT}\"; _fwp_fwd=\"\${_FW_ZONE_${_idx}_FORWARD}\""
+    [ "$_fwp_in" = ACCEPT ] && [ "$_fwp_out" = ACCEPT ] && [ "$_fwp_fwd" = ACCEPT ]
+}
+
+# Is there an active (enabled, IPv4) forwarding src zone $1 -> dest zone $2?
+fw_has_forwarding() {
+    _i=0
+    while [ "$_i" -lt "$_FW_NFWDS" ]; do
+        if fw_sec_active "@forwarding[$_i]"; then
+            eval "_src=\"\${_FW_FORWARDING_${_i}_SRC}\"; _dest=\"\${_FW_FORWARDING_${_i}_DEST}\""
+            [ "$_src" = "$1" ] && [ "$_dest" = "$2" ] && return 0
+        fi
+        _i=$((_i + 1))
+    done
+    return 1
+}
+
+# Firewall zone carrying the LAN. Same resolution order as the original: the
+# networks bound to $LAN_IFACE by device, then $LAN_IFACE directly, then 'lan'.
+fw_lan_zone() {
+    for _ln in $(uci show network 2>/dev/null \
+            | sed -n "s/^network\.\([^.]*\)\.device='\{0,1\}${LAN_IFACE}'\{0,1\}\$/\1/p"); do
+        _lz="$(fw_zone_of_net "$_ln")" && { echo "$_lz"; return 0; }
+    done
+    _lz="$(fw_zone_of_net "$LAN_IFACE")" && { echo "$_lz"; return 0; }
+    _lz="$(fw_zone_of_net lan)"          && { echo "$_lz"; return 0; }
+    return 1
+}
+
+# ---- per-run endpoint memoization -------------------------------------------
+# active_iface()/endpoints_by_priority()/ep_type() each drive a full
+# config_foreach over the endpoint UCI sections; called per-endpoint in the loop
+# below they re-walk UCI several times for the same handful of ifaces. Pin the
+# two whole-list results once (ORDERED, PRIO_MAP) and memoize ep_type per iface.
+ORDERED="$(endpoints_by_priority)"
+_ep_type_of() {  # iface -> type, cached in _EP_TYPE_CACHE
+    case "$1" in
+        *" "*) ;;
+        *) eval "_t=\"\${_EP_TYPE_CACHE_$1}\"" 2>/dev/null
+           [ -n "$_t" ] && { printf '%s' "$_t"; return; } ;;
+    esac
+    _t="$(ep_type "$1")"
+    # iface names are validated to [A-Za-z0-9_] (valid_iface in splify-ctl and
+    # the section-name form here), so the cache var name is safe to build.
+    case "$1" in *[!A-Za-z0-9_]*) ;; *) eval "_EP_TYPE_CACHE_$1=\"\$_t\"" ;; esac
+    printf '%s' "$_t"
+}
+
+STATE="$(read_state)"; ACTIVE="$(active_iface)"
+case "$STATE" in vpn:*) PATH_KIND=vpn;; killswitch) PATH_KIND=killswitch;; zapret) PATH_KIND=zapret;; *) PATH_KIND=wan;; esac
+
+# ---- config sanity ---------------------------------------------------------
+if [ -z "$ORDERED" ]; then
+    add FAIL config "no failover tunnels configured" "add a tunnel under Services -> splify (Failover tunnels)"
+fi
+if [ -z "$LAN_CIDR" ]; then
+    add FAIL config "LAN subnet not set or not detected on '$LAN_IFACE' — no policy chains, all LAN traffic exits WAN" "set the LAN subnet (CIDR) or fix the LAN interface in Services -> splify"
+fi
+
+# ---- sing-box (package presence + per-endpoint rendered config / TUN) ------
+# Only probed at all if at least one `config singbox` section exists — an
+# install with zero sing-box endpoints stays silent here (no noise for
+# wg/awg-only setups).
+if [ -n "$(uci -q get splify.@singbox[0] 2>/dev/null)" ]; then
+    if command -v sing-box >/dev/null 2>&1; then
+        add OK singbox "sing-box package installed"
+    else
+        add FAIL singbox "sing-box endpoint(s) configured but the sing-box package is not installed" "opkg install sing-box (or remove the singbox endpoint)"
+    fi
+fi
+# Walk `config singbox` sections inline (same uci-show/sed enumeration
+# common.sh's device_is_singbox uses) rather than via a new config_foreach
+# callback function — keeps this file's top-level function count steady.
+for _sbsec in $(uci -q show splify 2>/dev/null | sed -n "s/^splify\.\([^.=]*\)=singbox\$/\1/p"); do
+    config_get _sbif "$_sbsec" iface ''
+    [ -n "$_sbif" ] || continue
+    is_endpoint "$_sbif" || continue            # not referenced by any failover endpoint — skip
+    [ "$(ep_type "$_sbif")" = singbox ] || continue   # that endpoint isn't actually type=singbox — skip
+    command -v sing-box >/dev/null 2>&1 || continue   # already reported as FAIL above
+    _cf="$(singbox_conf_file "$_sbif")"
+    if [ -s "$_cf" ]; then
+        sing-box check -c "$_cf" >/dev/null 2>&1 \
+            || add FAIL singbox "$_sbif: rendered config fails 'sing-box check'" "re-import the vless/hysteria2 link"
+    else
+        add FIXABLE singbox "$_sbif: no rendered config" "run: splify-singbox-render $_sbif"
+    fi
+    _l3="$(singbox_l3dev "$_sbif")"
+    if iface_present "$_l3"; then
+        pgrep -f "sing-box run.*$(singbox_conf_file "$_sbif")" >/dev/null 2>&1 \
+            && add OK singbox "$_sbif: TUN up ($_l3), process running" \
+            || add WARN singbox "$_sbif: TUN device up but sing-box process not found" "/etc/init.d/splify-singbox restart"
+    else
+        add FIXABLE singbox "$_sbif: TUN device ($_l3) not present" "/etc/init.d/splify-singbox restart"
+    fi
+done
+
+# ---- per-endpoint ----------------------------------------------------------
+# peer sections carrying this iface's route_allowed_ips (named + anonymous cfg).
+_peers_of() { uci show network 2>/dev/null | sed -n "s/^network\.\([^.=]*\)=\(wireguard\|amneziawg\)_$1\$/\1/p"; }
+rai_ok() { for _s in $(_peers_of "$1"); do [ "$(uci -q get "network.$_s.route_allowed_ips" 2>/dev/null)" = "0" ] || return 1; done; return 0; }
+# priority of an iface, via common.sh's endpoint collector (emits "prio<TAB>iface").
+# Collected once (not per-iface — this loop runs once per endpoint, and
+# re-walking UCI inside it would make the whole loop O(n^2)).
+PRIO_MAP="$(config_foreach _collect_endpoint endpoint)"
+prio_of() { printf '%s\n' "$PRIO_MAP" | awk -v i="$1" '$2==i{print $1; exit}'; }
+
+LANZ="$(fw_lan_zone)"
+for _if in $ORDERED; do
+    _present=false; _hs=-1; _health=skip; _zone=""; _masq=false; _fwd=false; _rx=0; _tx=0
+    if iface_present "$_if"; then
+        _present=true
+        # cumulative rx/tx bytes (UI derives live speed between polls); design §4.1
+        _rxtx="$(ep_transfer "$_if")"; _rx="${_rxtx%% *}"; _tx="${_rxtx##* }"
+        [ -n "$_rx" ] || _rx=0; [ -n "$_tx" ] || _tx=0
+        # PASSIVE health only — the doctor never probes (that mutates routing and
+        # must stay out of the read-only LuCI path). Derive from handshake age, a
+        # pure `wg show` read: fresh = ok, stale = idle (not "failed" — we didn't
+        # test it; the failover daemon is the authoritative prober). The active
+        # path in the summary already names the daemon-confirmed live tunnel.
+        _hs="$(ep_liveness "$_if")"
+        if [ "$_hs" -lt 180 ] 2>/dev/null; then _health=ok; else _health=idle; fi
+    elif iface_is_singbox "$_if"; then
+        # A sing-box endpoint intentionally has no network.$_if section at
+        # all (its TUN is managed by splify-singbox/procd, not netifd) — the
+        # sing-box-specific loop above already reported package/config/TUN/
+        # process diagnostics for it, so don't ALSO fall through to the
+        # generic "not configured in /etc/config/network" FAIL below, which
+        # would wrongly tell the operator to create a network interface.
+        :
+    elif [ -n "$(uci -q get "network.$_if" 2>/dev/null)" ]; then
+        # configured in /etc/config/network but the kernel link is gone (stopped /
+        # auto 0) — recoverable; failover brings candidates up with ifup.
+        add FIXABLE endpoint "$_if: configured but down (no kernel link)" "failover will bring it up, or run: ifup $_if"
+    else
+        add FAIL endpoint "$_if: interface does not exist (not configured in /etc/config/network)" "create it under Network -> Interfaces, or remove it from splify"
+    fi
+    # route_allowed_ips is a UCI setting, independent of link state — check it
+    # whenever the endpoint is configured, so a down endpoint can't be ifup'd with
+    # route_allowed_ips=1 and hijack the main table before splify-apply fixes it.
+    # (Truly-absent ifaces have no peer sections, so rai_ok is trivially clean.)
+    rai_ok "$_if" || add FIXABLE endpoint "$_if: route_allowed_ips not 0 on a peer (would hijack main routes when brought up)" "run splify-apply (forces route_allowed_ips=0)"
+    # firewall path (reuses fw_* helpers; these only warn — splify never edits fw)
+    if _zone="$(fw_zone_of_net "$_if")"; then
+        if _role="$(fw_zone_is_shared "$_zone")"; then
+            # Endpoint shares the WAN/LAN zone. That zone may already carry masq +
+            # LAN->WAN forwarding, so the masq/fwd probes below would read "healthy" —
+            # but auto-fix REFUSES a shared zone (it can't add tunnel rules without
+            # opening the whole WAN/LAN). Flag it instead of reporting a false OK.
+            add FAIL firewall "$_if: is in the shared '$_zone' ($_role) firewall zone — auto-fix can't add tunnel masq/forwarding without opening the whole $_role zone" "give $_if its own firewall zone, then run: splify-firewall fix $_if"
+        elif ! fw_zone_is_tunnel_only "$_zone"; then
+            # Zone also holds non-tunnel networks. masq + LAN->zone fwd may already be
+            # present (read "healthy"), but auto-fix REFUSES a mixed zone — and the
+            # reverse zone->LAN it would otherwise add is withheld, so site-to-site
+            # inbound stays rejected. Flag it as the real, manual remediation.
+            add FAIL firewall "$_if: shares firewall zone '$_zone' with non-tunnel networks — auto-fix refuses to change a mixed zone's masq/forwarding/policy (site-to-site inbound stays rejected)" "give $_if its own firewall zone, then run: splify-firewall fix $_if"
+        else
+            if fw_zone_has_masq "$_zone"; then _masq=true; else
+                add FAIL firewall "$_if: zone '$_zone' has masquerading disabled" "enable masq on firewall zone '$_zone'"
+            fi
+            fw_zone_has_mtu_fix "$_zone" || add FIXABLE firewall "$_if: MSS clamping (mtu_fix) disabled on zone '$_zone' — large packets stall on low-MTU tunnels" "splify-firewall fix $_if"
+            fw_zone_policies_open "$_zone" || add FAIL firewall "$_if: zone '$_zone' has a non-ACCEPT input/output/forward policy — blocks router-originated probes and site-to-site/intra-zone traffic" "splify-firewall fix $_if"
+            if [ -n "$LANZ" ]; then
+                if fw_has_forwarding "$LANZ" "$_zone"; then _fwd=true; else
+                    add FAIL firewall "$_if: no forwarding '$LANZ' -> '$_zone' (fw4 will REJECT LAN->tunnel)" "add firewall forwarding src='$LANZ' dest='$_zone'"
+                fi
+                # Zone is tunnel-only here, so the reverse zone->LAN forwarding is safe
+                # and the fix always adds it. Site-to-site (vpn_cidr) needs it or fw4
+                # REJECTs remote-INITIATED traffic to LAN; plain outbound replies ride
+                # conntrack ESTABLISHED, so only demand it when vpn_cidr is set.
+                if [ -n "$VPN_CIDRS" ] && ! fw_has_forwarding "$_zone" "$LANZ"; then
+                    add FAIL firewall "$_if: no reverse forwarding '$_zone' -> '$LANZ' (fw4 will REJECT remote-initiated site-to-site traffic to LAN)" "splify-firewall fix $_if"
+                fi
+            fi
+        fi
+    elif _gz="$(fw_zone_glob_covering "$_if")"; then
+        # Covered by a device-glob zone (e.g. 'wg+'); auto-create would overlap it.
+        add WARN firewall "$_if: not in an explicit firewall zone but matched by zone '$_gz' via a device wildcard — verify it has masq + lan<->zone + zone->wan" "review firewall zone '$_gz' (auto-fix won't create an overlapping zone)"
+    else
+        add FAIL firewall "$_if: not in any firewall zone (fw4 will REJECT LAN->tunnel)" "add '$_if' to a firewall zone with masq=1"
+    fi
+    EP_JSON="$EP_JSON{\"iface\":\"$(json_esc "$_if")\",\"type\":\"$(json_esc "$(_ep_type_of "$_if")")\",\"priority\":\"$(json_esc "$(prio_of "$_if")")\",\"present\":$_present,\"handshake_age\":$_hs,\"rx\":$_rx,\"tx\":$_tx,\"health\":\"$_health\",\"zone\":\"$(json_esc "$_zone")\",\"masq\":$_masq,\"forwarding\":$_fwd},"
+done
+
+# ---- routing / killswitch --------------------------------------------------
+# Match the EXACT rules common_rules installs (priority + fwmark + lookup target),
+# not just "a rule at prio 999/1000" — a stale/foreign rule at the same priority
+# must not read as healthy. And inspect the table-200 DEFAULT route specifically
+# (not any route that merely mentions the active iface).
+T200="$(ip -4 route show table "$WG_TABLE" 2>/dev/null)"
+T200DEF="$(ip -4 route show table "$WG_TABLE" default 2>/dev/null)"
+has_rule "$ANTI_LOOP_PRIO:.*fwmark.*lookup main" || add FAIL routing "anti-loop ip rule (prio $ANTI_LOOP_PRIO, fwmark -> main) missing or malformed" "restart the service: /etc/init.d/splify restart"
+case "$PATH_KIND" in
+    vpn)
+        has_rule "$WG_RULE_PRIO:.*fwmark.*lookup $WG_TABLE" || add FAIL routing "wg fwmark ip rule (prio $WG_RULE_PRIO -> table $WG_TABLE) missing or malformed while active path is VPN" "restart the service: /etc/init.d/splify restart"
+        case "$T200DEF" in
+            *blackhole*) add FAIL routing "table $WG_TABLE default is blackholed but state says VPN ($STATE)" "run splify-failover (one pass) or restart the service" ;;
+            *"dev $ACTIVE"*) : ;;
+            "") add FAIL routing "table $WG_TABLE has no default route while active path is VPN" "run splify-failover" ;;
+            *) add WARN routing "table $WG_TABLE default route is not via active iface '$ACTIVE'" "run splify-failover" ;;
+        esac ;;
+    killswitch)
+        # the blackhole only catches marked LAN traffic if the wg fwmark rule still
+        # routes it into table 200; without the rule, marked traffic falls through
+        # to main and leaks to WAN despite the blackhole.
+        has_rule "$WG_RULE_PRIO:.*fwmark.*lookup $WG_TABLE" || add FAIL routing "killswitch active but wg fwmark ip rule (prio $WG_RULE_PRIO -> table $WG_TABLE) missing/malformed — marked traffic bypasses the blackhole to WAN" "restart the service: /etc/init.d/splify restart"
+        case "$T200DEF" in *blackhole*) : ;; *) add FAIL routing "killswitch active but table $WG_TABLE default is not a blackhole (traffic may leak)" "run splify-failover" ;; esac ;;
+    wan|zapret)
+        if [ "$KILLSWITCH" = "1" ]; then
+            add FAIL routing "killswitch is ON but active path is '$STATE' (policy traffic on WAN instead of blackholed)" "check why no tunnel is healthy; failover should blackhole under killswitch"
+        fi
+        [ -n "$T200" ] && add WARN routing "active path is WAN/zapret but table $WG_TABLE still holds routes" "stale; clears on next failover tick" ;;
+esac
+
+# ---- site-to-site VPN subnets (design §4.5) --------------------------------
+# Each vpn_cidr is typically a remote peer's LAN that must ride the tunnel
+# (site-to-site). The real failure to catch is "added a VPN subnet but never ran
+# apply": the subnet is in UCI but not in the live nft VPN set, so its packets are
+# never marked. A forced `ip route get … mark` CANNOT see that gap — it just shows
+# where *already-marked* traffic goes, and table 200's default resolves through the
+# active tunnel regardless. So we check the marking precondition directly:
+#
+#   1. set membership — in blocklist/split the ONLY thing that marks a vpn_cidr is
+#      membership in the live VPN nft set (@VPN_SET). We test the network's address
+#      against the interval set with `nft get element` (normalization-proof: a
+#      contained host address matches the stored CIDR). `full` mode has a catch-all
+#      mark rule, so membership isn't load-bearing there — skip step 1.
+#   2. egress — once marked, traffic must leave via the ACTIVE tunnel, not WAN.
+#
+# Only meaningful while a VPN path is up; under WAN/zapret the routing checks above
+# already name the real cause.
+# Membership probes below are gated on memory. libnftables caches the WHOLE TABLE
+# before executing any command, so asking about a two-element manual set still
+# pulls in the 30k-element ipsum set that shares `inet fw4` — measured at 15MB on
+# a router with 13MB free (see common.sh). _TBL_ELEMS estimates that load from the
+# source lists; where it does not fit, the probe is skipped and said to be skipped
+# rather than silently dropped.
+_TBL_ELEMS=0
+[ "$IPSUM_ENABLED" = 1 ] && [ -s "$IPSUM_FILE" ] \
+    && _TBL_ELEMS=$(( _TBL_ELEMS + $(grep -cE '^[0-9]' "$IPSUM_FILE" 2>/dev/null || echo 0) ))
+[ "$MODE" = full ] && [ "$RU_ENABLED" = 1 ] && [ -s "$RU_FILE" ] \
+    && _TBL_ELEMS=$(( _TBL_ELEMS + $(grep -cE '^[0-9]' "$RU_FILE" 2>/dev/null || echo 0) ))
+_PROBE_OK=true
+nft_cache_affordable "$_TBL_ELEMS" || _PROBE_OK=false
+
+if [ "$PATH_KIND" = vpn ] && [ -n "$VPN_CIDRS" ] && [ -n "$ACTIVE" ]; then
+    [ "$_PROBE_OK" = true ] || add WARN routing \
+        "skipped the site-to-site set-membership check: reading the nft set needs more memory than this router has free" \
+        "no action needed unless site-to-site traffic is actually failing"
+    for _cidr in $(printf '%s' "$VPN_CIDRS" | tr ', ' '\n' | grep -v '^$'); do
+        _addr="${_cidr%/*}"
+        case "$_addr" in *.*.*.*) : ;; *) continue ;; esac
+        if [ "$MODE" != full ] && [ "$_PROBE_OK" = true ] \
+           && ! nft get element inet fw4 "$VPN_SET" "{ $_addr }" >/dev/null 2>&1; then
+            add FIXABLE routing \
+                "VPN subnet $_cidr (site-to-site) is missing from the live VPN set ($VPN_SET) — its traffic is never marked for the tunnel" \
+                "run splify-apply (rebuilds the VPN set + routes)"
+            continue
+        fi
+        _dev="$(ip -4 route get "$_addr" mark "$WG_MARK" 2>/dev/null \
+            | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)"
+        [ -n "$_dev" ] || continue
+        [ "$_dev" = "$ACTIVE" ] || add FIXABLE routing \
+            "VPN subnet $_cidr (site-to-site) not routed into the tunnel — marked traffic egresses '$_dev', not '$ACTIVE'" \
+            "run splify-apply (rebuilds the VPN set + routes)"
+    done
+fi
+
+if [ -n "$DIRECT_CIDRS" ] && [ "$_PROBE_OK" = true ]; then
+    for _cidr in $(printf '%s' "$DIRECT_CIDRS" | tr ', ' '\n' | grep -v '^$'); do
+        _addr="${_cidr%/*}"
+        case "$_addr" in *.*.*.*) : ;; *) continue ;; esac
+        if ! nft get element inet fw4 "$DIRECT_SET" "{ $_addr }" >/dev/null 2>&1; then
+            add FIXABLE routing \
+                "Direct subnet $_cidr is missing from the live direct set ($DIRECT_SET)" \
+                "run splify-apply"
+        fi
+    done
+fi
+
+# shellcheck disable=SC2317
+check_device_routing() {
+    config_get _ip "$1" ip ""
+    config_get _dm "$1" mode "vpn"
+    [ -n "$_ip" ] || return 0
+    echo "$_ip" | valid_cidr4 >/dev/null 2>&1 || { add WARN routing "device $_ip is invalid CIDR" "remove or fix in UI"; return 0; }
+    
+    _rule_mark=""
+    [ "$_dm" = "vpn" ] && _rule_mark="$WG_MARK"
+    [ "$_dm" = "direct" ] && _rule_mark="$ANTI_LOOP_MARK"
+    
+    if [ -n "$_rule_mark" ]; then
+        if ! nft list chain inet fw4 splify_device_mark_prerouting 2>/dev/null | grep -q "ip saddr $_ip .*$_rule_mark"; then
+            add FIXABLE routing "device $_ip ($_dm) is missing from device routing rules" "run splify-apply"
+        fi
+    fi
+}
+config_foreach check_device_routing device
+
+# ---- lists -----------------------------------------------------------------
+# Counts come from the SOURCE FILES, never from the kernel sets. `nft list set`
+# on an interval set expands every element into text (54-65MB of RSS for the
+# ipsum/nozapret sets on a real box) — a price this read-only report must not
+# pay, and the direct cause of the OOM kills documented in common.sh. The file
+# count is the same number for every purpose the dashboard has, and it stays
+# meaningful in the modes where the live set is deliberately unreferenced or
+# deliberately shrunk (the pre-existing N3 reasoning below).
+#
+# What the FILE count cannot tell us is whether the kernel actually holds the
+# list — so health comes from set_healthy(), two O(1) membership probes.
+list_row() {  # NAME ENABLED COUNT MIN FILE AGE COUNTOK [FILECOUNT]
+    LIST_JSON="$LIST_JSON{\"name\":\"$1\",\"enabled\":$2,\"count\":$3,\"min\":$4,\"file\":\"$(json_esc "$5")\",\"age\":$6,\"ok\":$7,\"file_count\":${8:--1}},"
+}
+# ipsum (VPN set) — failover self-heals it from IPSUM_FILE. Only blocklist mode
+# wires @IPSUM_SET into routing (see splify-apply); in full/split the set is
+# defined but unreferenced, so an empty/stale ipsum doesn't break routing — don't
+# raise FIXABLE/WARN there (it would falsely show the whole box as degraded).
+_age=-1; [ -s "$IPSUM_FILE" ] && _age="$(file_age "$IPSUM_FILE")"
+if [ "$IPSUM_ENABLED" = 1 ]; then
+    _c=0; [ -s "$IPSUM_FILE" ] && _c="$(grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' "$IPSUM_FILE" 2>/dev/null)"
+    _ok=true
+    if [ "$MODE" = blocklist ]; then
+        [ "${_c:-0}" -ge "$IPSUM_MIN_COUNT" ] || { _ok=false; add FIXABLE lists "ipsum list has $_c prefixes (<$IPSUM_MIN_COUNT)" "splify-update-ipsum, or it reloads on the next failover tick"; }
+        [ -s "$IPSUM_FILE" ] || add WARN lists "ipsum list file not yet downloaded ($IPSUM_FILE)" "splify-update-ipsum"
+        [ "$_age" -gt "$STALE_AGE" ] 2>/dev/null && add WARN lists "ipsum list is stale ($((_age/86400))d old)" "splify-update-ipsum"
+        # The list can be perfect on disk and absent from the kernel (fw4 reload
+        # drained the set, or a load was interrupted) — that is the failure the
+        # operator actually feels, so name it separately from a bad list. And
+        # distinguish the one cause they cannot fix by waiting: a list too large
+        # for this router's memory, which splify now refuses to load rather than
+        # OOM the box (see nft_set_fits).
+        if [ "$_ok" = true ] && ! set_healthy "$IPSUM_TABLE" "$IPSUM_SET" "$IPSUM_FILE"; then
+            _ok=false
+            if _why="$(nft_set_fits "$_c")"; then
+                add FIXABLE lists "ipsum list is on disk but the live nft set is empty or incomplete" "the next failover tick reloads it; or run splify-apply"
+            else
+                add FAIL lists "ipsum list does not fit in this router's memory: $_why" "use a smaller ipsum list, route by domain instead, or disable ipsum in Services -> splify"
+            fi
+        fi
+    fi
+    list_row ipsum true "${_c:-0}" "$IPSUM_MIN_COUNT" "$IPSUM_FILE" "$_age" "$_ok" "${_c:-0}"
+else list_row ipsum false 0 "$IPSUM_MIN_COUNT" "$IPSUM_FILE" -1 true; fi
+# ru/cn (direct list; live nft set only exists in full mode)
+_age=-1; [ -s "$RU_FILE" ] && _age="$(file_age "$RU_FILE")"
+if [ "$RU_ENABLED" = 1 ]; then
+    _rfc=0; [ -s "$RU_FILE" ] && _rfc="$(grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' "$RU_FILE" 2>/dev/null)"
+    _c="${_rfc:-0}"; _ok=true
+    if [ "$MODE" = full ]; then
+        [ "${_rfc:-0}" -ge "$RU_MIN_COUNT" ] || { _ok=false; add FIXABLE lists "ru/cn list has $_rfc prefixes (<$RU_MIN_COUNT)" "splify-update-ru, or it reloads on the next failover tick"; }
+        # Only load-bearing in full mode, so only probed there.
+        if [ "$_ok" = true ] && ! set_healthy "$RU_TABLE" "$RU_SET" "$RU_FILE"; then
+            _ok=false
+            add FIXABLE lists "ru/cn list is on disk but the live nft set is empty or incomplete" "the next failover tick reloads it; or run splify-apply"
+        fi
+    fi
+    [ -s "$RU_FILE" ] || add WARN lists "ru/cn list file not yet downloaded ($RU_FILE)" "splify-update-ru"
+    [ "$_age" -gt "$STALE_AGE" ] 2>/dev/null && add WARN lists "ru/cn list is stale ($((_age/86400))d old)" "splify-update-ru"
+    list_row ru true "${_c:-0}" "$RU_MIN_COUNT" "$RU_FILE" "$_age" "$_ok" "${_rfc:-0}"
+else list_row ru false 0 "$RU_MIN_COUNT" "$RU_FILE" -1 true 0; fi
+
+# ---- zapret + nozapret -----------------------------------------------------
+# nozapret = the set zapret must NOT touch, and its membership is path-dependent:
+#   - VPN/wg path: the VPN(ipsum) prefixes STAY in the bypass (they are tunneled),
+#     so nozapret = privates + ru + ipsum — report that whole bypass;
+#   - zapret/wan fallback: those VPN prefixes MIGRATE OUT into zapret's own bypass,
+#     so the meaningful number is exactly the migrated set = the ipsum prefixes.
+# Like ru/cn (N3), derive the count from the SOURCE lists, not the raw live set —
+# the live set is empty before zapret ever starts (wg path, no failover yet) and
+# deliberately shrunk in the fallback, which made a working bypass read as 0.
+_nz_rfc=0; [ -s "$RU_FILE" ]    && _nz_rfc="$(grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' "$RU_FILE" 2>/dev/null)"
+_nz_ifc=0; [ -s "$IPSUM_FILE" ] && _nz_ifc="$(grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' "$IPSUM_FILE" 2>/dev/null)"
+_nz_full=$(( _nz_rfc + _nz_ifc ))
+if [ "$ZAPRET_ENABLED" = 1 ]; then
+    if zapret_available; then
+        case "$PATH_KIND" in
+            zapret|wan) _c="${_nz_ifc:-0}" ;;   # migrated VPN prefixes
+            *)          _c="$_nz_full" ;;       # full bypass (privates + ru + ipsum)
+        esac
+        if zapret_running; then
+            _ok=true
+            # Probe the LIVE bypass only on the VPN path, where it must be fully
+            # populated; in the zapret/wan fallback it is deliberately smaller, so
+            # a missing ipsum member there is correct, not a fault. The probe list
+            # is the one sync-nozapret actually loaded (kept on tmpfs by it).
+            case "$PATH_KIND" in zapret|wan) : ;; *)
+                if [ -s /var/run/splify-nozapret.lst ] \
+                   && ! set_healthy "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET" /var/run/splify-nozapret.lst; then
+                    _ok=false
+                    _nzn="$(grep -cE '^[0-9]' /var/run/splify-nozapret.lst 2>/dev/null || echo 0)"
+                    if _why="$(nft_set_fits "$_nzn" "$ZAPRET_NOZAPRET_SET")"; then
+                        add FIXABLE zapret "nozapret bypass set is empty or incomplete" "splify-failover rebuilds it; or check the ru/cn list"
+                    else
+                        # Distinct from "empty": the set may still hold the PREVIOUS
+                        # contents and be working — what failed is the refresh.
+                        add FAIL zapret "nozapret bypass could not be refreshed: $_why" "use a smaller ru/cn or ipsum list, or disable ipsum so the bypass fits"
+                    fi
+                fi ;;
+            esac
+            list_row nozapret true "${_c:-0}" "$ZAPRET_NOZAPRET_MIN" "" -1 "$_ok" "$_nz_full"
+        else
+            add FIXABLE zapret "zapret is installed but not running" "the failover loop starts it; or: $ZAPRET_INIT start"
+            list_row nozapret true "${_c:-0}" "$ZAPRET_NOZAPRET_MIN" "" -1 false "$_nz_full"
+        fi
+    else
+        add WARN zapret "zapret is enabled in splify but not installed (auto-skipped)" "install zapret, or disable it in Services -> splify"
+        list_row nozapret false 0 "$ZAPRET_NOZAPRET_MIN" "" -1 true
+    fi
+fi
+
+# ---- domain tagging (native splify-dns backend, or legacy dnsmasq nftset) --
+# A configured download URL counts as "domains expected" even before the first
+# fetch lands a file — otherwise a URL-only setup whose list hasn't downloaded yet
+# would silently report no domain tagging at all.
+[ -n "$VPN_DOMAINS_URL" ]    && [ ! -s "$DOMAINS_VPN_FILE" ]    && add FIXABLE dnsmasq "VPN domains URL set but the list is not downloaded yet ($DOMAINS_VPN_FILE)" "splify-update-domains"
+[ -n "$IGNORE_DOMAINS_URL" ] && [ ! -s "$DOMAINS_IGNORE_FILE" ] && add FIXABLE dnsmasq "ignore/direct domains URL set but the list is not downloaded yet ($DOMAINS_IGNORE_FILE)" "splify-update-domains"
+_have_domains=false
+{ [ -n "$VPN_DOMAINS$DIRECT_DOMAINS$VPN_DOMAINS_URL$IGNORE_DOMAINS_URL" ] || [ -s "$DOMAINS_VPN_FILE" ] || [ -s "$DOMAINS_IGNORE_FILE" ]; } && _have_domains=true
+
+if [ "$DOMAIN_BACKEND" = "native" ]; then
+    add OK splify-dns "native domain-routing backend active ($SPLIFY_DNS_BIN)"
+    if [ "$_have_domains" = true ]; then
+        pgrep -f "$SPLIFY_DNS_BIN" >/dev/null 2>&1 \
+            || add FIXABLE splify-dns "domain tagging configured but splify-dnsd is not running" "/etc/init.d/splify-dns start"
+        [ -s "$SPLIFY_DNS_VPN_RULES" ] || [ -s "$SPLIFY_DNS_DIRECT_RULES" ] \
+            || add FIXABLE splify-dns "rule files missing/empty in $SPLIFY_DNS_DIR" "run splify-apply (regenerates them)"
+        nft list chain inet fw4 splify_dns_redirect_prerouting >/dev/null 2>&1 \
+            || add FIXABLE splify-dns "DNS redirect rule missing from the live ruleset" "run splify-apply (regenerates 30-splify.nft)"
+        nft list chain inet fw4 splify_fakeip_dnat_prerouting >/dev/null 2>&1 \
+            || add FIXABLE splify-dns "fake-IP DNAT rule missing from the live ruleset" "run splify-apply (regenerates 30-splify.nft)"
+        nft list map inet fw4 "$SPLIFY_DNS_FAKEIP_MAP" >/dev/null 2>&1 \
+            || add FIXABLE splify-dns "fake-IP map missing from the live ruleset" "run splify-apply (regenerates 30-splify.nft)"
+    fi
+elif [ "$_have_domains" = true ]; then
+    # legacy path: dnsmasq's own nftset= directive. Only works when dnsmasq is
+    # built with nftset support ("dnsmasq-full" on OpenWrt — plain "dnsmasq"
+    # does NOT have it compiled in and silently tags nothing). splify-dns
+    # removes this requirement entirely (native backend never touches
+    # dnsmasq's config) — installing it is the fix, not switching packages.
+    if command -v dnsmasq >/dev/null 2>&1 && ! dnsmasq --version 2>&1 | grep -qw nftset; then
+        add FAIL dnsmasq "domains configured but this dnsmasq build has no nftset support (need dnsmasq-full, or install splify-dns for the native backend)" "opkg/apk install dnsmasq-full  —  or: install splify-dns"
+    else
+        _dir="$(sed -n 's/^conf-dir=//p' /var/etc/dnsmasq.conf* 2>/dev/null | head -1)"
+        [ -n "$_dir" ] || _dir="$(dirname "$DNSMASQ_NFTSET_FILE")"
+        [ -s "$_dir/$(basename "$DNSMASQ_NFTSET_FILE")" ] \
+            || add FIXABLE dnsmasq "domain tagging configured but the dnsmasq nftset drop-in is missing from $_dir" "run splify-apply (regenerates and reloads dnsmasq)"
+    fi
+fi
+
+# ---- remote control agent --------------------------------------------------
+_agent_enabled="$(uci -q get splify.api.agent_enabled 2>/dev/null || echo 0)"
+if [ "$_agent_enabled" = "1" ]; then
+    if ! pgrep -f "splify-agent" >/dev/null 2>&1; then
+        add WARN agent "remote control agent is enabled but not running" "/etc/init.d/splify-agent restart"
+    else
+        add OK agent "remote control agent is running"
+    fi
+fi
+
+# ---- output ----------------------------------------------------------------
+SEV_NAME() { case "$1" in 0) echo OK;; 1) echo WARN;; 2) echo FIXABLE;; 3) echo FAIL;; esac; }
+OVERALL="$(SEV_NAME "$WORST")"
+
+# zapret_version as the dashboard should show it: the detected flavour ONLY when
+# zapret is actually installed — empty otherwise, so the hero renders "none"
+# instead of a misleading "zapret". ZAPRET_VERSION itself is left intact (the
+# execution paths keep their resolved init/table names even on a missing install,
+# because zapret_available() gates whether they're ever acted on).
+_zv="$ZAPRET_VERSION"
+zapret_available || _zv=""
+
+_update_avail="false"
+_update_ver=""
+if [ -f /var/run/splify-update.json ]; then
+    _update_avail="$(jsonfilter -q -i /var/run/splify-update.json -e '@.update.available' 2>/dev/null || echo false)"
+    _update_ver="$(jsonfilter -q -i /var/run/splify-update.json -e '@.update.version' 2>/dev/null || echo "")"
+fi
+
+if [ "$JSON" = 1 ]; then
+    # --snapshot wraps the status object and folds in the events array so the
+    # dashboard gets both in a single ubus call (one doctor fork instead of two).
+    if [ "$SNAPSHOT" = 1 ]; then
+        printf '{"status":{'
+    else
+        printf '{'
+    fi
+    printf '"overall":"%s",' "$OVERALL"
+    printf '"summary":{"mode":"%s","state":"%s","active_iface":"%s","killswitch":%s,"fail_count":%s,"lan_iface":"%s","lan_cidr":"%s","zapret_version":"%s","update_available":%s,"update_version":"%s"},' \
+        "$(json_esc "$MODE")" "$(json_esc "$STATE")" "$(json_esc "$ACTIVE")" "${KILLSWITCH:-0}" "$(fail_get)" "$(json_esc "$LAN_IFACE")" "$(json_esc "$LAN_CIDR")" "$(json_esc "$_zv")" "$_update_avail" "$(json_esc "$_update_ver")"
+    printf '"endpoints":[%s],' "${EP_JSON%,}"
+    printf '"lists":[%s],' "${LIST_JSON%,}"
+    printf '"checks":['
+    _first=1
+    printf '%s' "$CHECKS" | while IFS='	' read -r _s _cat _m _fix; do
+        [ -n "$_s" ] || continue
+        [ "$_first" = 1 ] && _first=0 || printf ','
+        printf '{"severity":"%s","category":"%s","message":"%s","fix":"%s"}' \
+            "$_s" "$(json_esc "$_cat")" "$(json_esc "$_m")" "$(json_esc "$_fix")"
+    done
+    printf ']}'
+    if [ "$SNAPSHOT" = 1 ]; then
+        printf ',"events":'
+        emit_events
+        printf '}\n'
+    else
+        printf '\n'
+    fi
+else
+    echo "=== splify doctor ==="
+    echo "overall : $OVERALL"
+    echo "mode    : $MODE     state: ${STATE:-(none)}     active: ${ACTIVE:-(none)}"
+    echo "killswitch: ${KILLSWITCH:-0}     fail_count: $(fail_get)     lan: $LAN_IFACE -> ${LAN_CIDR:-(none)}     zapret: ${_zv:-(not installed)}"
+    echo
+    printf '%s' "$CHECKS" | while IFS='	' read -r _s _cat _m _fix; do
+        [ -n "$_s" ] || continue
+        printf '[%-7s] %-8s %s\n' "$_s" "$_cat" "$_m"
+        [ -n "$_fix" ] && printf '              -> fix: %s\n' "$_fix"
+    done
+    [ -z "$CHECKS" ] && echo "(no checks produced)"
+    echo
+    echo "exit: $WORST  (0 OK, 1 WARN, 2 FIXABLE, 3 FAIL)"
+fi
+exit "$WORST"

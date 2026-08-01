@@ -1,0 +1,294 @@
+#!/bin/sh
+# splify-singbox-render <iface> — render a sing-box config.json for one
+# `config singbox` endpoint from its stored share-link URI.
+#
+# The stored `uri` option is the SOURCE OF TRUTH (see common.sh's sing-box URI
+# parser) — the cached display fields (protocol/server/port/…) are never
+# trusted here, only re-parsed for a fresh, human-readable summary elsewhere.
+# Rendering is fully safe against a bad/edited URI: we build into a `.tmp`
+# file and only `mv` it over the real config path on complete success (parse
+# OK + `sing-box check` OK when the binary is present), so a bad re-import can
+# never wedge a currently-running good instance — its config file is left
+# untouched until a fully-valid replacement is ready.
+#
+#   splify-singbox-render <iface>
+#
+# No `set -u`: OpenWrt's config_* helpers (sourced via common.sh) aren't
+# nounset-safe.
+# shellcheck source=/dev/null
+. /usr/share/libubox/jshn.sh
+. /usr/local/lib/splify/common.sh
+
+# The rendered config carries the endpoint's UUID/password (and the port-hop
+# temp file mirrors a slice of it) — create them owner-only so a world-readable
+# /var/etc/*.tmp can never leak secrets if the script dies before its final mv.
+umask 077
+
+IFACE="${1:-}"
+[ -n "$IFACE" ] || die "usage: splify-singbox-render <iface>"
+
+_SEC="$(singbox_section_of "$IFACE")"
+[ -n "$_SEC" ] || die "$IFACE is not a configured sing-box endpoint (no matching 'config singbox' section)"
+
+_URI="$(uci -q get "splify.$_SEC.uri" 2>/dev/null)"
+[ -n "$_URI" ] || { warn "singbox $IFACE (section $_SEC): no 'uri' option set — nothing to render"; exit 1; }
+
+# Re-parse the URI fresh — never trust the cached display fields for
+# rendering. A bad/edited URI must not crash the whole render pipeline (a
+# stray other-endpoint re-import elsewhere shouldn't nuke this render), so we
+# warn and exit non-zero rather than die().
+_PARSED="$(singbox_parse_uri "$_URI")" || {
+    warn "singbox $IFACE: failed to parse stored uri — leaving previous rendered config (if any) untouched"
+    exit 1
+}
+
+# Pull one key from the parsed "key=value\n..." block. Values never contain
+# newlines (uri_unescape only ever substitutes single chars), so a simple
+# line-anchored match is safe.
+_pf() { printf '%s\n' "$_PARSED" | sed -n "s/^$1=//p" | head -1; }
+
+PROTOCOL="$(_pf protocol)"
+SERVER="$(_pf server)"
+PORT="$(_pf port)"
+
+[ -n "$PROTOCOL" ] && [ -n "$SERVER" ] && [ -n "$PORT" ] || {
+    warn "singbox $IFACE: parsed uri is missing protocol/server/port — refusing to render"
+    exit 1
+}
+
+# ---- deterministic local TUN /30 (172.19.<N>.1/30) -------------------------
+# N is the `tun_index` splify-ctl allocates (and persists) at import time —
+# the smallest free slot not already claimed by another config singbox
+# section, so two concurrent endpoints can never collide on the same /30.
+# Fall back to a hash of the iface string ONLY for a section that somehow has
+# no tun_index cached (e.g. hand-edited UCI) — not collision-free, but better
+# than refusing to render at all; log a warning so it gets noticed.
+TUN_N="$(uci -q get "splify.$_SEC.tun_index" 2>/dev/null)"
+case "$TUN_N" in
+    ''|*[!0-9]*)
+        warn "singbox $IFACE: no cached tun_index — falling back to a hashed (not collision-checked) TUN address; re-import to get a properly allocated one"
+        _ti_sum=0; _ti_s="$IFACE"
+        while [ -n "$_ti_s" ]; do
+            _ti_c="${_ti_s%"${_ti_s#?}"}"   # first character
+            _ti_s="${_ti_s#?}"              # rest
+            _ti_o="$(printf '%d' "'$_ti_c")"
+            _ti_sum=$((_ti_sum + _ti_o))
+        done
+        TUN_N=$(( (_ti_sum % 60) + 1 ))
+        ;;
+esac
+TUN_ADDR="172.19.${TUN_N}.1/30"
+
+L3DEV="$(singbox_l3dev "$IFACE")"
+CONF_FILE="$(singbox_conf_file "$IFACE")"
+TMP_FILE="${CONF_FILE}.tmp"
+# _ph_tmp is only created in the hysteria2 port-hop branch below; default it to
+# empty so the trap's rm -f never references an unset name (no set -u here, but
+# explicitness keeps it robust if set -u is ever added).
+_ph_tmp=""
+
+# Always tear down the .tmp render + port-hop file, even on `sing-box check`
+# failure, `die`, or a signal — otherwise a half-rendered config (carrying the
+# endpoint UUID/password) lingers in /var/etc. The final `mv` only fires on the
+# success path; on failure the trap is the ONLY cleanup.
+trap 'rm -f "$TMP_FILE" "$_ph_tmp" 2>/dev/null' EXIT INT TERM HUP
+
+# ---- build config.json via jshn --------------------------------------------
+json_init
+
+# inbound: single TUN
+json_add_array inbounds
+json_add_object ""
+json_add_string type tun
+json_add_string tag sb-in
+json_add_string interface_name "$L3DEV"
+json_add_array address
+json_add_string "" "$TUN_ADDR"
+json_close_array
+json_add_boolean auto_route 0
+json_add_boolean auto_redirect 0
+json_add_string stack system
+json_close_object
+json_close_array
+
+# outbound: one entry, transport-specific
+json_add_array outbounds
+json_add_object ""
+
+case "$PROTOCOL" in
+vless)
+    UUID="$(_pf uuid)"
+    FLOW="$(_pf flow)"
+    SECURITY="$(_pf security)"; [ -n "$SECURITY" ] || SECURITY=none
+    SNI="$(_pf sni)"
+    PBK="$(_pf pbk)"
+    SID="$(_pf sid)"
+    NETWORK="$(_pf network)"; [ -n "$NETWORK" ] || NETWORK=tcp
+    THOST="$(_pf host)"
+    TPATH="$(_pf path)"
+    SVC="$(_pf svc)"
+
+    [ -n "$UUID" ] || { warn "singbox $IFACE: vless uri missing uuid — refusing to render"; exit 1; }
+
+    json_add_string type vless
+    json_add_string tag sb-out
+    json_add_string server "$SERVER"
+    json_add_int server_port "$PORT"
+    json_add_string uuid "$UUID"
+    [ -n "$FLOW" ] && json_add_string flow "$FLOW"
+    # NOTE: sing-box's own outbound-level "network" (tcp/udp IP transport) is a
+    # DIFFERENT concept from vless's parsed "network" (the ws/grpc/... share-link
+    # transport type) — we deliberately never set the former and instead map the
+    # latter into a "transport" object below.
+
+    case "$NETWORK" in
+    tcp|'')
+        : # default stream transport — omit the whole "transport" object
+        ;;
+    ws)
+        json_add_object transport
+        json_add_string type ws
+        [ -n "$TPATH" ] && json_add_string path "$TPATH"
+        if [ -n "$THOST" ]; then
+            json_add_object headers
+            json_add_string Host "$THOST"
+            json_close_object
+        fi
+        json_close_object
+        ;;
+    grpc)
+        json_add_object transport
+        json_add_string type grpc
+        [ -n "$SVC" ] && json_add_string service_name "$SVC"
+        json_close_object
+        ;;
+    http|httpupgrade|xhttp)
+        # Best-effort mapping only (low priority per spec) — path + a single-
+        # element host array; not exhaustively verified against every
+        # sing-box version's schema for these transports.
+        json_add_object transport
+        json_add_string type "$NETWORK"
+        [ -n "$TPATH" ] && json_add_string path "$TPATH"
+        if [ -n "$THOST" ]; then
+            json_add_array host
+            json_add_string "" "$THOST"
+            json_close_array
+        fi
+        json_close_object
+        ;;
+    *)
+        warn "singbox $IFACE: unrecognized vless transport '$NETWORK' — omitting transport object"
+        ;;
+    esac
+
+    case "$SECURITY" in
+    tls|reality)
+        json_add_object tls
+        json_add_boolean enabled 1
+        [ -n "$SNI" ] && json_add_string server_name "$SNI"
+        if [ "$SECURITY" = reality ]; then
+            json_add_object reality
+            json_add_boolean enabled 1
+            [ -n "$PBK" ] && json_add_string public_key "$PBK"
+            [ -n "$SID" ] && json_add_string short_id "$SID"
+            json_close_object
+        fi
+        json_close_object
+        ;;
+    none|*)
+        : # no tls object
+        ;;
+    esac
+    ;;
+
+hysteria2)
+    PASSWORD="$(_pf password)"
+    SNI="$(_pf sni)"
+    INSECURE="$(_pf insecure)"; [ -n "$INSECURE" ] || INSECURE=0
+    OBFS="$(_pf obfs)"
+    OBFSPW="$(_pf obfspw)"
+
+    [ -n "$PASSWORD" ] || { warn "singbox $IFACE: hysteria2 uri missing password — refusing to render"; exit 1; }
+
+    json_add_string type hysteria2
+    json_add_string tag sb-out
+    json_add_string server "$SERVER"
+    # PORT may be a plain port ("443") or a hysteria2 port-hop list/range
+    # ("443,5000-6000"). sing-box's hysteria2 outbound treats server_port
+    # (single int) and server_ports (range list) as MUTUALLY EXCLUSIVE, not a
+    # combined string in one field — https://sing-box.sagernet.org/configuration/outbound/hysteria2/#server_ports.
+    # Split on ',' into entries into a temp file (avoids unquoted-expansion
+    # word-splitting AND a `| while read` subshell, which would lose jshn's
+    # in-progress document state); a lone plain-integer entry -> server_port;
+    # anything else (a range, or more than one entry) -> server_ports, with
+    # hysteria2's '-' range separator converted to sing-box's own ':'.
+    _ph_tmp="$(mktemp 2>/dev/null || printf '/tmp/splify-sbports.%s' "$$")"
+    # trailing \n guarantees `wc -l`/`read` see every entry, including the last
+    printf '%s\n' "$PORT" | tr ',' '\n' > "$_ph_tmp"
+    _ph_n="$(wc -l < "$_ph_tmp")"
+    if [ "$_ph_n" -eq 1 ] && ! grep -q '[^0-9]' "$_ph_tmp"; then
+        json_add_int server_port "$PORT"
+    else
+        json_add_array server_ports
+        while IFS= read -r _ph_p; do
+            [ -n "$_ph_p" ] && json_add_string "" "$(printf '%s' "$_ph_p" | sed 's/-/:/')"
+        done < "$_ph_tmp"
+        json_close_array
+    fi
+    # cleanup happens via the EXIT trap, but free the name now so a second
+    # render (if ever reached in the same process) allocates a fresh temp.
+    rm -f "$_ph_tmp"; _ph_tmp=""
+    json_add_string password "$PASSWORD"
+    [ -n "$OBFS" ] && {
+        json_add_object obfs
+        json_add_string type "$OBFS"
+        [ -n "$OBFSPW" ] && json_add_string password "$OBFSPW"
+        json_close_object
+    }
+    json_add_object tls
+    json_add_boolean enabled 1
+    [ -n "$SNI" ] && json_add_string server_name "$SNI"
+    case "$INSECURE" in 1) json_add_boolean insecure 1 ;; *) json_add_boolean insecure 0 ;; esac
+    json_close_object
+    ;;
+
+*)
+    warn "singbox $IFACE: unsupported protocol '$PROTOCOL' — refusing to render"
+    exit 1
+    ;;
+esac
+
+json_close_object
+json_close_array
+
+# route: everything from the TUN inbound rides the one outbound.
+json_add_object route
+json_add_array rules
+json_add_object ""
+json_add_array inbound
+json_add_string "" "sb-in"
+json_close_array
+json_add_string outbound sb-out
+json_close_object
+json_close_array
+json_add_string final sb-out
+json_close_object
+
+mkdir -p "$(dirname "$TMP_FILE")" 2>/dev/null
+json_dump > "$TMP_FILE"
+json_cleanup
+
+if command -v sing-box >/dev/null 2>&1; then
+    if ! _CHECK_OUT="$(sing-box check -c "$TMP_FILE" 2>&1)"; then
+        # TMP_FILE is removed by the EXIT trap; just bail without touching the
+        # currently-running good config.
+        warn "singbox $IFACE: 'sing-box check' failed on rendered config — leaving previous config untouched: $_CHECK_OUT"
+        exit 1
+    fi
+else
+    warn "singbox $IFACE: sing-box binary not installed — skipping 'sing-box check' validation of the rendered config"
+fi
+
+mv "$TMP_FILE" "$CONF_FILE" || die "singbox $IFACE: failed to install rendered config to $CONF_FILE"
+log "singbox $IFACE: rendered config -> $CONF_FILE (tun=$L3DEV addr=$TUN_ADDR)"
+exit 0

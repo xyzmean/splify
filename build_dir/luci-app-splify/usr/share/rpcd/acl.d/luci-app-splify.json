@@ -1,0 +1,20 @@
+{
+	"luci-app-splify": {
+		"description": "Grant access to splify status, diagnostics and maintenance actions",
+		"read": {
+			"uci": [ "splify", "network" ],
+			"ubus": {
+				"network.interface": [ "dump" ],
+				"network": [ "get_proto_handlers" ],
+				"luci-rpc": [ "getHostHints" ],
+				"splify": [ "live", "status", "snapshot", "snapshot_refresh", "events", "config_export", "wg_get", "singbox_get", "api_get" ]
+			}
+		},
+		"write": {
+			"uci": [ "splify" ],
+			"ubus": {
+				"splify": [ "action", "config_import", "config_reveal", "wg_set", "wg_import", "wg_reveal", "singbox_import", "api_set", "api_token", "token_regen", "connect", "enroll" ]
+			}
+		}
+	}
+}

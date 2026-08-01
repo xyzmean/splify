@@ -1,0 +1,8 @@
+In file included from /opt/zig-linux-x86_64-0.13.0/lib/libc/musl/crt/rcrt1.c:3:
+/opt/zig-linux-x86_64-0.13.0/lib/libc/musl/crt/../ldso/dlstart.c:146:20: warning: a function declaration without a prototype is deprecated in all versions of C and is treated as a zero-parameter prototype in C23, conflicting with a subsequent definition [-Wdeprecated-non-prototype]
+  146 |         GETFUNCSYM(&dls2, __dls2, base+dyn[DT_PLTGOT]);
+      |                           ^
+/opt/zig-linux-x86_64-0.13.0/lib/libc/musl/crt/rcrt1.c:11:13: note: conflicting prototype is here
+   11 | hidden void __dls2(unsigned char *base, size_t *sp)
+      |             ^
+1 warning generated.

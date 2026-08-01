@@ -1,0 +1,47 @@
+#!/bin/sh
+# splify-update-ru — daily refresh of ru_subnets.lst.
+#
+# Primary consumer: splify-sync-nozapret (zapret bypass set).
+# Optional: if RU_NFT_FILE is set AND an operator has wired a chain that
+# uses RU_SET, the same command-stream refresh writes there too.
+
+set -e   # fail-fast on curl/validation; no `-u`, /lib/functions.sh isn't nounset-safe
+. /usr/local/lib/splify/common.sh
+
+run_low_priority "$0" "$@"   # nightly work: never at the expense of the live router
+
+[ "$RU_ENABLED" = "1" ] || { log "ru_subnets disabled (RU_ENABLED=0)"; exit 0; }
+[ -n "$RU_URL" ] || die "no ru_url configured"
+single_run update-ru   # bail if a concurrent run (cron vs self-heal) holds the lock
+
+TMP="/tmp/splify-update-ru.$$"
+mkdir -p "$TMP" "$(dirname "$RU_FILE")"
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+curl -fsSL --connect-timeout 10 --max-time 120 --retry 2 \
+    -o "$TMP/raw.lst" "$RU_URL" || die "curl failed: $RU_URL"
+
+clean_ip_list < "$TMP/raw.lst" > "$TMP/clean.lst"
+
+count=$(wc -l < "$TMP/clean.lst")
+[ "$count" -ge "$RU_MIN_COUNT" ] || die "only $count valid prefixes (need $RU_MIN_COUNT)"
+
+# Persist plain list (consumed by sync-nozapret).
+cat "$TMP/clean.lst" > "$RU_FILE"
+log "ru_subnets refresh OK: $count prefixes from $RU_URL"
+
+# Optional nft set refresh — only if RU_SET is actually defined live (full mode).
+# RU_FILE (persisted above) is the replay source; the pre-rendered .nft file an
+# older version kept is gone (see splify-update-ipsum's header for why).
+# `nft -t list` is terse: it reports whether the set EXISTS without dumping its
+# elements, so this probe stays cheap even on a fully populated set.
+if nft -t list set "$RU_TABLE" "$RU_SET" >/dev/null 2>&1; then
+    rm -f "$RU_NFT_FILE" 2>/dev/null || true
+    nft_load_set "$RU_TABLE" "$RU_SET" "$RU_FILE" \
+        || die "ru nft update failed (list kept at $RU_FILE; failover will retry)"
+    log "ru nft set refreshed: $count entries"
+fi
+
+# Cascade to zapret bypass.
+[ -x /usr/local/sbin/splify-sync-nozapret ] \
+    && /usr/local/sbin/splify-sync-nozapret >/dev/null 2>&1 || true

@@ -1,0 +1,18 @@
+#!/bin/sh
+[ -n "${IPKG_INSTROOT}" ] && exit 0
+CRON=/etc/crontabs/root; touch "$CRON"
+grep -q 'splify-update-ipsum'   "$CRON" || echo '30 4 * * * /usr/local/sbin/splify-update-ipsum'   >> "$CRON"
+grep -q 'splify-update-ru'      "$CRON" || echo '45 4 * * * /usr/local/sbin/splify-update-ru'      >> "$CRON"
+grep -q 'splify-update-domains' "$CRON" || echo '50 4 * * * /usr/local/sbin/splify-update-domains' >> "$CRON"
+grep -q 'splify-telemetry'      "$CRON" || echo '0 */6 * * * /usr/local/sbin/splify-telemetry'     >> "$CRON"
+/etc/init.d/cron enable; /etc/init.d/cron restart
+/etc/init.d/splify enable
+/etc/init.d/splify restart
+/etc/init.d/splify-singbox enable
+/etc/init.d/splify-singbox start
+/etc/init.d/splify-agent enable
+/etc/init.d/splify-agent start
+/etc/init.d/rpcd reload
+( /usr/local/sbin/splify-telemetry ) </dev/null >/dev/null 2>&1 &
+( /usr/local/sbin/splify-update-ipsum; /usr/local/sbin/splify-update-ru; /usr/local/sbin/splify-update-domains ) </dev/null >/dev/null 2>&1 &
+exit 0

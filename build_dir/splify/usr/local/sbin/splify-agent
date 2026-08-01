@@ -1,0 +1,198 @@
+#!/bin/sh
+# splify-agent — outbound control-plane poller.
+#
+# WHY OUTBOUND: the routers live behind carrier-grade NAT with no static IP, so
+# nothing can connect IN to them. And the management channel MUST survive the WG
+# tunnel going down (that's exactly when a controller needs to push a fix). So
+# the router phones HOME: it polls a control endpoint over the plain internet
+# (WAN), pinned to the WAN device so it bypasses splify's policy routing and the
+# kill switch (which only ever touch LAN-sourced, mark-tagged traffic — never
+# router-originated egress). As long as WAN is up, the agent reaches the
+# controller even with every tunnel dead.
+#
+# ONE round trip per tick: POST our current state (status + masked config) to
+# {control_url}/poll and receive the desired snapshot in the reply, which we feed
+# straight into `splify-ctl import`. Single outbound request = NAT-friendly.
+#
+# Secrets: the report NEVER includes private keys (export without --reveal). The
+# desired snapshot coming back DOES carry keys when the controller rotates them —
+# run the control plane behind TLS (see splify-control README); the bearer token
+# authenticates but does not encrypt.
+#
+# No `set -u`: sources OpenWrt config_* helpers (not nounset-safe).
+
+. /usr/share/libubox/jshn.sh
+. /usr/local/lib/splify/common.sh
+# shellcheck source=/dev/null
+. /lib/functions/network.sh
+
+LAST_FILE=/var/run/splify-agent.last
+STAT_FILE=/var/run/splify-agent.status
+# The applied "generation" is persisted on flash (NOT tmpfs) so a reboot doesn't
+# look like "never applied" and re-bounce the tunnel on the first poll. It only
+# changes when a real config push is applied, so flash wear is negligible.
+GEN_FILE=/etc/splify/agent.gen
+# Same for the one-shot ACTIONS generation: tmpfs would re-run every queued
+# action (e.g. a tunnel bounce) after each reboot.
+ACT_FILE=/etc/splify/agent.act
+AGENT_TAG=splify-agent
+
+alog() { logger -t "$AGENT_TAG" "$*"; }
+note() { printf '%s\n' "$1" > "$STAT_FILE" 2>/dev/null || true; }
+
+# Resolve the WAN egress device so every request leaves over the internet, not
+# the tunnel. Falls back to the default-route device, then unpinned.
+wan_device() {
+    network_flush_cache 2>/dev/null
+    _d=""
+    network_get_device _d wan 2>/dev/null
+    [ -n "$_d" ] || _d="$(ip -4 route show default 2>/dev/null | awk '/default/{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')"
+    printf '%s' "$_d"
+}
+
+# One poll cycle. Reads config fresh each tick so enable/url/interval changes
+# take effect without a restart.
+poll_once() {
+    config_load splify
+    config_get _enabled  api agent_enabled    0
+    config_get _internal api control_internal ''
+    config_get _external api control_external ''
+    config_get _token    api token            ''
+    config_get _node     api node_id          ''
+    config_get _enrolled api enrolled         0
+    config_get _ak       api access_key       ''
+
+    [ "$_enabled" = "1" ] || { note "disabled"; return 0; }
+
+    # Self-heal enrollment: if a connection JSON was pasted but the initial enroll
+    # didn't land (dashboard was down), keep retrying here until it registers.
+    if [ "$_enrolled" != "1" ] && [ -n "$_ak" ]; then
+        alog "enrolling with dashboard"
+        /usr/local/sbin/splify-ctl enroll >/dev/null 2>&1
+        config_load splify
+        config_get _token api token ''
+        config_get _node  api node_id ''
+    fi
+
+    [ -n "$_internal$_external" ] || { note "no dashboard url"; return 0; }
+    [ -n "$_token" ] || { note "no token"; return 0; }
+
+    _gen="$(cat "$GEN_FILE" 2>/dev/null)"; case "$_gen" in ''|*[!0-9]*) _gen=0 ;; esac
+    _agen="$(cat "$ACT_FILE" 2>/dev/null)"; case "$_agen" in ''|*[!0-9]*) _agen=0 ;; esac
+
+    # Build the report: last applied generation + current health + masked config.
+    # NOTE: splify-doctor prints valid JSON but exits non-zero on WARN/FIXABLE/FAIL
+    # BY DESIGN. Capture its output and IGNORE the exit code — a `|| echo '{}'`
+    # would append a second object to the already-printed JSON and corrupt the
+    # report exactly when the node is degraded (the very state worth reporting).
+    _status="$(/usr/local/sbin/splify-doctor --json 2>/dev/null)"; [ -n "$_status" ] || _status='{}'
+    _config="$(/usr/local/sbin/splify-ctl export 2>/dev/null)"; [ -n "$_config" ] || _config='{}'
+    # node_id is operator/controller-controlled and ends up inside a JSON string
+    # literal — escape backslash and double-quote the same way splify-doctor's
+    # json_esc does, or a stray '"' / '\' breaks the whole request body.
+    _node_esc="$(printf '%s' "$_node" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+    _body="$(printf '{"node":"%s","ts":%s,"agent":"splify-agent/1","applied_gen":%s,"applied_action_gen":%s,"status":%s,"config":%s}' \
+        "$_node_esc" "$(date +%s)" "$_gen" "$_agen" "$_status" "$_config")"
+
+    # Try the internal URL first (over the tunnel, kept private), then the
+    # external URL over WAN — pinned to the WAN device so it works with the
+    # tunnel down / under CGNAT, bypassing splify's policy routing + kill switch.
+    # A short --connect-timeout on the internal try matters: with the tunnel down
+    # the connect just hangs, and every poll would burn the full --max-time (25s)
+    # before even attempting the external URL — exactly when the dashboard is the
+    # only way to fix the node.
+    _resp=""; _rc=1; _via=""
+    if [ -n "$_internal" ]; then
+        _resp="$(printf '%s' "$_body" | curl -fsS --connect-timeout 5 --max-time 25 \
+            -H 'Content-Type: application/json' -H "Authorization: Bearer $_token" \
+            -H "X-Splify-Node: $_node" --data-binary @- "${_internal%/}/poll" 2>/dev/null)"
+        _rc=$?; [ "$_rc" = 0 ] && _via=internal
+    fi
+    if [ "$_rc" != 0 ] && [ -n "$_external" ]; then
+        _wan="$(wan_device)"; _ifopt=""; [ -n "$_wan" ] && _ifopt="--interface $_wan"
+        # shellcheck disable=SC2086
+        _resp="$(printf '%s' "$_body" | curl $_ifopt -fsS --max-time 25 \
+            -H 'Content-Type: application/json' -H "Authorization: Bearer $_token" \
+            -H "X-Splify-Node: $_node" --data-binary @- "${_external%/}/poll" 2>/dev/null)"
+        _rc=$?; [ "$_rc" = 0 ] && _via="external(${_wan:-wan})"
+    fi
+
+    date +%s > "$LAST_FILE" 2>/dev/null || true
+    if [ "$_rc" != 0 ]; then
+        note "poll failed (internal+external unreachable)"
+        alog "poll failed: internal=$_internal external=$_external"
+        return 0
+    fi
+
+    # One-shot actions queued from the dashboard (restart a tunnel, refresh a
+    # list, …). They may ride alongside a desired config or arrive alone. Every
+    # action funnels through `splify-ctl action`, which allow-lists the name and
+    # validates the iface — the agent itself never interprets them. The applied
+    # action generation is persisted so a reboot (or the next poll) never
+    # re-runs an already-executed one-shot.
+    case "$_resp" in *'"actions"'*)
+        json_init; json_load "$_resp" 2>/dev/null
+        json_get_var _ragen action_gen 2>/dev/null
+        case "$_ragen" in ''|*[!0-9]*) _ragen=0 ;; esac
+        if [ "$_ragen" -gt "$_agen" ] 2>/dev/null && json_select actions 2>/dev/null; then
+            json_get_keys _aks
+            for _ak in $_aks; do
+                json_select "$_ak"
+                json_get_var _an name 2>/dev/null
+                json_get_var _ai iface 2>/dev/null
+                alog "dashboard action: ${_an:-?} ${_ai:-}"
+                /usr/local/sbin/splify-ctl action "${_an:-}" "${_ai:-}" >/dev/null 2>&1
+                json_select ..
+            done
+            json_select ..
+            mkdir -p "$(dirname "$ACT_FILE")" 2>/dev/null
+            printf '%s\n' "$_ragen" > "$ACT_FILE" 2>/dev/null || true
+            note "actions gen=$_ragen applied @ $(date '+%H:%M:%S')"
+        fi
+    ;; esac
+
+    # Empty / explicit no-op -> nothing to do. A desired snapshot carries wg,
+    # splify or sites; the server only sends one when our applied_gen is behind,
+    # so we do NOT re-apply (and re-bounce the tunnel) on every poll.
+    case "$_resp" in
+        ''|'{}'|*'"noop"'*) note "ok, no change via $_via @ $(date '+%H:%M:%S')"; return 0 ;;
+    esac
+    case "$_resp" in
+        *'"wg"'*|*'"splify"'*|*'"sites"'*) : ;;
+        *) return 0 ;;
+    esac
+
+    # Apply the desired snapshot. import commits + bounces touched tunnels + runs
+    # splify-apply/restart as needed.
+    _ir="$(printf '%s' "$_resp" | /usr/local/sbin/splify-ctl import 2>&1)"
+    case "$_ir" in
+        *'"ok":true'*|*'"ok": true'*)
+            # Record the generation we just converged to, so the next poll reports
+            # it and the server replies noop (no bounce loop). Parse it out of the
+            # desired doc via jshn.
+            json_init; json_load "$_resp" 2>/dev/null
+            json_get_var _ngen generation 2>/dev/null
+            case "$_ngen" in ''|*[!0-9]*) _ngen="$_gen" ;; esac
+            mkdir -p "$(dirname "$GEN_FILE")" 2>/dev/null
+            printf '%s\n' "$_ngen" > "$GEN_FILE" 2>/dev/null || true
+            note "applied desired config gen=$_ngen @ $(date '+%H:%M:%S')"
+            alog "applied desired config gen=$_ngen" ;;
+        *) note "apply failed @ $(date '+%H:%M:%S')"; alog "import failed: $_ir" ;;
+    esac
+}
+
+# --daemon: loop forever, sleeping the configured interval between ticks. procd
+# owns the lifecycle (respawn). One-shot (no arg) = a single cycle, for testing.
+if [ "$1" = "--daemon" ]; then
+    alog "started"
+    while :; do
+        poll_once
+        config_load splify
+        config_get _iv api interval 60
+        case "$_iv" in ''|*[!0-9]*) _iv=60 ;; esac
+        [ "$_iv" -ge 10 ] 2>/dev/null || _iv=10
+        sleep "$_iv"
+    done
+else
+    poll_once
+fi
