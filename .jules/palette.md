@@ -4,3 +4,6 @@
 ## 2026-07-23 - Adding aria-checked and role='switch' to toggle components
 **Learning:** Adding `aria-label` alone to a custom `Switch` element is insufficient if it is built on a standard `<button>` tag. Screen reader users will hear the name but won't know the state (on/off) of the toggle.
 **Action:** When creating or fixing custom switch/toggle components, always add `role="switch"` and `aria-checked={on}` so that state changes are announced properly.
+## 2026-07-23 - Missing Focus Indicators on Custom Native Buttons
+**Learning:** Found a recurring pattern where custom native `<button>` elements (such as sidebar tabs, toggle switches, and accordion headers) built with Tailwind missed `focus-visible` styling, which severely hinders keyboard accessibility.
+**Action:** When implementing or fixing interactive elements that use bare `<button>` tags rather than a design system's robust `<Button>` component, explicitly add `focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring` (plus offsets where appropriate) to ensure the focus state is clearly communicated to keyboard users.

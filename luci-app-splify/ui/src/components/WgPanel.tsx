@@ -189,7 +189,7 @@ export default function WgPanel() {
 
           {/* junk packets I1-I5 / J1-J3 (long) */}
           <div className="rounded-lg border bg-muted/30 p-3">
-            <button type="button" onClick={() => setShowJunk((v) => !v)} className="flex w-full items-center justify-between text-left text-sm font-medium">
+            <button type="button" onClick={() => setShowJunk((v) => !v)} aria-expanded={showJunk} className="flex w-full items-center justify-between text-left text-sm font-medium rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
               <span>{t('Junk packets (AWG 1.5): I1–I5, J1–J3')}</span>
               <span className="text-xs text-muted-foreground">{showJunk ? t('collapse ▲') : t('expand ▼')}</span>
             </button>
