@@ -29,6 +29,11 @@ nozapret_current() {   # NEW_SIG OLD_SIG LIVE_COUNT MIN FORCED
 run_low_priority "$0" "$@"   # nightly work: never at the expense of the live router
 
 [ "$ZAPRET_ENABLED" = "1" ] || { log "zapret disabled (ZAPRET_ENABLED=0)"; exit 0; }
+# No zapret installed means there is no `nozapret` set to fill. Without this the
+# script still built the whole union and tried to load it into a set that does not
+# exist — minutes of aggregation on a slow router, for nothing. (zapret is
+# runtime-detected by design, so this is a normal configuration, not an error.)
+zapret_available || { log "zapret not installed — no nozapret set to sync"; exit 0; }
 # An explicit caller (failover) sets NOZAPRET_INCLUDE_VPN. When unset (daily cron
 # / ipsum-ru refresh cascade), derive it from the live state so a refresh while in
 # the zapret/wan fallback doesn't re-add the VPN prefixes and silently disable the

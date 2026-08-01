@@ -630,14 +630,19 @@ run_low_priority() {  # "$0" "$@" from the caller
 #   subsequent refresh of a list it is already successfully holding.
 NFT_ELEM_BYTES="${SPLIFY_NFT_ELEM_BYTES:-800}"
 NFT_ELEM_KERNEL_BYTES="${SPLIFY_NFT_ELEM_KERNEL_BYTES:-300}"
-# NFT_ELEM_RESIDENT_BYTES: what an element costs for as long as the set EXISTS,
-#   as opposed to the peak during loading. Measured end to end on the Mi 4C:
-#   loading 19 021 prefixes took MemAvailable from 16MB to 6MB, i.e. ~550 bytes
-#   per prefix that never comes back. That number decides how big a list a router
-#   can KEEP, which is a different question from whether it can survive the load —
-#   and the one that matters, because a box left with 6MB free starts OOM-killing
-#   uhttpd and its own diagnostics afterwards.
-NFT_ELEM_RESIDENT_BYTES="${SPLIFY_NFT_ELEM_RESIDENT_BYTES:-550}"
+# NFT_ELEM_RESIDENT_BYTES: what an element costs for as long as the set EXISTS, as
+#   opposed to the peak during loading. This decides how big a list a router can
+#   KEEP, which is a different question from whether it can survive the load — and
+#   the one that matters, because a box left with almost nothing free starts
+#   OOM-killing uhttpd and its own diagnostics afterwards.
+#
+#   Measured on the Mi 4C twice, and the first reading was wrong: right after a
+#   load MemAvailable had fallen from 16MB to 6MB (~550 bytes per prefix), but once
+#   the caches settled the same 17 365-prefix set sat at 12MB free — i.e. the
+#   lasting cost is ~300 bytes per prefix, and 550 was a transient dip. 350 keeps a
+#   margin over the settled figure. Reading the dip as permanent made the fitter
+#   throw away ~40% more of the list than the router actually needed it to.
+NFT_ELEM_RESIDENT_BYTES="${SPLIFY_NFT_ELEM_RESIDENT_BYTES:-350}"
 NFT_MEM_RESERVE_KB="${SPLIFY_NFT_MEM_RESERVE_KB:-10240}"
 
 # NO ulimit here, deliberately. Two attempts at an address-space backstop were
