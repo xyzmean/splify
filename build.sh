@@ -40,11 +40,21 @@ fi
 # covered (see docs); `apk add splify-dns` simply fails cleanly on an
 # unlisted arch, and splify's DOMAIN_BACKEND auto-detection (common.sh)
 # falls back to the dnsmasq nftset path with zero behavior change.
+#
+# Fields: arch : fallback-cc : fallback-apt-pkg : zig-target : zig-mcpu
+#
+# The zig fields are the PRIMARY build path (musl, in a container — see
+# splify-dns/build/Dockerfile). The cc fields are a fallback for a machine with
+# no docker; it produces a static GLIBC binary, ~9x larger, and for mipsel_24kc
+# it produces one that does not run at all: Debian's mipsel-linux-gnu is
+# hard-float while this OpenWrt target is soft-float, so the daemon dies with
+# SIGILL on the board (verified on a Mi Router 4C). That target is therefore
+# skipped rather than shipped broken when the container path is unavailable.
 NATIVE_TARGETS="
-aarch64_cortex-a53:aarch64-linux-gnu-gcc:gcc-aarch64-linux-gnu
-arm_cortex-a7:arm-linux-gnueabihf-gcc:gcc-arm-linux-gnueabihf
-mipsel_24kc:mipsel-linux-gnu-gcc-10:gcc-10-mipsel-linux-gnu
-x86_64:gcc:
+aarch64_cortex-a53:aarch64-linux-gnu-gcc:gcc-aarch64-linux-gnu:aarch64-linux-musl:baseline
+arm_cortex-a7:arm-linux-gnueabihf-gcc:gcc-arm-linux-gnueabihf:arm-linux-musleabihf:cortex_a7
+mipsel_24kc:mipsel-linux-gnu-gcc-10:gcc-10-mipsel-linux-gnu:mipsel-linux-musl:mips32r2+soft_float
+x86_64:gcc::x86_64-linux-musl:baseline
 "
 
 build_pkg() {
@@ -114,31 +124,74 @@ EOF3
     rm -f "$src_dir/.post-install" "$src_dir/.pre-deinstall"
 }
 
+# ---- splify-dnsd: musl cross build in a container ---------------------------
+# The image is built once and cached; see splify-dns/build/Dockerfile for why the
+# binary must be static musl and what the alternative costs.
+DNSD_IMAGE="splify-dnsd-builder:zig-0.13.0"
+
+dnsd_builder_ready() {
+    command -v docker >/dev/null 2>&1 || return 1
+    docker image inspect "$DNSD_IMAGE" >/dev/null 2>&1 && return 0
+    echo "splify-dns: building the musl cross image (one time, ~45MB download)..."
+    docker build -q -t "$DNSD_IMAGE" splify-dns/build >/dev/null 2>&1
+}
+
+# $1=output path (repo-relative) $2=zig target triple $3=zig mcpu
+dnsd_compile_musl() {
+    docker run --rm -v "$PWD:/src" -w /src "$DNSD_IMAGE" \
+        cc -target "$2" -mcpu="$3" -static -Os -Wall -Wextra \
+           -o "$1" splify-dns/src/splify-dnsd.c
+}
+
 # Cross-compiles the splify-dnsd binary for one OpenWrt target arch and packages
 # it (ipk + apk), Architecture-tagged with that exact arch string — mirrors
 # build_pkg's shape but with a real compiled binary instead of noarch files.
-# $1=arch $2=cc-binary $3=apt-package-providing-cc (empty for the native/x86_64 case)
+# $1=arch $2=fallback-cc $3=apt-package-providing-cc $4=zig target $5=zig mcpu
 build_native_pkg() {
     local arch=$1
     local cc=$2
     local cc_apt_pkg=$3
-
-    if ! command -v "$cc" >/dev/null 2>&1; then
-        if [ -n "$cc_apt_pkg" ] && command -v apt-get >/dev/null 2>&1; then
-            echo "splify-dns/$arch: installing $cc_apt_pkg..."
-            apt-get install -y "$cc_apt_pkg" >/dev/null 2>&1 || true
-        fi
-    fi
-    if ! command -v "$cc" >/dev/null 2>&1; then
-        echo "splify-dns/$arch: '$cc' not available — skipping this target (other packages are unaffected)"
-        return 0
-    fi
+    local ztarget=$4
+    local zmcpu=$5
 
     local pkg_dir="$BUILD_DIR/splify-dns_$arch"
     mkdir -p "$pkg_dir/usr/sbin" "$pkg_dir/etc/init.d"
-    if ! "$cc" -static -O2 -Wall -Wextra -o "$pkg_dir/usr/sbin/splify-dnsd" splify-dns/src/splify-dnsd.c; then
-        echo "splify-dns/$arch: compile failed — skipping this target"
-        return 0
+    local out="$pkg_dir/usr/sbin/splify-dnsd"
+
+    if [ -n "$ztarget" ] && dnsd_builder_ready; then
+        if ! dnsd_compile_musl "$out" "$ztarget" "$zmcpu"; then
+            echo "splify-dns/$arch: musl compile failed — skipping this target"
+            return 0
+        fi
+        echo "splify-dns/$arch: musl static, $(stat -c %s "$out") bytes"
+    else
+        # No container available. Static glibc instead: ~9x larger, and for
+        # mipsel_24kc simply wrong — Debian's mipsel-linux-gnu is hard-float while
+        # this target is soft-float, so the binary dies with SIGILL on the board
+        # (verified on a Mi Router 4C). Shipping nothing beats shipping that:
+        # splify falls back to the dnsmasq nftset backend on its own.
+        case "$arch" in
+            mipsel_*)
+                echo "splify-dns/$arch: needs the musl container (docker); the glibc cross builds a soft-float-incompatible binary — skipping"
+                return 0 ;;
+        esac
+        if ! command -v "$cc" >/dev/null 2>&1; then
+            if [ -n "$cc_apt_pkg" ] && command -v apt-get >/dev/null 2>&1; then
+                echo "splify-dns/$arch: installing $cc_apt_pkg..."
+                apt-get install -y "$cc_apt_pkg" >/dev/null 2>&1 || true
+            fi
+        fi
+        if ! command -v "$cc" >/dev/null 2>&1; then
+            echo "splify-dns/$arch: '$cc' not available — skipping this target (other packages are unaffected)"
+            return 0
+        fi
+        if ! "$cc" -static -Os -Wall -Wextra \
+                -ffunction-sections -fdata-sections -Wl,--gc-sections -s \
+                -o "$out" splify-dns/src/splify-dnsd.c; then
+            echo "splify-dns/$arch: compile failed — skipping this target"
+            return 0
+        fi
+        echo "splify-dns/$arch: static glibc fallback, $(stat -c %s "$out") bytes"
     fi
     chmod 0755 "$pkg_dir/usr/sbin/splify-dnsd"
     cp splify-dns/files/etc/init.d/splify-dns "$pkg_dir/etc/init.d/splify-dns"
@@ -283,12 +336,12 @@ build_pkg "luci-i18n-splify-ru" "$VERSION" "luci-app-splify" "Russian translatio
 
 # 4. splify-dns (native domain-routing backend; one .ipk/.apk per target arch)
 echo "Building splify-dns (native domain-routing backend)..."
-echo "$NATIVE_TARGETS" | while IFS=: read -r _arch _cc _apt; do
+echo "$NATIVE_TARGETS" | while IFS=: read -r _arch _cc _apt _ztarget _zmcpu; do
     [ -n "$_arch" ] || continue
     # A failure building ONE target (missing toolchain, a docker hiccup, ...)
     # must never abort the other 3 native targets or the noarch packages
     # already built above — `|| true` suspends set -e for the whole call.
-    build_native_pkg "$_arch" "$_cc" "$_apt" || echo "splify-dns/$_arch: build step failed, skipping"
+    build_native_pkg "$_arch" "$_cc" "$_apt" "$_ztarget" "$_zmcpu" || echo "splify-dns/$_arch: build step failed, skipping"
 done
 
 echo "All packages built in $OUT_DIR/"
