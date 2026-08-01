@@ -8,6 +8,8 @@
 set -e   # fail-fast on curl/validation; no `-u`, /lib/functions.sh isn't nounset-safe
 . /usr/local/lib/splify/common.sh
 
+run_low_priority "$0" "$@"   # nightly work: never at the expense of the live router
+
 [ "$RU_ENABLED" = "1" ] || { log "ru_subnets disabled (RU_ENABLED=0)"; exit 0; }
 [ -n "$RU_URL" ] || die "no ru_url configured"
 single_run update-ru   # bail if a concurrent run (cron vs self-heal) holds the lock

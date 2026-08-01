@@ -11,6 +11,8 @@
 set -e   # fail-fast on curl/validation; no `-u`, /lib/functions.sh isn't nounset-safe
 . /usr/local/lib/splify/common.sh
 
+run_low_priority "$0" "$@"   # nightly work: never at the expense of the live router
+
 [ "$IPSUM_ENABLED" = "1" ] || { log "ipsum disabled (IPSUM_ENABLED=0)"; exit 0; }
 [ -n "$IPSUM_URL" ] || die "no ipsum_url configured"
 single_run update-ipsum   # bail if a concurrent run (cron vs self-heal) holds the lock

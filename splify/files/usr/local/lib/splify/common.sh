@@ -558,6 +558,18 @@ iface_src_ip() {
 # with ENOMEM and we log a failure, instead of the kernel choosing a victim
 # process elsewhere on the box.
 NFT_CHUNK_ELEMS="${SPLIFY_NFT_CHUNK:-4000}"
+# Re-exec the CALLING SCRIPT at the lowest priority, once. List refreshes are
+# nightly cron work whose aggregation is minutes of solid CPU on a 380-BogoMIPS
+# MT7628 — it must never be the reason the router feels slow. busybox has `nice`
+# but not `renice`, so a process cannot demote itself; it has to start again under
+# nice. The guard variable keeps that to exactly one re-exec.
+run_low_priority() {  # "$0" "$@" from the caller
+    [ -n "${SPLIFY_LOW_PRIO:-}" ] && return 0
+    command -v nice >/dev/null 2>&1 || return 0
+    SPLIFY_LOW_PRIO=1
+    export SPLIFY_LOW_PRIO
+    exec nice -n 19 "$@"
+}
 
 # Chunking bounds the LOADER. It does nothing about the other half of the cost:
 # the set itself, which the kernel keeps in an unswappable rbtree — measured
@@ -660,7 +672,7 @@ nft_set_fits() {  # ELEMENT_COUNT [SET_BEING_REPLACED]
     # Replacing a set we already hold? The flush comes first, so count the kernel
     # memory it releases as available.
     if [ -n "${2:-}" ]; then
-        _nsf_avail_kb=$(( _nsf_avail_kb + ($(_set_prev_count "$2") * NFT_ELEM_KERNEL_BYTES) / 1024 ))
+        _nsf_avail_kb=$(( _nsf_avail_kb + ($(_set_prev_count "$2") * NFT_ELEM_RESIDENT_BYTES) / 1024 ))
     fi
     if [ "$_nsf_avail_kb" -le "$NFT_MEM_RESERVE_KB" ]; then
         printf 'only %sMB of memory is available, below the %sMB floor for loading a list at all' \
@@ -989,8 +1001,14 @@ fit_list_for_set() {  # SET SRC DEST [MAXCOUNT] [EXCLUDE_RANGES] -> 0 fitted, 1 
         _flf_avail="$(mem_available_kb)"
         case "$_flf_avail" in ''|*[!0-9]*) _flf_avail=0 ;; esac
         _flf_credit=$(( ($(_set_prev_count "$1") * NFT_ELEM_RESIDENT_BYTES) / 1024 ))
-        _flf_room_kb=$(( _flf_avail + _flf_credit - NFT_MEM_RESERVE_KB ))
-        _flf_max=$(( (_flf_room_kb * 1024) / NFT_ELEM_RESIDENT_BYTES ))
+        # Both limits must hold, so the target is whichever is smaller:
+        #   transient — the peak while loading (NFT_ELEM_BYTES per element),
+        #   resident  — what stays afterwards, leaving the reserve free.
+        # Taking only the resident one is what produced "keeping 18409 prefixes"
+        # immediately followed by the loader refusing those same 18409.
+        _flf_max=$(( ((_flf_avail + _flf_credit) * 1024) / NFT_ELEM_BYTES ))
+        _flf_max_res=$(( ((_flf_avail + _flf_credit - NFT_MEM_RESERVE_KB) * 1024) / NFT_ELEM_RESIDENT_BYTES ))
+        [ "$_flf_max_res" -lt "$_flf_max" ] && _flf_max="$_flf_max_res"
         [ -n "${4:-}" ] && [ "${4:-0}" -gt 0 ] 2>/dev/null && [ "$_flf_max" -gt "$4" ] && _flf_max="$4"
         if [ "$_flf_max" -gt 1000 ]; then
             head -n "$_flf_max" "$3.work" > "$3"

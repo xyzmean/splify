@@ -7,8 +7,9 @@
 # tunnel failure, splify-failover calls us with NOZAPRET_INCLUDE_VPN=0 so those
 # IPs DROP OUT of nozapret and zapret DPI-bypasses them on WAN egress.
 #
-# Memory-safe: emits one compact `add element { x,y,z }` block, NOT per-line
-# `add element { x }` (which on 240MB routers OOMs at ~38k+ entries).
+# Memory: the list is aggregated and then loaded in bounded chunks (see
+# common.sh). The single-block form this script used before was one nft command
+# holding the whole list, which the OOM-killer shot mid-load on 240MB routers.
 
 set -e   # fail-fast on curl/validation; no `-u`, /lib/functions.sh isn't nounset-safe
 . /usr/local/lib/splify/common.sh
@@ -24,6 +25,8 @@ nozapret_current() {   # NEW_SIG OLD_SIG LIVE_COUNT MIN FORCED
     [ "${3:-0}" -ge "${4:-0}" ] 2>/dev/null || return 1  # live set drained -> rebuild
     return 0
 }
+
+run_low_priority "$0" "$@"   # nightly work: never at the expense of the live router
 
 [ "$ZAPRET_ENABLED" = "1" ] || { log "zapret disabled (ZAPRET_ENABLED=0)"; exit 0; }
 # An explicit caller (failover) sets NOZAPRET_INCLUDE_VPN. When unset (daily cron
@@ -76,10 +79,10 @@ if [ "$INCLUDE_VPN" = "1" ] && [ -r "$IPSUM_FILE" ]; then
 fi
 
 # Fit to the destination set — AGGREGATION FIRST, dropping entries only if merging
-# is not enough. The union is largely runs of adjacent prefixes: on the test box
-# 74 648 raw entries merged losslessly to well under the 65 536 capacity, so what
-# used to be "the load fails and the bypass runs on an empty set" now needs no
-# truncation at all.
+# is not enough. Measured on the real union of 74 640 prefixes: lossless merging
+# gives 70 042, which is still ABOVE the 65 536 capacity, and bridging small gaps
+# (slack 64) gives 56 299, which fits. So aggregation alone does resolve the
+# overflow here — but only with slack, not losslessly.
 CAPACITY="$(nft_set_capacity "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET")"
 cat "$TMP/must.lst" "$TMP/extra.lst" | sort -u > "$TMP/raw.lst"
 # Deliberately shallow ladder: an address wrongly inside nozapret is an address
@@ -128,11 +131,13 @@ OLD_SIG="$(cat "$NOZAPRET_SIG" 2>/dev/null || true)"
 # `nft list set` on this set (44k entries in practice) expands every interval
 # into text and cost 54-65MB of RSS, which is precisely the allocation the
 # OOM-killer kept shooting on a 240MB router, right before this script then
-# reloaded the same set with a second such allocation. nozapret_current() only
-# compares the count against the floor, so a probe answers the same question:
-# healthy → report the floor, drained/partial → report 0. Same decision, O(1)
-# lookups instead of a full dump. (The pure decision function keeps its exact
-# signature and its unit tests.)
+# reloaded the same set with a second such allocation. And a per-element probe is
+# no cheaper: nft caches the whole table for any command (15MB for one lookup on a
+# 14k set). set_healthy therefore answers from a stamp instead — nft handles plus
+# the source list identity. nozapret_current() only compares the count against the
+# floor, so healthy → report the floor, drained → report 0: the same decision
+# without reading the set. (The pure decision function keeps its signature and its
+# unit tests.)
 if set_healthy "$ZAPRET_NOZAPRET_TABLE" "$ZAPRET_NOZAPRET_SET" "$TMP/all.lst"; then
     LIVE="$ZAPRET_NOZAPRET_MIN"
 else
