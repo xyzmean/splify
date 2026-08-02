@@ -25,14 +25,21 @@ clean_domains() {
     '
 }
 
+# Returns 0 only when the list actually CHANGED — the caller uses that to decide
+# whether to re-apply, so "already empty" and "URL unchanged" must both report 1.
 fetch_one() {  # url dest label
-    [ -n "$1" ] || { : > "$2"; return 0; }   # empty URL -> clear the dest list ($2)
+    if [ -z "$1" ]; then                     # empty URL -> clear the dest list ($2)
+        [ -s "$2" ] || return 1
+        : > "$2"; return 0
+    fi
+    skip_if_unchanged "domains-$3" "$1" "$2" && return 1
     curl -fsSL --connect-timeout 10 --max-time 120 --retry 2 -o "$TMP/raw" "$1" \
         || { warn "domains fetch failed: $1"; return 1; }
     clean_domains < "$TMP/raw" > "$TMP/clean"
     _n=$(wc -l < "$TMP/clean")
     [ "$_n" -gt 0 ] || { warn "no valid domains from $1"; return 1; }
     cat "$TMP/clean" > "$2"
+    src_stamp_write "domains-$3" "$1"
     log "$3 domains: $_n from $1"
 }
 

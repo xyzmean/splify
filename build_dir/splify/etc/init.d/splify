@@ -24,11 +24,14 @@ reload_service() {
     start
     # A changed list URL only takes effect on the next daily cron otherwise, so
     # refresh the lists now (background; the updaters validate + re-apply).
-    # ponytail: unconditional refetch on apply — add per-URL change detection if
-    # the re-download cost on every Save&Apply ever matters.
     # WAIT_LOCK: a changed URL must not be dropped if the daily cron is mid-run —
     # wait out the holder and apply the new UCI (cron itself stays skip-on-busy).
-    ( export SPLIFY_WAIT_LOCK=1
+    # SKIP_UNCHANGED: refetch ONLY the lists whose URL actually changed. Without
+    # it, every Save&Apply re-downloaded and re-aggregated all three; on a
+    # single-core router that is minutes at 100% CPU, so toggling an unrelated
+    # checkbox in the UI was enough to make a Mi 4C stop passing traffic. Cron
+    # keeps refetching unconditionally, which is what picks up upstream edits.
+    ( export SPLIFY_WAIT_LOCK=1 SPLIFY_SKIP_UNCHANGED=1
       /usr/local/sbin/splify-update-ipsum
       /usr/local/sbin/splify-update-ru
       /usr/local/sbin/splify-update-domains ) >/dev/null 2>&1 &

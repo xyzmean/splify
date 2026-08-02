@@ -801,6 +801,87 @@ set_healthy() {  # TABLE SET FILE
     [ "$_sh_stamp" = "$(_set_ident "$1" "$2") $(_src_ident "$3")" ]
 }
 
+# Every splify set an fw4 include REFERENCES must also be DECLARED in that same
+# file. nft aborts an include at the first unresolved reference, so one such rule
+# discards every set and chain after it — the router ends up with no splify sets
+# at all, silently, and only a line in the boot log says why. That is exactly what
+# a mis-placed comment inside a line continuation once produced (see splify-apply),
+# so the invariant is checked instead of trusted.
+#
+# Only @splify_* names are checked: those are the ones this file declares. A
+# reference to some other include's set (zapret's, say) is legitimately resolved
+# elsewhere. Echoes the offending names and returns 1.
+nft_refs_declared() {  # FILE
+    _nrd_bad=""
+    for _nrd_ref in $(grep -o '@splify_[a-zA-Z0-9_]*' "$1" 2>/dev/null | sort -u); do
+        _nrd_name="${_nrd_ref#@}"
+        grep -qE "^(set|map) $_nrd_name \{" "$1" && continue
+        _nrd_bad="$_nrd_bad $_nrd_name"
+    done
+    [ -z "$_nrd_bad" ] && return 0
+    printf '%s' "${_nrd_bad# }"
+    return 1
+}
+
+# Would nft accept this fw4 include? Echoes nft's own complaint and returns 1.
+#
+# nft_refs_declared above only answers "is every set declared"; it cannot see a
+# plain syntax error, and one of those aborts the include just as completely —
+# `counter` written AFTER `redirect` ("statement after terminal statement has no
+# effect") took out the entire DNS-redirect chain, so LAN queries stopped being
+# proxied while everything else looked healthy.
+#
+# fw4 wraps these files in `table inet fw4 { ... }`, so the check wraps them the
+# same way; `nft -c` parses and validates without committing anything. Referenced
+# devices need not exist. If nft is missing, this passes rather than blocking an
+# apply (the guard is a safety net, not a dependency).
+nft_syntax_ok() {  # FILE
+    command -v nft >/dev/null 2>&1 || return 0
+    _nso_err="$( { printf 'table inet fw4 {\n'; cat "$1"; printf '}\n'; } | nft -c -f - 2>&1 )" && return 0
+    printf '%s' "$(printf '%s' "$_nso_err" | head -2 | tr '\n' ' ')"
+    return 1
+}
+
+# ---- source stamps: "has this list's URL changed since we fetched it?" -------
+#
+# Separate from the set stamps above, and persistent (not /var/run) on purpose:
+# a set stamp answers "does the kernel still hold what we loaded", which a reboot
+# must invalidate; this one answers "is the file on disk the URL the operator is
+# asking for", which a reboot does NOT change.
+#
+# It exists because Save&Apply used to refetch and re-aggregate EVERY list on
+# EVERY commit — reload_service kicks all three updaters, and their download plus
+# CIDR aggregation is minutes of 100% CPU on a single-core router. Toggling an
+# unrelated checkbox in the UI therefore pegged a Mi 4C long enough to take its
+# traffic down. With this, a commit that did not change a list URL costs nothing.
+#
+# Deliberately NOT a content hash of the remote file: that would need the
+# download we are trying to avoid. Cron still refetches unconditionally, so a
+# list whose CONTENTS changed upstream is picked up daily — the skip only applies
+# to the apply path, which is about config changes.
+_src_stamp_file() {  # NAME -> path
+    printf '/etc/splify/.src-%s' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"
+}
+src_stamp_write() {  # NAME URL
+    printf '%s\n' "$2" > "$(_src_stamp_file "$1")" 2>/dev/null || true
+}
+# 0 (= "fetch needed") when the recorded URL differs from URL, or when FILE is
+# missing/empty. Fails open: no stamp means fetch, so a fresh install still
+# downloads.
+src_changed() {  # NAME URL FILE
+    [ -s "$3" ] || return 0
+    [ "$(cat "$(_src_stamp_file "$1")" 2>/dev/null)" = "$2" ] && return 1
+    return 0
+}
+# Updaters call this first. SPLIFY_SKIP_UNCHANGED=1 is set by reload_service (the
+# apply path) and by nothing else, so cron and manual runs always refetch.
+skip_if_unchanged() {  # NAME URL FILE
+    [ "${SPLIFY_SKIP_UNCHANGED:-0}" = "1" ] || return 1
+    src_changed "$1" "$2" "$3" && return 1
+    log "$1: URL unchanged and list present — skipping refetch (apply path)"
+    return 0
+}
+
 # Is ADDR a member of set TABLE/SET? Interval sets match a CONTAINED host address
 # against the stored prefix, so a plain address is a valid probe for a CIDR list.
 #

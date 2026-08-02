@@ -28,17 +28,36 @@ const problems = []
 if (missing.length) problems.push(`missing: ${missing.join(', ')}`)
 if (extra.length) problems.push(`unexpected chunk(s): ${extra.join(', ')}`)
 
-// Every internal chunk reference inside the entries must carry the ?v= placeholder,
-// or build.sh has nothing to stamp and a stale cache can pair a new entry with an
-// old chunk. This is checked per reference rather than for splify-x.js alone,
-// because lazily-loaded tabs are referenced the same way.
-for (const entry of ['splify-index.js', 'splify-settings.js']) {
-  if (!js.includes(entry)) continue
-  const text = readFileSync(join(DIST, entry), 'utf8')
+// Every internal chunk reference in EVERY bundle must carry the ?v= placeholder, or
+// build.sh has nothing to stamp and a stale cache can pair a new entry with an old
+// chunk. Checked per reference rather than for splify-x.js alone, because lazily
+// loaded tabs are referenced the same way.
+const seen = new Map() // chunk name -> Set of the exact specifiers used for it
+for (const file of js) {
+  const text = readFileSync(join(DIST, file), 'utf8')
   const refs = [...text.matchAll(/["'`](\.\/splify-[A-Za-z0-9_-]+\.js)(\?v=[^"'`]*)?["'`]/g)]
-  if (!refs.length) problems.push(`${entry} references no chunk at all — did the build change?`)
+  if (!refs.length && file !== 'splify-x.js') {
+    problems.push(`${file} references no chunk at all — did the build change?`)
+  }
   for (const [, name, ver] of refs) {
-    if (!ver) problems.push(`${entry} imports ${name} without ?v= — build.sh cannot pin its version`)
+    if (!ver) problems.push(`${file} imports ${name} without ?v= — build.sh cannot pin its version`)
+    if (!seen.has(name)) seen.set(name, new Set())
+    seen.get(name).add(`${name}${ver || ''}`)
+  }
+}
+
+// The invariant that actually matters: one chunk, one URL, everywhere. A specifier
+// differing by nothing but its query string is a DIFFERENT module to the browser,
+// so a chunk referenced two ways is LOADED TWICE — and when that chunk carries
+// preact/compat, the second copy has its own hook dispatcher. That shipped once:
+// the entries imported "./splify-x.js?v=<ver>" while the lazily loaded tabs
+// imported "./splify-x.js", and the AmneziaWG tab died on its first useState while
+// every other tab worked, with nothing wrong in the ruleset, the ACL or rpcd.
+for (const [name, specs] of seen) {
+  if (specs.size > 1) {
+    problems.push(
+      `${name} is referenced ${specs.size} different ways (${[...specs].join(', ')}) — ` +
+      `the browser will load it as ${specs.size} separate modules`)
   }
 }
 

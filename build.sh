@@ -380,9 +380,13 @@ cp -r luci-app-splify/ui/dist/* "$BUILD_DIR/luci_src/www/luci-static/resources/s
 #      mix a new entry with an old chunk. scripts/check-dist.mjs fails the build if
 #      any chunk reference is missing that placeholder.
 printf '%s\n' "$VERSION" > "$BUILD_DIR/luci_src/www/luci-static/resources/splify/build-id.txt"
+# EVERY bundle, not just the entries: a lazily loaded tab imports the shared chunk
+# too, and stamping only the entries leaves two different URLs for one chunk, which
+# the browser loads as two modules — the second copy of preact/compat then has its
+# own hook dispatcher and the tab dies on its first useState. check-dist.mjs fails
+# the build if one chunk is ever referenced two ways.
 sed -i -E "s/\?v=[0-9]+\.[0-9]+\.[0-9]+/?v=$VERSION/g" \
-    "$BUILD_DIR/luci_src/www/luci-static/resources/splify/splify-index.js" \
-    "$BUILD_DIR/luci_src/www/luci-static/resources/splify/splify-settings.js"
+    "$BUILD_DIR/luci_src/www/luci-static/resources/splify/"splify-*.js
 
 read -r -d '' LUCI_POSTINST << 'EOF_LUCI_POSTINST' || true
 #!/bin/sh
