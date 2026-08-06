@@ -174,14 +174,23 @@ export default function StatusDashboard(p: Props) {
     const enabledLists = lists.filter((l) => l.enabled)
     return {
       s, rows, state, activeEp, lists, enabledLists,
-      totRx: rows.reduce((a, e) => a + (rates[e.iface]?.rx || 0), 0),
-      totTx: rows.reduce((a, e) => a + (rates[e.iface]?.tx || 0), 0),
       onlineTun: rows.filter((e) => e.present).length,
       okLists: enabledLists.filter((l) => l.ok).length,
       hero: heroFor(state, s?.mode || '', s?.zapret_version || ''),
       isOn: /^vpn:/.test(state) || state === 'zapret' || state === 'killswitch',
     }
-  }, [live, status, rates])
+  }, [live, status])
+
+  // ⚡ Bolt: Split `totRx` and `totTx` into their own useMemo.
+  // `rates` change every 4 seconds, so separating them prevents expensive
+  // recalculations of lists filtering and endpoint mapping from running on every rate tick.
+  const totals = useMemo(() => {
+    if (!d.rows) return { totRx: 0, totTx: 0 }
+    return {
+      totRx: d.rows.reduce((a, e) => a + (rates[e.iface]?.rx || 0), 0),
+      totTx: d.rows.reduce((a, e) => a + (rates[e.iface]?.tx || 0), 0),
+    }
+  }, [d.rows, rates])
 
   if (!d.s) {
     return (
@@ -192,7 +201,8 @@ export default function StatusDashboard(p: Props) {
     )
   }
 
-  const { s, rows, hero, isOn, activeEp, totRx, totTx, lists, enabledLists, okLists, onlineTun } = d
+  const { s, rows, hero, isOn, activeEp, lists, enabledLists, okLists, onlineTun } = d
+  const { totRx, totTx } = totals
   const HeroIcon = hero.icon
   const checks = (status?.checks || []).filter((c) => c.severity !== 'OK')
   const haveDiag = !!status
