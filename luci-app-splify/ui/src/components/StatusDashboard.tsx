@@ -90,7 +90,7 @@ function HealthState({ health }: { health: string }) {
 // A term the page cannot avoid, with its explanation one hover away.
 function Term({ children, hint }: { children: React.ReactNode; hint: string }) {
   return (
-    <span className="inline-flex items-center gap-1" title={hint}>
+    <span className="inline-flex items-center gap-1 cursor-help rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1" title={hint} tabIndex={0}>
       {children}
       <HelpCircle className="size-3 shrink-0 text-muted-foreground/60" />
     </span>
