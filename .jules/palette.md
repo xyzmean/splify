@@ -7,3 +7,6 @@
 ## 2026-07-23 - Missing Focus Indicators on Custom Native Buttons
 **Learning:** Found a recurring pattern where custom native `<button>` elements (such as sidebar tabs, toggle switches, and accordion headers) built with Tailwind missed `focus-visible` styling, which severely hinders keyboard accessibility.
 **Action:** When implementing or fixing interactive elements that use bare `<button>` tags rather than a design system's robust `<Button>` component, explicitly add `focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring` (plus offsets where appropriate) to ensure the focus state is clearly communicated to keyboard users.
+## 2026-07-23 - Keyboard Accessible Tooltips
+**Learning:** Found that elements serving as tooltips using the native `title` attribute (like the `Term` component) were not keyboard accessible because they were built on standard `<span>` elements without a `tabIndex`. This meant keyboard users couldn't focus them to hear the tooltip explanation via screen readers or potentially view the native tooltip.
+**Action:** When implementing tooltip elements, even if just using native `title`, ensure they are keyboard focusable by adding `tabIndex={0}` and clearly indicating their interactive nature with `cursor-help` and a `focus-visible` ring.
