@@ -31,7 +31,8 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('status')
   // One data layer for the whole view: a cheap live poll plus cached
   // diagnostics. See lib/useSplifyData.ts for why the read path is split.
-  const data = useSplifyData()
+  // ⚡ Bolt: Only poll when the status tab is active.
+  const data = useSplifyData(tab === 'status')
 
   return (
     <div className="splify-react-root p-1 antialiased text-foreground">

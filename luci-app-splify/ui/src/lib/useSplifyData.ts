@@ -62,7 +62,7 @@ export interface SplifyData {
   afterAction: () => void
 }
 
-export function useSplifyData(): SplifyData {
+export function useSplifyData(active = true): SplifyData {
   const [live, setLive] = useState<Live | null>(null)
   const [status, setStatus] = useState<Status | null>(null)
   const [events, setEvents] = useState<EventRow[]>([])
@@ -229,7 +229,11 @@ export function useSplifyData(): SplifyData {
 
   // Single self-rescheduling timer: no overlapping requests, and it simply
   // stops while the tab is hidden (resuming with an immediate read).
+  // ⚡ Bolt: Also pauses polling when active=false (e.g. background tab) to
+  // eliminate unnecessary React re-renders and router API calls.
   useEffect(() => {
+    if (!active) return
+
     alive.current = true
     let stopped = false
 
@@ -260,7 +264,7 @@ export function useSplifyData(): SplifyData {
     // Mount-only: pullLive/pullSnapshot are stable enough for this purpose and
     // re-subscribing on every render would restart the timer constantly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [active])
 
   // Ask for a fresh sweep. Returns immediately: the request only QUEUES the
   // work on the router (a sweep can take 20s — no browser request should sit on

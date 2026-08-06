@@ -15,3 +15,6 @@
 ## 2024-05-14 - React Code Splitting for Tab Route Components
 **Learning:** In a single-page app containing multiple discrete tools/tabs (like `StatusDashboard`, `WgPanel`, `ApiPanel`), importing all components synchronously bloats the initial bundle. For resource-constrained devices like routers (OpenWrt), reducing initial payload is a measurable win. Code-splitting using `React.lazy` on background tabs successfully breaks these chunks out (e.g. 10KB+ for WgPanel and ApiPanel each).
 **Action:** Use `React.lazy` and `Suspense` for conditional sub-views (like tabs or heavy modals) that aren't visible on the initial render to lower the initial parse/execute time and main bundle size.
+## 2024-08-06 - Stop Polling in Background Tabs
+**Learning:** `useSplifyData` previously executed continuous 1-second UBUS RPC polling via `pullLive` even when users switched away from the "Status" tab to "AmneziaWG" or "Remote control". In a low-power OpenWrt router environment, this wastes scarce CPU/RAM resources on invisible data, leading to unnecessary React re-renders and network traffic.
+**Action:** Always pause data-fetching polling loops when the component displaying the data is not actively visible. Added an `active` boolean flag to `useSplifyData` that early-returns out of the `useEffect` timer if false.
